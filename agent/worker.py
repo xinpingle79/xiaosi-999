@@ -14,6 +14,11 @@ import yaml
 
 APP_NAME = "小四客户端"
 IS_FROZEN = getattr(sys, "frozen", False)
+DEFAULT_SERVER_URL = "http://154.64.255.139:43090"
+LEGACY_SERVER_URLS = {
+    "http://127.0.0.1:43090",
+    "http://localhost:43090",
+}
 
 
 def _find_root_dir():
@@ -33,7 +38,6 @@ if str(ROOT_DIR) not in sys.path:
 ENV_RUNTIME_DIR = "FB_RPA_RUNTIME_DIR"
 ENV_ACTIVATION_CODE = "FB_RPA_ACTIVATION_CODE"
 _RUNTIME_DIR = ""
-DEFAULT_SERVER_URL = "http://127.0.0.1:43090"
 DEFAULT_BIT_API = "http://127.0.0.1:54345"
 DEFAULT_POLL_INTERVAL = 2.0
 
@@ -52,6 +56,14 @@ def _client_config_path() -> Path:
 
 
 CLIENT_CONFIG_PATH = _client_config_path()
+
+
+def _normalize_server_url(server_url):
+    return str(server_url or "").strip().rstrip("/")
+
+
+def _should_migrate_server_url(server_url):
+    return _normalize_server_url(server_url) in LEGACY_SERVER_URLS
 
 
 def _set_runtime_dir(value: str) -> None:
@@ -142,7 +154,18 @@ def _default_machine_id():
 
 def _load_client_config(config_path=None):
     target = Path(config_path) if config_path else CLIENT_CONFIG_PATH
-    return _load_yaml(target)
+    config = _load_yaml(target)
+    if config and _should_migrate_server_url(config.get("server_url") or ""):
+        config["server_url"] = DEFAULT_SERVER_URL
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(
+                yaml.safe_dump(config, allow_unicode=True, sort_keys=False),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+    return config
 
 
 def _refresh_runtime_config(cfg, config_path=None):

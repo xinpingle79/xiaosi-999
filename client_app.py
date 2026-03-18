@@ -13,6 +13,11 @@ import yaml
 from tkinter import messagebox, ttk
 
 APP_NAME = "小四客户端"
+DEFAULT_SERVER_URL = "http://154.64.255.139:43090"
+LEGACY_SERVER_URLS = {
+    "http://127.0.0.1:43090",
+    "http://localhost:43090",
+}
 
 
 def _find_root_dir():
@@ -27,7 +32,6 @@ def _find_root_dir():
 
 ROOT_DIR = _find_root_dir()
 ENV_RUNTIME_DIR = "FB_RPA_RUNTIME_DIR"
-DEFAULT_SERVER_URL = "http://154.64.255.139:43090"
 DEFAULT_BIT_API = "http://127.0.0.1:54345"
 STATUS_REFRESH_MS = 3000
 
@@ -94,6 +98,11 @@ def _default_client_config() -> dict:
     }
 
 
+def _should_migrate_server_url(server_url: str) -> bool:
+    normalized = _normalize_server_url(server_url)
+    return normalized in LEGACY_SERVER_URLS
+
+
 def _deep_merge(base: dict, override: dict) -> dict:
     merged = dict(base)
     for key, value in (override or {}).items():
@@ -112,7 +121,18 @@ def load_client_config() -> dict:
         loaded = yaml.safe_load(CLIENT_CONFIG_PATH.read_text(encoding="utf-8")) or {}
     except Exception:
         return config
-    return _deep_merge(config, loaded)
+    merged = _deep_merge(config, loaded)
+    if _should_migrate_server_url(merged.get("server_url") or ""):
+        merged["server_url"] = DEFAULT_SERVER_URL
+        try:
+            CLIENT_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            CLIENT_CONFIG_PATH.write_text(
+                yaml.safe_dump(merged, allow_unicode=True, sort_keys=False),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+    return merged
 
 
 def save_client_config(data: dict) -> None:
