@@ -465,6 +465,12 @@ button.ghost {
   text-align: center;
 }
 
+.data-table td.copy-cell {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+}
+
 .data-table tbody tr:hover {
   background: #f9fbff;
 }
@@ -479,6 +485,48 @@ button.ghost {
   width: 140px;
   text-align: center;
   white-space: nowrap;
+}
+
+.copyable-cell {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  text-align: left;
+}
+
+.copyable-text {
+  flex: 1;
+  min-width: 0;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+  -webkit-user-select: text;
+  user-select: text;
+  cursor: text;
+}
+
+.copy-btn {
+  flex: 0 0 auto;
+  min-width: 44px;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid #d7dfec;
+  border-radius: 6px;
+  background: #f8fbff;
+  color: #35507a;
+  font-size: 12px;
+  line-height: 26px;
+  cursor: pointer;
+}
+
+.copy-btn:hover {
+  background: #eef4ff;
+  border-color: #c6d5f4;
+}
+
+.copy-btn:active {
+  transform: translateY(1px);
 }
 
 /* 设备管理表格列宽优化 */
@@ -929,6 +977,12 @@ button.ghost {
   word-break: break-word;
   -webkit-user-select: text;
   user-select: text;
+}
+
+input[readonly] {
+  -webkit-user-select: text;
+  user-select: text;
+  cursor: text;
 }
 
 /* hide page scrollbar, keep log scroll */

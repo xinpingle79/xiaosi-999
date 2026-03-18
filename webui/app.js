@@ -173,6 +173,8 @@ if (deviceTableBody) {
 }
 if (deviceInfoTableBody) {
 }
+
+document.addEventListener("click", handleCopyButtonClick);
 async function initializeApp() {
   await loadConfig();
   await refreshStatus();
@@ -831,10 +833,10 @@ function renderDeviceInfoTable(configs) {
       return `
         <tr class="${isDisabled ? "is-disabled" : ""}">
           <td class="col-index">${index + 1}</td>
-          <td>${escapeHtml(displayName)}</td>
-          <td>${escapeHtml(item.machine_id || "-")}</td>
-          <td>${escapeHtml(item.bit_api || "")}</td>
-          <td>${escapeHtml(item.api_token || "")}</td>
+          <td class="copy-cell">${renderCopyCell(displayName, { mono: false })}</td>
+          <td class="copy-cell">${renderCopyCell(item.machine_id || "-")}</td>
+          <td class="copy-cell">${renderCopyCell(item.bit_api || "-")}</td>
+          <td class="copy-cell">${renderCopyCell(item.api_token || "-")}</td>
           <td>${statusText}</td>
         </tr>
       `;
@@ -879,8 +881,8 @@ function renderDeviceTable(agents) {
       return `
         <tr class="${isDisabled ? "is-disabled" : ""}">
           <td class="col-index">${index + 1}</td>
-          <td>${escapeHtml(agent.machine_id || "-")}</td>
-          <td>${escapeHtml(agent.owner || "-")}</td>
+          <td class="copy-cell">${renderCopyCell(agent.machine_id || "-")}</td>
+          <td class="copy-cell">${renderCopyCell(agent.owner || "-", { mono: false })}</td>
           <td>${onlineText}</td>
           <td>${escapeHtml(lastSeenText)}</td>
           <td>${escapeHtml(agent.client_version || "-")}</td>
@@ -935,10 +937,10 @@ function renderUserTable(users, defaults) {
       return `
         <tr class="${rowClass}">
           <td class="col-index">${index + 1}</td>
-          <td>${escapeHtml(user.username || "-")}</td>
+          <td class="copy-cell">${renderCopyCell(user.username || "-", { mono: false })}</td>
           <td>
-            <div class="activation-cell">
-              <span class="mono">${escapeHtml(activationCode)}</span>
+            <div class="activation-cell copy-cell">
+              ${renderCopyCell(activationCode)}
             </div>
           </td>
           <td>${escapeHtml(user.max_devices ?? "-")}</td>
@@ -1144,6 +1146,77 @@ function escapeHtml(value) {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#039;");
+}
+
+function renderCopyCell(value, options = {}) {
+  const text = value === null || value === undefined || value === "" ? "-" : String(value);
+  const monoClass = options.mono === false ? "" : " mono";
+  const safeText = escapeHtml(text);
+  const copyButton = text === "-"
+    ? ""
+    : `
+      <button
+        type="button"
+        class="copy-btn"
+        data-copy-text="${safeText}"
+        title="复制"
+      >复制</button>
+    `;
+  return `
+    <div class="copyable-cell">
+      <span class="copyable-text${monoClass}">${safeText}</span>
+      ${copyButton}
+    </div>
+  `;
+}
+
+async function handleCopyButtonClick(event) {
+  const button = event.target.closest("button[data-copy-text]");
+  if (!button) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const text = button.dataset.copyText || "";
+  if (!text || text === "-") return;
+  const ok = await copyText(text);
+  if (!ok) {
+    showAlert("复制失败，请手动选择文本复制");
+    return;
+  }
+  const original = button.dataset.originalLabel || button.textContent || "复制";
+  button.dataset.originalLabel = original;
+  button.textContent = "已复制";
+  setTimeout(() => {
+    button.textContent = button.dataset.originalLabel || "复制";
+  }, 1200);
+}
+
+async function copyText(text) {
+  const content = String(text || "");
+  if (!content) return false;
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(content);
+      return true;
+    }
+  } catch (error) {
+    // fallback below
+  }
+  try {
+    const temp = document.createElement("textarea");
+    temp.value = content;
+    temp.setAttribute("readonly", "readonly");
+    temp.style.position = "fixed";
+    temp.style.top = "-1000px";
+    temp.style.left = "-1000px";
+    document.body.appendChild(temp);
+    temp.focus();
+    temp.select();
+    const ok = document.execCommand("copy");
+    document.body.removeChild(temp);
+    return ok;
+  } catch (error) {
+    return false;
+  }
 }
 
 window.addEventListener("resize", () => {

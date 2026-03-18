@@ -1,6 +1,6 @@
 client_version: "1.0.0"
 runtime_dir: ""
-server_url: "http://127.0.0.1:43090"
+server_url: "http://154.64.255.139:43090"
 machine_id: ""
 activation_code: ""
 bit_api: "http://127.0.0.1:54345"
