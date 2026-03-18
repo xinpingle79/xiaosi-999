@@ -1,0 +1,37 @@
+client_version: "1.0.0"
+runtime_dir: ""
+server_url: "http://127.0.0.1:43090"
+machine_id: ""
+activation_code: ""
+bit_api: "http://127.0.0.1:54345"
+api_token: "YOUR_BITBROWSER_TOKEN"
+bitbrowser_cdp_connect_retry_count: 120
+bitbrowser_cdp_connect_retry_delay: 0.6
+bitbrowser_cdp_refresh_every: 6
+browser:
+  auto_discover_bitbrowser: true
+task_settings:
+  max_messages_per_account: 0
+  scroll_times: 0
+  cursor_require_found: true
+  group_list_scroll_times: 0
+  idle_scroll_limit: 3
+  account_restricted_blocked_threshold: 2
+  account_restricted_signal_threshold: 3
+  typing_delay:
+  - 100
+  - 300
+  speed_factor: 0.85
+  fast_message_button_only: false
+  force_hover_card: true
+  fast_action_timeout_ms: 2000
+  fast_visible_timeout_ms: 220
+  fast_hover_sleep_ms: 120
+  fast_retry_sleep_ms: 120
+  quick_no_button_precheck: false
+  stranger_limit_cache_ms: 1200
+  send_interval_seconds:
+  - 2
+  - 6
+  max_windows: 0
+  resume_search_times: 20

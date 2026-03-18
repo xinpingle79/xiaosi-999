@@ -1,0 +1,33 @@
+min_client_version: ""
+runtime_dir: ""
+web_ui:
+  host: 0.0.0.0
+  port: 43090
+agent_security:
+  register_token: "CHANGE_ME"
+  token_ttl_seconds: 3600
+  heartbeat_ttl_seconds: 180
+  max_devices_per_account: 1
+  allow_rebind: false
+admin_account:
+  username: admin
+  password: CHANGE_ME
+bit_api: "http://127.0.0.1:54345"
+api_token: "CHANGE_ME"
+browser:
+  auto_discover_bitbrowser: true
+task_settings:
+  max_windows: 0
+  send_interval_seconds:
+  - 60
+  - 120
+  max_messages_per_account: 0
+  scroll_times: 0
+  group_list_scroll_times: 0
+  resume_search_times: 20
+  idle_scroll_limit: 3
+  account_restricted_blocked_threshold: 2
+  account_restricted_signal_threshold: 3
+  typing_delay:
+  - 100
+  - 300

@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>小组私聊助手控制台</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <div id="app-screen" class="screen">
+      <div class="admin-shell">
+        <aside class="sidebar">
+          <div class="brand">
+            <div class="brand-title">管理后台</div>
+            <div class="brand-subtitle">Robot Admin System</div>
+          </div>
+          <nav class="nav">
+            <div class="nav-item" data-page="dashboard" data-title="仪表盘">仪表盘</div>
+            <div class="nav-item" data-page="user" data-title="用户管理">用户管理</div>
+            <div class="nav-item active" data-page="task" data-title="任务管理">任务管理</div>
+            <div class="nav-item" data-page="device" data-title="设备管理">设备管理</div>
+            <div class="nav-item" data-page="template" data-title="文案管理">文案管理</div>
+          </nav>
+        </aside>
+
+        <div class="main">
+          <header class="page-header">
+            <div id="page-title" class="page-title">任务管理</div>
+            <div class="page-actions">
+              <button id="save-btn" class="ghost">保存</button>
+            </div>
+          </header>
+
+          <main class="content">
+            <section class="card dashboard-card" data-page="dashboard">
+              <div class="card-header">
+                <div class="card-title">系统仪表盘</div>
+              </div>
+              <div class="stat-grid stat-grid-admin">
+                <div class="stat-card">
+                  <div class="stat-title">今日新增子账户</div>
+                  <div id="dash-user-today" class="stat-value">0</div>
+                  <div class="stat-meta">
+                    <span id="dash-user-yesterday">昨日新增 0</span>
+                    <span id="dash-user-total">总计 0</span>
+                  </div>
+                </div>
+                <div class="stat-card">
+                  <div class="stat-title">发送数量</div>
+                  <div id="dash-send-today" class="stat-value">0</div>
+                  <div class="stat-meta">
+                    <span id="dash-send-yesterday">昨日 0</span>
+                    <span id="dash-send-total">总计 0</span>
+                  </div>
+                </div>
+                <div class="stat-card">
+                  <div class="stat-title">失败数量</div>
+                  <div id="dash-fail-today" class="stat-value">0</div>
+                  <div class="stat-meta">
+                    <span id="dash-fail-yesterday">昨日 0</span>
+                    <span id="dash-fail-total">总计 0</span>
+                  </div>
+                </div>
+                <div class="stat-card">
+                  <div class="stat-title">成功触达账号数</div>
+                  <div id="dash-active-today" class="stat-value">0</div>
+                  <div class="stat-meta">
+                    <span id="dash-active-yesterday">昨日成功触达 0</span>
+                    <span id="dash-active-total">成功触达总计 0</span>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <section class="card chart-card" data-page="dashboard">
+              <div class="card-header">
+                <div class="card-title">数据趋势（K线风格）</div>
+                <div class="chart-legend">
+                  <span class="dot send"></span>发送
+                  <span class="dot fail"></span>失败
+                  <span class="dot user"></span>触达账号
+                  <span class="dot active"></span>成功触达
+                </div>
+              </div>
+              <div class="chart-frame">
+                <div class="chart-grid"></div>
+                <svg id="trend-chart" class="trend-chart" aria-hidden="true"></svg>
+                <div id="trend-axis" class="chart-axis">
+                  <span>00:00</span>
+                  <span>03:00</span>
+                  <span>06:00</span>
+                  <span>09:00</span>
+                  <span>12:00</span>
+                  <span>15:00</span>
+                  <span>18:00</span>
+                  <span>21:00</span>
+                </div>
+              </div>
+            </section>
+
+            <section class="card control-card" data-page="task">
+              <div class="control-row">
+                <div class="control-actions">
+                  <button id="start-btn" class="primary">启动</button>
+                  <button id="stop-btn" class="danger">停止</button>
+                  <button id="pause-btn" class="ghost">暂停</button>
+                  <button id="resume-btn" class="ghost">继续</button>
+                </div>
+                <div class="control-group">
+                  <label class="inline-label" for="max-windows">窗口数量</label>
+                  <input id="max-windows" class="mini-inline-input" type="number" min="0" />
+                  <label class="inline-label" for="restart-window-token">窗口号</label>
+                  <input
+                    id="restart-window-token"
+                    class="mini-inline-input window-inline-input"
+                    type="text"
+                  />
+                  <button id="restart-window-btn" class="primary">单独启动</button>
+                </div>
+              </div>
+            </section>
+
+            <section class="card log-card" data-page="task">
+              <div class="log-summary">
+                <div class="summary-item">
+                  <span class="summary-label">运行账号数量</span>
+                  <strong id="log-active-count" class="summary-value">0</strong>
+                </div>
+                <div class="summary-item">
+                  <span class="summary-label">正在运行窗口数</span>
+                  <strong id="log-window-count" class="summary-value">0</strong>
+                </div>
+                <div class="summary-item">
+                  <span class="summary-label">发送数量</span>
+                  <strong id="log-sent-count" class="summary-value">0</strong>
+                </div>
+                <div class="summary-item">
+                  <span class="summary-label">失败数量</span>
+                  <strong id="log-failed-count" class="summary-value">0</strong>
+                </div>
+              </div>
+              <div class="card-header">
+                <div class="card-title">实时日志</div>
+              </div>
+              <pre id="log-output"></pre>
+            </section>
+
+            <section class="card" data-page="template">
+              <div class="card-header">
+                <div class="card-title">发送文本</div>
+              </div>
+              <div class="form-field full">
+                <textarea id="templates" rows="10"></textarea>
+              </div>
+            </section>
+
+            <section class="card user-card" data-page="user">
+              <div class="card-header">
+                <div class="card-title">用户管理</div>
+                <div class="card-actions">
+                  <button id="add-user-btn" class="primary">添加用户</button>
+                </div>
+              </div>
+              <div class="table-wrap">
+                <table class="data-table">
+                  <thead>
+                    <tr>
+                      <th class="col-index">序号</th>
+                      <th>用户名</th>
+                      <th>授权码</th>
+                      <th>设备数量</th>
+                      <th>到期时间</th>
+                      <th>天数</th>
+                      <th>创建时间</th>
+                      <th class="col-actions">操作</th>
+                    </tr>
+                  </thead>
+                  <tbody id="user-table-body">
+                    <tr class="empty-row">
+                      <td colspan="8">暂无数据</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </section>
+
+            <section class="card device-card" data-page="device">
+              <div class="card-header">
+                <div class="card-title">设备管理</div>
+              </div>
+              <div class="table-wrap">
+                <table class="data-table">
+                  <thead>
+                    <tr>
+                      <th class="col-index">序号</th>
+                      <th>设备ID</th>
+                      <th>归属账号</th>
+                      <th>在线状态</th>
+                      <th>最后心跳</th>
+                      <th>客户端版本</th>
+                      <th>状态</th>
+                      <th class="col-actions">操作</th>
+                    </tr>
+                  </thead>
+                  <tbody id="device-table-body">
+                    <tr class="empty-row">
+                      <td colspan="8">暂无数据</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          </main>
+        </div>
+      </div>
+    </div>
+
+    <div id="user-modal" class="modal hidden" aria-hidden="true">
+      <div class="modal-backdrop"></div>
+      <div class="modal-card">
+        <div class="modal-header">
+          <div id="user-modal-title" class="modal-title">添加用户</div>
+          <button id="user-modal-toggle" class="action-btn danger hidden">禁用</button>
+        </div>
+        <div class="modal-body">
+          <div class="modal-field">
+            <label>用户名</label>
+            <input id="user-modal-username" type="text" placeholder="请输入用户名" />
+          </div>
+          <div class="modal-field">
+            <label>密码</label>
+            <input id="user-modal-password" type="password" placeholder="请输入密码" />
+          </div>
+          <div class="modal-field">
+            <label>设备数量</label>
+            <input id="user-modal-max-devices" type="number" min="0" placeholder="例如 1" />
+          </div>
+          <div class="modal-field">
+            <label>租期选择</label>
+            <select id="user-modal-plan">
+              <option value="">请选择租期</option>
+              <option value="1">1 个月</option>
+              <option value="3">3 个月</option>
+              <option value="6">6 个月</option>
+              <option value="12">12 个月</option>
+            </select>
+          </div>
+          <div class="modal-field">
+            <label>当前到期时间</label>
+            <input id="user-modal-expire-display" type="text" disabled />
+          </div>
+          <div id="user-modal-error" class="modal-error hidden"></div>
+        </div>
+        <div class="modal-actions">
+          <button id="user-modal-cancel" class="ghost">取消</button>
+          <button id="user-modal-save" class="primary">保存</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="alert-modal" class="modal hidden" aria-hidden="true">
+      <div class="modal-backdrop"></div>
+      <div class="modal-card">
+        <div id="alert-title" class="modal-title">提示</div>
+        <div id="alert-body" class="modal-body"></div>
+        <div class="modal-actions">
+          <button id="alert-ok" class="primary">确定</button>
+        </div>
+      </div>
+    </div>
+    <div id="confirm-modal" class="modal hidden" aria-hidden="true">
+      <div class="modal-backdrop"></div>
+      <div class="modal-card">
+        <div id="confirm-title" class="modal-title">确认</div>
+        <div id="confirm-body" class="modal-body"></div>
+        <div class="modal-actions">
+          <button id="confirm-cancel" class="ghost">取消</button>
+          <button id="confirm-ok" class="primary">确定</button>
+        </div>
+      </div>
+    </div>
+    <div id="prompt-modal" class="modal hidden" aria-hidden="true">
+      <div class="modal-backdrop"></div>
+      <div class="modal-card">
+        <div id="prompt-title" class="modal-title">输入</div>
+        <div class="modal-body">
+          <div id="prompt-body" class="modal-field"></div>
+          <div class="modal-field">
+            <label>请输入</label>
+            <input id="prompt-input" type="text" />
+          </div>
+        </div>
+        <div class="modal-actions">
+          <button id="prompt-cancel" class="ghost">取消</button>
+          <button id="prompt-ok" class="primary">确定</button>
+        </div>
+      </div>
+    </div>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
