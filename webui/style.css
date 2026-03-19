@@ -431,7 +431,8 @@ button.ghost {
 }
 
 .table-wrap {
-  overflow-x: scroll;
+  overflow-x: auto;
+  overflow-y: hidden;
 }
 
 .data-table {
@@ -489,14 +490,14 @@ button.ghost {
 
 .copyable-cell {
   display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 8px;
-  text-align: left;
+  align-items: center;
+  justify-content: center;
+  gap: 0;
+  text-align: center;
 }
 
 .copyable-text {
-  flex: 1;
+  flex: 0 1 auto;
   min-width: 0;
   line-height: 1.45;
   overflow-wrap: anywhere;
@@ -504,6 +505,7 @@ button.ghost {
   -webkit-user-select: text;
   user-select: text;
   cursor: text;
+  text-align: center;
 }
 
 .copy-btn {
@@ -529,63 +531,122 @@ button.ghost {
   transform: translateY(1px);
 }
 
-/* 设备管理表格列宽优化 */
-.device-card .table-wrap {
-  overflow-x: hidden;
+/* 设备相关表格：完整单行显示，内容过长时走横向滚动，不再截断换行 */
+.data-table.table-nowrap {
+  width: max-content;
+  min-width: 100%;
+  table-layout: auto;
 }
 
-.device-card .data-table {
+.data-table.table-nowrap th,
+.data-table.table-nowrap td,
+.data-table.table-nowrap td.copy-cell {
+  white-space: nowrap;
+  overflow: visible;
+  text-overflow: clip;
+}
+
+.data-table.table-nowrap .copyable-cell {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0;
+  flex-wrap: nowrap;
+  min-width: max-content;
+  text-align: center;
+}
+
+.data-table.table-nowrap .copyable-text {
+  flex: 0 0 auto;
   min-width: 0;
-  table-layout: fixed;
+  line-height: 1.4;
+  white-space: nowrap;
+  overflow-wrap: normal;
+  word-break: normal;
+  text-align: center;
+}
+
+.data-table.table-nowrap .col-actions {
+  min-width: 170px;
+  width: 170px;
+}
+
+.data-table.table-nowrap .action-btn {
+  white-space: nowrap;
 }
 
 .device-card .data-table th:nth-child(1),
 .device-card .data-table td:nth-child(1) {
-  width: 6%;
+  width: 61px;
+  min-width: 61px;
 }
 
 .device-card .data-table th:nth-child(2),
 .device-card .data-table td:nth-child(2) {
-  width: 42%;
-  overflow: visible;
-  text-overflow: clip;
-  white-space: nowrap;
+  width: 370px;
+  min-width: 370px;
 }
 
 .device-card .data-table th:nth-child(3),
 .device-card .data-table td:nth-child(3) {
-  width: 11%;
+  width: 111px;
+  min-width: 111px;
 }
 
 .device-card .data-table th:nth-child(4),
 .device-card .data-table td:nth-child(4) {
-  width: 7%;
+  width: 111px;
+  min-width: 111px;
 }
 
 .device-card .data-table th:nth-child(5),
 .device-card .data-table td:nth-child(5) {
-  width: 13%;
+  width: 198px;
+  min-width: 198px;
 }
 
 .device-card .data-table th:nth-child(6),
 .device-card .data-table td:nth-child(6) {
-  width: 3%;
+  width: 130px;
+  min-width: 130px;
 }
 
 .device-card .data-table th:nth-child(7),
 .device-card .data-table td:nth-child(7) {
-  width: 4%;
-}
-
-.device-card .data-table th:nth-child(8),
-.device-card .data-table td:nth-child(8) {
-  width: 14%;
+  width: 73px;
+  min-width: 73px;
 }
 
 .device-card .col-actions .action-btn.danger {
   font-size: 15px;
   line-height: 1;
   padding: 2px 10px;
+}
+
+.device-card .data-table .col-actions {
+  min-width: 170px;
+  width: 170px;
+}
+
+.device-card .data-table td.copy-cell {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.device-card .copyable-cell {
+  display: block;
+  width: 100%;
+}
+
+.device-card .copyable-text {
+  display: block;
+  width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  overflow-wrap: normal;
+  word-break: normal;
 }
 
 /* 子账户设备信息页顶部留白与设备管理一致 */
@@ -599,35 +660,90 @@ button.ghost {
   margin-bottom: 8px;
 }
 
-/* 子账户设备信息表格列宽 */
+/* 设备信息表格列宽：兼容总后台与子后台 */
 .card[data-page="device-info"] .data-table th:nth-child(1),
 .card[data-page="device-info"] .data-table td:nth-child(1) {
-  width: 8%;
+  width: auto;
+  min-width: 72px;
 }
 
 .card[data-page="device-info"] .data-table th:nth-child(2),
 .card[data-page="device-info"] .data-table td:nth-child(2) {
-  width: 18%;
+  width: auto;
+  min-width: 160px;
 }
 
 .card[data-page="device-info"] .data-table th:nth-child(3),
 .card[data-page="device-info"] .data-table td:nth-child(3) {
-  width: 24%;
+  width: auto;
+  min-width: 280px;
 }
 
 .card[data-page="device-info"] .data-table th:nth-child(4),
 .card[data-page="device-info"] .data-table td:nth-child(4) {
-  width: 24%;
+  width: auto;
+  min-width: 260px;
 }
 
 .card[data-page="device-info"] .data-table th:nth-child(5),
 .card[data-page="device-info"] .data-table td:nth-child(5) {
-  width: 10%;
+  width: auto;
+  min-width: 240px;
 }
 
 .card[data-page="device-info"] .data-table th:nth-child(6),
 .card[data-page="device-info"] .data-table td:nth-child(6) {
-  width: 16%;
+  width: auto;
+  min-width: 240px;
+}
+
+.card[data-page="device-info"] .data-table th:nth-child(7),
+.card[data-page="device-info"] .data-table td:nth-child(7) {
+  width: auto;
+  min-width: 110px;
+}
+
+.card[data-page="device-info"] .data-table th:nth-child(8),
+.card[data-page="device-info"] .data-table td:nth-child(8) {
+  width: auto;
+  min-width: 170px;
+}
+
+.card[data-page="device-info"] .data-table th:nth-child(9),
+.card[data-page="device-info"] .data-table td:nth-child(9) {
+  width: auto;
+  min-width: 130px;
+}
+
+.card[data-page="device-info"] .data-table th:nth-child(10),
+.card[data-page="device-info"] .data-table td:nth-child(10) {
+  width: auto;
+  min-width: 100px;
+}
+
+.sub-device-info-card .data-table th:nth-child(2),
+.sub-device-info-card .data-table td:nth-child(2) {
+  min-width: 130px;
+}
+
+.sub-device-info-card .data-table th:nth-child(3),
+.sub-device-info-card .data-table td:nth-child(3) {
+  min-width: 250px;
+}
+
+.sub-device-info-card .data-table th:nth-child(4),
+.sub-device-info-card .data-table td:nth-child(4) {
+  min-width: 230px;
+}
+
+.sub-device-info-card .data-table th:nth-child(5),
+.sub-device-info-card .data-table td:nth-child(5) {
+  min-width: 360px;
+}
+
+.sub-device-info-card .data-table th:nth-child(6),
+.sub-device-info-card .data-table td:nth-child(6) {
+  min-width: 90px;
 }
 
 .data-table .col-actions .action-btn {

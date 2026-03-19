@@ -956,6 +956,16 @@ class Database:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def list_all_device_configs(self):
+        rows = self.conn.execute(
+            """
+            SELECT id, owner, name, machine_id, bit_api, api_token, status, created_at, updated_at
+            FROM device_configs
+            ORDER BY owner ASC, id ASC
+            """
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def add_device_config(self, owner, name, machine_id, bit_api, api_token, status=1):
         owner = (owner or "").strip()
         if not owner:

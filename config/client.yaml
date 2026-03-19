@@ -2,7 +2,8 @@ client_version: "1.0.0"
 runtime_dir: ""
 server_url: "http://154.64.255.139:43090"
 machine_id: ""
-activation_code: ""
+agent_token: ""
+token_expires_at: null
 bit_api: http://127.0.0.1:54345
 api_token: "CHANGE_ME"
 bitbrowser_cdp_connect_retry_count: 120

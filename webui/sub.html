@@ -3,16 +3,15 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>子账户控制台</title>
-    <link rel="stylesheet" href="/style.css" />
+    <title>客户管理</title>
+    <link rel="stylesheet" href="/style.css?v=20260319b" />
   </head>
   <body>
     <div id="app-screen" class="screen">
       <div class="admin-shell">
         <aside class="sidebar">
           <div class="brand">
-            <div class="brand-title">子账户控制台</div>
-            <div class="brand-subtitle">Sub Account Console</div>
+            <div class="brand-title">客户管理</div>
           </div>
           <nav class="nav">
             <div class="nav-item" data-page="dashboard" data-title="仪表盘">仪表盘</div>
@@ -164,7 +163,7 @@
                 <div class="card-title">设备管理</div>
               </div>
               <div class="table-wrap">
-                <table class="data-table">
+                <table class="data-table table-nowrap">
                   <thead>
                     <tr>
                       <th class="col-index">序号</th>
@@ -182,12 +181,12 @@
               </div>
             </section>
 
-            <section class="card" data-page="device-info">
+            <section class="card sub-device-info-card" data-page="device-info">
               <div class="card-header">
                 <div class="card-title">设备信息</div>
               </div>
               <div class="table-wrap">
-                <table class="data-table">
+                <table class="data-table table-nowrap">
                   <thead>
                     <tr>
                       <th class="col-index">序号</th>
@@ -244,6 +243,6 @@
         </div>
       </div>
     </div>
-    <script src="/app.js"></script>
+    <script src="/app.js?v=20260319b"></script>
   </body>
 </html>

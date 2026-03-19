@@ -43,6 +43,7 @@ const userModalToggle = document.getElementById("user-modal-toggle");
 let lastTrend = null;
 let lastUserPayload = null;
 let logUserInteracting = false;
+let tableUserInteracting = false;
 let dashboardLabelsReady = false;
 
 function isLogSelectionActive() {
@@ -94,8 +95,6 @@ const ERROR_I18N = {
   missing_machine_id: "缺少设备标识",
   missing_id: "缺少必要参数",
   missing_fields: "参数不完整",
-  server_register_token_not_set: "服务端未配置注册令牌",
-  invalid_register_token: "注册令牌无效",
   missing_owner: "缺少账号信息",
   owner_not_found: "账号不存在",
   owner_disabled: "账号已禁用",
@@ -171,10 +170,46 @@ if (userTableBody) {
 if (deviceTableBody) {
   deviceTableBody.addEventListener("click", handleDeviceTableClick);
 }
-if (deviceInfoTableBody) {
+const tableSelectionRoots = [userTableBody, deviceTableBody, deviceInfoTableBody].filter(Boolean);
+
+function isTableSelectionActive() {
+  const selection = window.getSelection();
+  if (!selection || selection.rangeCount === 0) return false;
+  if (!selection.toString().length) return false;
+  const anchor = selection.anchorNode;
+  const focus = selection.focusNode;
+  return tableSelectionRoots.some(
+    (root) =>
+      (anchor && root.contains(anchor)) ||
+      (focus && root.contains(focus))
+  );
 }
 
-document.addEventListener("click", handleCopyButtonClick);
+function stopTableInteracting() {
+  if (!isTableSelectionActive()) {
+    tableUserInteracting = false;
+  }
+}
+
+tableSelectionRoots.forEach((root) => {
+  root.addEventListener("mousedown", () => {
+    tableUserInteracting = true;
+  });
+  root.addEventListener("mouseup", () => {
+    setTimeout(stopTableInteracting, 0);
+  });
+  root.addEventListener("mouseleave", stopTableInteracting);
+  root.addEventListener(
+    "touchstart",
+    () => {
+      tableUserInteracting = true;
+    },
+    { passive: true }
+  );
+  root.addEventListener("touchend", () => {
+    setTimeout(stopTableInteracting, 0);
+  });
+});
 async function initializeApp() {
   await loadConfig();
   await refreshStatus();
@@ -539,13 +574,17 @@ async function refreshStatus() {
   if (dashFailYesterday) dashFailYesterday.textContent = `昨日 ${dbStats.failed_yesterday ?? 0}`;
   if (dashFailTotal) dashFailTotal.textContent = `总计 ${dbStats.failed_total ?? 0}`;
   if (IS_SUB) {
-    const deviceOnline = Number(dbStats.device_online ?? 0);
-    const maxDevices = dbStats.max_devices;
-    const maxLabel =
-      maxDevices === null || maxDevices === undefined || maxDevices === ""
-        ? "-"
-        : String(maxDevices);
-    if (dashUserToday) dashUserToday.textContent = `${deviceOnline} / ${maxLabel}`;
+    const summaryResponse = await api("/device_summary");
+    if (summaryResponse.ok) {
+      const summary = summaryResponse.data || {};
+      const onlineDevices = Number(summary.online_devices ?? 0);
+      const maxDevices = summary.max_devices;
+      const maxLabel =
+        maxDevices === null || maxDevices === undefined || maxDevices === ""
+          ? "-"
+          : String(maxDevices);
+      if (dashUserToday) dashUserToday.textContent = `${onlineDevices} / ${maxLabel}`;
+    }
     if (dashUserYesterday)
       dashUserYesterday.textContent = `昨日在线 ${dbStats.device_yesterday ?? 0}`;
     if (dashUserTotal)
@@ -788,6 +827,9 @@ async function refreshUsers() {
   if (!userTableBody || IS_SUB) {
     return;
   }
+  if (tableUserInteracting || isTableSelectionActive()) {
+    return;
+  }
   const response = await api("/users");
   if (!response.ok) return;
   const payload = response.data || {};
@@ -799,6 +841,9 @@ async function refreshDevices() {
   if (!deviceTableBody) {
     return;
   }
+  if (tableUserInteracting || isTableSelectionActive()) {
+    return;
+  }
   const response = await api("/agent/list");
   if (!response.ok) return;
   const payload = response.data || {};
@@ -807,6 +852,9 @@ async function refreshDevices() {
 
 async function refreshDeviceInfo() {
   if (!deviceInfoTableBody) return;
+  if (tableUserInteracting || isTableSelectionActive()) {
+    return;
+  }
   const response = await api("/device-info");
   if (!response.ok) return;
   const payload = response.data || {};
@@ -816,10 +864,18 @@ async function refreshDeviceInfo() {
 function renderDeviceInfoTable(configs) {
   if (!deviceInfoTableBody) return;
   const rows = Array.isArray(configs) ? configs : [];
+  const isAdminView = !IS_SUB;
+  rows.sort((a, b) => {
+    const left = `${a.owner || ""}\u0000${a.name || ""}\u0000${a.machine_id || ""}`;
+    const right = `${b.owner || ""}\u0000${b.name || ""}\u0000${b.machine_id || ""}`;
+    if (left < right) return -1;
+    if (left > right) return 1;
+    return 0;
+  });
   if (!rows.length) {
     deviceInfoTableBody.innerHTML = `
       <tr class="empty-row">
-        <td colspan="5">暂无数据</td>
+        <td colspan="${isAdminView ? 8 : 6}">暂无数据</td>
       </tr>
     `;
     return;
@@ -830,6 +886,22 @@ function renderDeviceInfoTable(configs) {
       const isDisabled = status === 0;
       const statusText = isDisabled ? "禁用" : "启用";
       const displayName = item.name || item.machine_id || "-";
+      const onlineText = item.online ? "在线" : "离线";
+      const lastSeenText = item.last_seen ? formatTimestamp(item.last_seen) : "-";
+      if (isAdminView) {
+        return `
+          <tr class="${isDisabled ? "is-disabled" : ""}">
+            <td class="col-index">${index + 1}</td>
+            <td class="copy-cell">${renderCopyCell(item.owner || "-", { mono: false })}</td>
+            <td class="copy-cell">${renderCopyCell(displayName, { mono: false })}</td>
+            <td class="copy-cell">${renderCopyCell(item.machine_id || "-")}</td>
+            <td class="copy-cell">${renderCopyCell(item.bit_api || "-")}</td>
+            <td class="copy-cell">${renderCopyCell(item.api_token || "-")}</td>
+            <td>${onlineText}</td>
+            <td>${escapeHtml(lastSeenText)}</td>
+          </tr>
+        `;
+      }
       return `
         <tr class="${isDisabled ? "is-disabled" : ""}">
           <td class="col-index">${index + 1}</td>
@@ -1152,71 +1224,11 @@ function renderCopyCell(value, options = {}) {
   const text = value === null || value === undefined || value === "" ? "-" : String(value);
   const monoClass = options.mono === false ? "" : " mono";
   const safeText = escapeHtml(text);
-  const copyButton = text === "-"
-    ? ""
-    : `
-      <button
-        type="button"
-        class="copy-btn"
-        data-copy-text="${safeText}"
-        title="复制"
-      >复制</button>
-    `;
   return `
     <div class="copyable-cell">
       <span class="copyable-text${monoClass}">${safeText}</span>
-      ${copyButton}
     </div>
   `;
-}
-
-async function handleCopyButtonClick(event) {
-  const button = event.target.closest("button[data-copy-text]");
-  if (!button) return;
-  event.preventDefault();
-  event.stopPropagation();
-  const text = button.dataset.copyText || "";
-  if (!text || text === "-") return;
-  const ok = await copyText(text);
-  if (!ok) {
-    showAlert("复制失败，请手动选择文本复制");
-    return;
-  }
-  const original = button.dataset.originalLabel || button.textContent || "复制";
-  button.dataset.originalLabel = original;
-  button.textContent = "已复制";
-  setTimeout(() => {
-    button.textContent = button.dataset.originalLabel || "复制";
-  }, 1200);
-}
-
-async function copyText(text) {
-  const content = String(text || "");
-  if (!content) return false;
-  try {
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      await navigator.clipboard.writeText(content);
-      return true;
-    }
-  } catch (error) {
-    // fallback below
-  }
-  try {
-    const temp = document.createElement("textarea");
-    temp.value = content;
-    temp.setAttribute("readonly", "readonly");
-    temp.style.position = "fixed";
-    temp.style.top = "-1000px";
-    temp.style.left = "-1000px";
-    document.body.appendChild(temp);
-    temp.focus();
-    temp.select();
-    const ok = document.execCommand("copy");
-    document.body.removeChild(temp);
-    return ok;
-  } catch (error) {
-    return false;
-  }
 }
 
 window.addEventListener("resize", () => {

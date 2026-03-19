@@ -38,7 +38,7 @@ jobs:
       - name: Build Client
         shell: pwsh
         run: |
-          python -m PyInstaller --noconfirm --clean --windowed --onefile --name FB_RPA_Client client_app.py
+          python -m PyInstaller --noconfirm --clean --windowed --onefile --name FB_RPA_Client --icon assets/fb_chat_helper.ico client_app.py
 
       - name: Build Desktop Alert
         shell: pwsh

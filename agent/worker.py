@@ -8,6 +8,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
+from urllib.parse import urlparse
 
 import requests
 import yaml
@@ -15,10 +16,6 @@ import yaml
 APP_NAME = "小四客户端"
 IS_FROZEN = getattr(sys, "frozen", False)
 DEFAULT_SERVER_URL = "http://154.64.255.139:43090"
-LEGACY_SERVER_URLS = {
-    "http://127.0.0.1:43090",
-    "http://localhost:43090",
-}
 
 
 def _find_root_dir():
@@ -36,7 +33,6 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 ENV_RUNTIME_DIR = "FB_RPA_RUNTIME_DIR"
-ENV_ACTIVATION_CODE = "FB_RPA_ACTIVATION_CODE"
 _RUNTIME_DIR = ""
 DEFAULT_BIT_API = "http://127.0.0.1:54345"
 DEFAULT_POLL_INTERVAL = 2.0
@@ -63,7 +59,15 @@ def _normalize_server_url(server_url):
 
 
 def _should_migrate_server_url(server_url):
-    return _normalize_server_url(server_url) in LEGACY_SERVER_URLS
+    normalized = _normalize_server_url(server_url)
+    if not normalized:
+        return False
+    parsed = urlparse(normalized)
+    host = str(parsed.hostname or "").strip().lower()
+    port = parsed.port
+    if port is None:
+        port = 80 if parsed.scheme == "http" else 443 if parsed.scheme == "https" else None
+    return parsed.scheme == "http" and port == 43090 and host in {"127.0.0.1", "localhost"}
 
 
 def _set_runtime_dir(value: str) -> None:
@@ -85,10 +89,6 @@ def _runtime_dir() -> Path:
 
 def _runtime_path(*parts: str) -> Path:
     return _runtime_dir().joinpath(*parts)
-
-
-def _state_path() -> Path:
-    return _runtime_path("agent", "worker_state.json")
 
 
 def _license_path() -> Path:
@@ -134,7 +134,15 @@ def _load_yaml(path):
 
 
 def _load_license():
-    return _load_json(_license_path())
+    data = _load_json(_license_path())
+    cleaned = {
+        "owner": data.get("owner") or "",
+        "expire_at": data.get("expire_at"),
+        "max_devices": data.get("max_devices"),
+    }
+    if cleaned != data:
+        _save_license(cleaned)
+    return cleaned
 
 
 def _save_json(path, data):
@@ -143,7 +151,12 @@ def _save_json(path, data):
 
 
 def _save_license(data):
-    _save_json(_license_path(), data)
+    cleaned = {
+        "owner": (data or {}).get("owner") or "",
+        "expire_at": (data or {}).get("expire_at"),
+        "max_devices": (data or {}).get("max_devices"),
+    }
+    _save_json(_license_path(), cleaned)
 
 
 def _default_machine_id():
@@ -155,8 +168,22 @@ def _default_machine_id():
 def _load_client_config(config_path=None):
     target = Path(config_path) if config_path else CLIENT_CONFIG_PATH
     config = _load_yaml(target)
-    if config and _should_migrate_server_url(config.get("server_url") or ""):
+    if not config:
+        return {}
+    changed = False
+    if _should_migrate_server_url(config.get("server_url") or ""):
         config["server_url"] = DEFAULT_SERVER_URL
+        changed = True
+    for key in ("activation_code", "register_token", "owner", "expire_at", "max_devices"):
+        if key in config:
+            config.pop(key, None)
+            changed = True
+    if "agent_token" in config:
+        config["agent_token"] = str(config.get("agent_token") or "").strip()
+    if config.get("token_expires_at") in ("", []):
+        config["token_expires_at"] = None
+        changed = True
+    if changed:
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(
@@ -188,12 +215,11 @@ def _refresh_runtime_config(cfg, config_path=None):
     api_token = str(config.get("api_token") or "").strip()
     if api_token:
         cfg["api_token"] = api_token
-    activation_code = str(config.get("activation_code") or "").strip()
-    if activation_code:
-        cfg["activation_code"] = activation_code
     machine_id = str(config.get("machine_id") or "").strip()
     if machine_id:
         cfg["machine_id"] = machine_id
+    cfg["agent_token"] = str(config.get("agent_token") or "").strip()
+    cfg["token_expires_at"] = config.get("token_expires_at")
     client_version = str(config.get("client_version") or "").strip()
     if client_version:
         cfg["client_version"] = client_version
@@ -226,12 +252,6 @@ def _build_config(args):
         or config.get("api_token")
         or ""
     )
-    register_token = (
-        args.register_token
-        or os.environ.get("FB_RPA_AGENT_REGISTER_TOKEN")
-        or license_data.get("register_token")
-        or ""
-    )
     owner = (
         args.owner
         or os.environ.get("FB_RPA_AGENT_OWNER")
@@ -261,38 +281,18 @@ def _build_config(args):
     client_version = (
         os.environ.get("FB_RPA_CLIENT_VERSION")
         or config.get("client_version")
-        or license_data.get("client_version")
-        or ""
-    )
-    state = _load_json(_state_path())
-    activation_code = (
-        args.activation_code
-        or os.environ.get(ENV_ACTIVATION_CODE)
-        or config.get("activation_code")
-        or state.get("activation_code")
         or ""
     )
     machine_id = (
         args.machine_id
         or os.environ.get("FB_RPA_AGENT_ID")
         or config.get("machine_id")
-        or state.get("machine_id")
         or _default_machine_id()
     )
-    state["machine_id"] = machine_id
-    if activation_code:
-        state["activation_code"] = activation_code
-    if "agent_token" in state:
-        config["agent_token"] = state.get("agent_token")
-    if "token_expires_at" in state:
-        config["token_expires_at"] = state.get("token_expires_at")
-    if "owner" in state and not owner:
-        owner = state.get("owner") or ""
     if license_data.get("expire_at") is not None:
         config["expire_at"] = license_data.get("expire_at")
     if license_data.get("max_devices") is not None:
         config["max_devices"] = license_data.get("max_devices")
-    _save_json(_state_path(), state)
     return {
         "server_url": server_url.rstrip("/"),
         "bit_api": bit_api,
@@ -300,12 +300,10 @@ def _build_config(args):
         "label": label,
         "poll_interval": poll_interval,
         "machine_id": machine_id,
-        "register_token": register_token,
         "owner": owner,
-        "activation_code": activation_code,
         "runtime_dir": runtime_dir,
         "client_version": client_version,
-        "agent_token": config.get("agent_token") or "",
+        "agent_token": str(config.get("agent_token") or "").strip(),
         "token_expires_at": config.get("token_expires_at"),
         "expire_at": config.get("expire_at"),
         "max_devices": config.get("max_devices"),
@@ -328,30 +326,26 @@ def _post_agent_json(cfg, url, payload, timeout=10):
     return _post_json(url, base, timeout=timeout)
 
 
-def _register_agent(cfg):
-    payload = {
-        "machine_id": cfg["machine_id"],
-        "label": cfg["label"],
-        "mode": "worker",
-        "owner": cfg.get("owner") or "",
-        "client_version": cfg.get("client_version") or "",
-        "bit_api": cfg.get("bit_api") or "",
-        "api_token": cfg.get("api_token") or "",
-    }
-    if cfg.get("register_token"):
-        payload["register_token"] = cfg.get("register_token")
-    _, data = _post_json(f"{cfg['server_url']}/api/agent/register", payload)
-    if isinstance(data, dict) and data.get("ok"):
-        info = data.get("data") or {}
-        cfg["agent_token"] = str(info.get("agent_token") or "")
-        cfg["token_expires_at"] = info.get("token_expires_at")
-        state = _load_json(_state_path())
-        state["agent_token"] = cfg.get("agent_token")
-        state["token_expires_at"] = cfg.get("token_expires_at")
-        if cfg.get("owner"):
-            state["owner"] = cfg.get("owner")
-        _save_json(_state_path(), state)
-    return data
+def _persist_client_auth(config_path=None, agent_token="", token_expires_at=None):
+    target = Path(config_path) if config_path else CLIENT_CONFIG_PATH
+    config = _load_client_config(target)
+    if not config:
+        config = {}
+    config["agent_token"] = str(agent_token or "").strip()
+    config["token_expires_at"] = token_expires_at
+    for key in ("activation_code", "register_token", "owner", "expire_at", "max_devices"):
+        config.pop(key, None)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        yaml.safe_dump(config, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+
+
+def _clear_runtime_auth(cfg, config_path=None):
+    cfg["agent_token"] = ""
+    cfg["token_expires_at"] = None
+    _persist_client_auth(config_path=config_path, agent_token="", token_expires_at=None)
 
 
 def _license_expired(expire_at):
@@ -363,101 +357,18 @@ def _license_expired(expire_at):
         return False
 
 
-def _is_placeholder_activation_code(code):
-    return str(code or "").strip().upper() in ("", "CHANGE_ME")
-
-
-def _prompt_activation_code():
-    try:
-        import tkinter as tk
-        from tkinter import simpledialog
-
-        root = tk.Tk()
-        root.withdraw()
-        try:
-            root.attributes("-topmost", True)
-        except Exception:
-            pass
-        code = simpledialog.askstring("激活", "请输入授权码")
-        try:
-            root.destroy()
-        except Exception:
-            pass
-        return (code or "").strip()
-    except Exception:
-        try:
-            return input("请输入授权码：").strip()
-        except Exception:
-            return ""
-
-
-def _activate_client(cfg, activation_code):
-    payload = {
-        "activation_code": activation_code,
-        "machine_id": cfg.get("machine_id") or "",
-        "client_version": cfg.get("client_version") or "",
-    }
-    _, data = _post_json(f"{cfg['server_url']}/api/client/activate", payload, timeout=15)
-    if not isinstance(data, dict) or not data.get("ok"):
-        return data
-    info = data.get("data") or {}
-    license_data = {
-        "owner": info.get("owner") or "",
-        "register_token": info.get("register_token") or "",
-        "expire_at": info.get("expire_at"),
-        "max_devices": info.get("max_devices"),
-    }
-    _save_license(license_data)
-    cfg["owner"] = license_data.get("owner") or cfg.get("owner")
-    cfg["register_token"] = license_data.get("register_token") or cfg.get("register_token")
-    cfg["expire_at"] = license_data.get("expire_at")
-    cfg["max_devices"] = license_data.get("max_devices")
-    cfg["activation_code"] = activation_code
-    state = _load_json(_state_path())
-    state["activation_code"] = activation_code
-    if cfg.get("owner"):
-        state["owner"] = cfg.get("owner")
-    _save_json(_state_path(), state)
-    return data
-
-
-def _ensure_activation(cfg):
-    license_data = _load_license()
-    if license_data:
-        cfg["owner"] = license_data.get("owner") or cfg.get("owner")
-        cfg["register_token"] = license_data.get("register_token") or cfg.get("register_token")
-        cfg["expire_at"] = license_data.get("expire_at")
-        cfg["max_devices"] = license_data.get("max_devices")
-        if _license_expired(cfg.get("expire_at")):
-            print("账号已到期，请联系管理员续费")
-            return False
-        if str(cfg.get("activation_code") or "").strip():
-            return True
-
-    activation_code = str(cfg.get("activation_code") or "").strip()
-    if _is_placeholder_activation_code(activation_code):
-        activation_code = ""
-    if not activation_code:
-        activation_code = _prompt_activation_code()
-        if not activation_code:
-            print("未输入授权码，无法继续运行")
-            return False
-
-    result = _activate_client(cfg, activation_code)
-    if not isinstance(result, dict) or not result.get("ok"):
-        error = result.get("error") if isinstance(result, dict) else None
-        if error == "account_expired":
-            print("账号已到期，请联系管理员续费")
-        elif error == "account_disabled":
-            print("账号已被禁用，请联系管理员")
-        elif error == "device_limit_reached":
-            print("设备数量已达上限，请联系管理员")
-        elif error == "device_bound":
-            print("该设备已绑定其他账号")
-        elif error == "device_disabled":
-            print("设备已被禁用，请联系管理员")
-        else:
-            print("激活失败，请检查授权码或网络")
+def _ensure_runtime_token(cfg, config_path=None):
+    if _license_expired(cfg.get("expire_at")):
+        _clear_runtime_auth(cfg, config_path=config_path)
+        print("账号已到期，请先在客户端重新激活")
+        return False
+    agent_token = str(cfg.get("agent_token") or "").strip()
+    if not agent_token:
+        print("缺少有效凭证，请先在客户端输入激活码完成激活")
+        return False
+    if _token_expired(cfg):
+        _clear_runtime_auth(cfg, config_path=config_path)
+        print("本地凭证已过期，请先在客户端重新激活")
         return False
     return True
 
@@ -475,6 +386,9 @@ def _token_expired(cfg):
 def _heartbeat_loop(cfg, stop_event, config_path=None):
     while not stop_event.is_set():
         _refresh_runtime_config(cfg, config_path)
+        if not _ensure_runtime_token(cfg, config_path=config_path):
+            stop_event.set()
+            break
         _, result = _post_agent_json(
             cfg,
             f"{cfg['server_url']}/api/agent/heartbeat",
@@ -488,8 +402,11 @@ def _heartbeat_loop(cfg, stop_event, config_path=None):
         )
         if isinstance(result, dict):
             if result.get("error") in ("token_expired", "invalid_token"):
-                _register_agent(cfg)
+                _clear_runtime_auth(cfg, config_path=config_path)
+                stop_event.set()
+                break
             if result.get("error") in ("account_expired", "account_disabled"):
+                _clear_runtime_auth(cfg, config_path=config_path)
                 stop_event.set()
                 break
         stop_event.wait(30)
@@ -710,8 +627,6 @@ def main():
     parser.add_argument("--server", dest="server")
     parser.add_argument("--bit-api", dest="bit_api")
     parser.add_argument("--api-token", dest="api_token")
-    parser.add_argument("--register-token", dest="register_token")
-    parser.add_argument("--activation-code", dest="activation_code")
     parser.add_argument("--owner", dest="owner")
     parser.add_argument("--machine-id", dest="machine_id")
     parser.add_argument("--label", dest="label")
@@ -724,9 +639,8 @@ def main():
     if not api_token:
         print("缺少 API Token，无法启动 worker")
         return
-    if not _ensure_activation(cfg):
+    if not _ensure_runtime_token(cfg, config_path=args.config):
         return
-    _register_agent(cfg)
 
     stop_event = threading.Event()
     threading.Thread(
@@ -738,11 +652,8 @@ def main():
     worker = Worker(cfg)
     while True:
         _refresh_runtime_config(cfg, args.config)
-        if _license_expired(cfg.get("expire_at")):
-            print("账号已到期，请联系管理员续费")
+        if not _ensure_runtime_token(cfg, config_path=args.config):
             break
-        if not cfg.get("agent_token") or _token_expired(cfg):
-            _register_agent(cfg)
         _, result = _post_agent_json(
             cfg,
             f"{cfg['server_url']}/api/agent/task",
@@ -751,11 +662,12 @@ def main():
         )
         if isinstance(result, dict):
             if result.get("error") in ("token_expired", "invalid_token"):
-                _register_agent(cfg)
+                _clear_runtime_auth(cfg, config_path=args.config)
                 time.sleep(cfg["poll_interval"])
-                continue
+                break
             if result.get("error") in ("account_expired", "account_disabled"):
-                print("账号已到期，请联系管理员续费")
+                _clear_runtime_auth(cfg, config_path=args.config)
+                print("账号已到期，请先在客户端重新激活")
                 break
             if result.get("error") == "agent_disabled":
                 time.sleep(max(5.0, cfg["poll_interval"]))

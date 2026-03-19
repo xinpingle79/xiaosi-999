@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>小组私聊助手控制台</title>
-    <link rel="stylesheet" href="/style.css" />
+    <link rel="stylesheet" href="/style.css?v=20260319b" />
   </head>
   <body>
     <div id="app-screen" class="screen">
@@ -19,6 +19,7 @@
             <div class="nav-item" data-page="user" data-title="用户管理">用户管理</div>
             <div class="nav-item active" data-page="task" data-title="任务管理">任务管理</div>
             <div class="nav-item" data-page="device" data-title="设备管理">设备管理</div>
+            <div class="nav-item" data-page="device-info" data-title="设备信息">设备信息</div>
             <div class="nav-item" data-page="template" data-title="文案管理">文案管理</div>
           </nav>
         </aside>
@@ -210,6 +211,33 @@
                 </table>
               </div>
             </section>
+
+            <section class="card device-info-card" data-page="device-info">
+              <div class="card-header">
+                <div class="card-title">设备信息</div>
+              </div>
+              <div class="table-wrap">
+                <table class="data-table table-nowrap">
+                  <thead>
+                    <tr>
+                      <th class="col-index">序号</th>
+                      <th>归属账号</th>
+                      <th>配置名称</th>
+                      <th>绑定设备ID</th>
+                      <th>本地接口地址</th>
+                      <th>浏览器 API</th>
+                      <th>在线状态</th>
+                      <th>最后心跳</th>
+                    </tr>
+                  </thead>
+                  <tbody id="device-info-table-body">
+                    <tr class="empty-row">
+                      <td colspan="8">暂无数据</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </section>
           </main>
         </div>
       </div>
@@ -297,6 +325,6 @@
       </div>
     </div>
 
-    <script src="/app.js"></script>
+    <script src="/app.js?v=20260319b"></script>
   </body>
 </html>

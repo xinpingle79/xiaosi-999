@@ -591,16 +591,10 @@ def _load_agent_settings():
 def _load_agent_security():
     settings = read_yaml(SETTINGS_PATH)
     security_cfg = settings.get("agent_security", {}) or {}
-    register_token = (
-        security_cfg.get("register_token")
-        or os.environ.get("FB_RPA_AGENT_REGISTER_TOKEN")
-        or ""
-    )
     token_ttl = int(security_cfg.get("token_ttl_seconds", 3600) or 3600)
     max_devices = int(security_cfg.get("max_devices_per_account", 1) or 1)
     allow_rebind = bool(security_cfg.get("allow_rebind", False))
     return {
-        "register_token": str(register_token).strip(),
         "token_ttl_seconds": token_ttl,
         "max_devices_per_account": max_devices,
         "allow_rebind": allow_rebind,
@@ -911,6 +905,12 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     owner = (self._query.get("owner") or [""])[0].strip()
                 self._send_json(handle_agent_list(owner=owner))
                 return
+            if path == "/device-info":
+                owner = ""
+                if isinstance(getattr(self, "_query", None), dict):
+                    owner = (self._query.get("owner") or [""])[0].strip()
+                self._send_json(handle_device_info_list(owner=owner))
+                return
             if path == "/config":
                 self._send_json(load_full_config())
                 return
@@ -925,6 +925,10 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 username = self._current_username(prefer_sub=True)
                 self._send_json(load_full_config(username))
                 return
+            if path == "/device_summary":
+                owner = self._current_username(prefer_sub=True)
+                self._send_json(handle_sub_device_summary(owner))
+                return
             if path == "/status":
                 owner = self._current_username(prefer_sub=True)
                 self._send_json(TASK_MANAGER.status(owner=owner))
@@ -935,12 +939,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 return
             if path == "/device-info":
                 owner = self._current_username(prefer_sub=True)
-                db = Database()
-                try:
-                    configs = db.list_device_configs(owner)
-                finally:
-                    db.close()
-                self._send_json({"configs": configs})
+                self._send_json(handle_device_info_list(owner=owner))
                 return
 
         self._send_json({"error": "not_found"}, status=HTTPStatus.NOT_FOUND)
@@ -1220,14 +1219,6 @@ class WebUIHandler(BaseHTTPRequestHandler):
         self._send_json({"error": "not_found"}, status=HTTPStatus.NOT_FOUND)
 
     def _handle_api_agent_post(self, path):
-        if path == "/api/agent/register":
-            payload = self._read_json()
-            result = handle_agent_register(payload, request_host=self.headers.get("Host", ""))
-            if not result.get("ok"):
-                self._send_json(result, status=HTTPStatus.BAD_REQUEST)
-                return
-            self._send_json(result)
-            return
         if path == "/api/agent/heartbeat":
             payload = self._read_json()
             result = handle_agent_heartbeat(payload)
@@ -1518,6 +1509,47 @@ def _extract_detected_window_count(logs):
     return 0
 
 
+def _load_owner_device_summary(owner, db=None):
+    owner = str(owner or "").strip()
+    if not owner:
+        return {
+            "online_devices": 0,
+            "max_devices": None,
+        }
+
+    owns_db = db is None
+    db = db or Database()
+    try:
+        row = db.conn.execute(
+            """
+            SELECT COUNT(1) AS total
+            FROM agent_registry
+            WHERE owner = ?
+              AND status = 1
+            """,
+            (owner,),
+        ).fetchone()
+        online_devices = int(row["total"] or 0) if row else 0
+
+        max_devices = None
+        account = db.get_user_account(owner)
+        if account:
+            raw_max_devices = account.get("max_devices")
+            if raw_max_devices not in (None, ""):
+                try:
+                    max_devices = int(raw_max_devices)
+                except Exception:
+                    max_devices = None
+
+        return {
+            "online_devices": online_devices,
+            "max_devices": max_devices,
+        }
+    finally:
+        if owns_db:
+            db.close()
+
+
 def _load_db_stats(account_id=None):
     db = Database()
     try:
@@ -1533,27 +1565,16 @@ def _load_db_stats(account_id=None):
         device_yesterday = 0
         max_devices = None
         if account_filter:
-            settings = _load_agent_settings()
-            heartbeat_ttl = settings.get("heartbeat_ttl", 180)
-            now_ts = time.time()
             today_start_ts = today_start.timestamp()
             yesterday_start_ts = yesterday_start.timestamp()
-            cutoff = now_ts - max(float(heartbeat_ttl or 0), 0.0)
             row = db.conn.execute(
                 "SELECT COUNT(1) AS total FROM agent_registry WHERE owner = ?",
                 (account_filter,),
             ).fetchone()
             device_total = int(row["total"] or 0) if row else 0
-            row = db.conn.execute(
-                """
-                SELECT COUNT(1) AS total FROM agent_registry
-                WHERE owner = ?
-                  AND status = 1
-                  AND COALESCE(last_seen, 0) >= ?
-                """,
-                (account_filter, cutoff),
-            ).fetchone()
-            device_online = int(row["total"] or 0) if row else 0
+            device_summary = _load_owner_device_summary(account_filter, db=db)
+            device_online = int(device_summary.get("online_devices") or 0)
+            max_devices = device_summary.get("max_devices")
             row = db.conn.execute(
                 """
                 SELECT COUNT(1) AS total FROM agent_registry
@@ -1565,14 +1586,6 @@ def _load_db_stats(account_id=None):
                 (account_filter, yesterday_start_ts, today_start_ts),
             ).fetchone()
             device_yesterday = int(row["total"] or 0) if row else 0
-            account = db.get_user_account(account_filter)
-            if account:
-                max_devices = account.get("max_devices")
-                if max_devices is not None:
-                    try:
-                        max_devices = int(max_devices)
-                    except Exception:
-                        max_devices = None
 
         def count_status(status, start=None, end=None):
             clauses = ["status = ?"]
@@ -1757,6 +1770,15 @@ def _load_user_list():
         db.close()
 
 
+def handle_sub_device_summary(owner):
+    summary = _load_owner_device_summary(owner)
+    return {
+        "ok": True,
+        "online_devices": int(summary.get("online_devices") or 0),
+        "max_devices": summary.get("max_devices"),
+    }
+
+
 def handle_login(payload, role="user"):
     username = str(payload.get("username") or "").strip()
     password = str(payload.get("password") or "").strip()
@@ -1925,95 +1947,6 @@ def _auto_bind_device_config(owner, machine_id, bit_api, api_token, source=""):
     finally:
         db.close()
 
-
-def handle_agent_register(payload, request_host=""):
-    settings = _load_agent_settings()
-    security = _load_agent_security()
-    register_token_required = security.get("register_token") or ""
-    register_token = str(payload.get("register_token") or payload.get("token") or "").strip()
-    if not register_token_required:
-        return {"ok": False, "error": "server_register_token_not_set"}
-    if register_token_required and register_token != register_token_required:
-        return {"ok": False, "error": "invalid_register_token"}
-
-    machine_id = str(payload.get("machine_id") or "").strip()
-    if not machine_id:
-        return {"ok": False, "error": "missing_machine_id"}
-    label = str(payload.get("label") or "").strip()
-    mode = str(payload.get("mode") or "worker").strip().lower()
-    owner = str(payload.get("owner") or "").strip()
-    client_version = str(payload.get("client_version") or "").strip()
-    bit_api = str(payload.get("bit_api") or "").strip()
-    api_token = str(payload.get("api_token") or "").strip()
-    now = time.time()
-    token_ttl = int(security.get("token_ttl_seconds", 3600) or 3600)
-    max_devices = int(security.get("max_devices_per_account", 1) or 1)
-    allow_rebind = bool(security.get("allow_rebind", False))
-    ttl = settings["heartbeat_ttl"]
-
-    with AGENT_LOCK:
-        db = Database()
-        try:
-            if mode != "worker":
-                return {"ok": False, "error": "unsupported_agent_mode"}
-            if not owner:
-                return {"ok": False, "error": "missing_owner"}
-            account = db.get_user_account(owner)
-            if not account:
-                return {"ok": False, "error": "owner_not_found"}
-            if int(account.get("status") or 0) == 0:
-                return {"ok": False, "error": "owner_disabled"}
-            expired, _expire_at = _is_account_expired(account)
-            if expired:
-                return {"ok": False, "error": "account_expired"}
-            account_max_devices = account.get("max_devices")
-            if account_max_devices not in (None, ""):
-                try:
-                    max_devices = int(account_max_devices)
-                except Exception:
-                    pass
-            existing = db.get_agent(machine_id)
-            if existing:
-                status_raw = existing.get("status", 1)
-                if status_raw is None:
-                    status_raw = 1
-                if int(status_raw) == 0:
-                    return {"ok": False, "error": "device_disabled"}
-                existing_owner = str(existing.get("owner") or "").strip()
-                if owner and existing_owner and existing_owner != owner and not allow_rebind:
-                    return {"ok": False, "error": "device_bound"}
-            if owner and max_devices > 0:
-                current_count = db.count_agents_for_owner(owner, include_disabled=False)
-                if (not existing or str(existing.get("owner") or "").strip() != owner) and current_count >= max_devices:
-                    return {"ok": False, "error": "device_limit_reached"}
-            agent_token = secrets.token_urlsafe(32)
-            token_expires_at = now + token_ttl
-            db.upsert_agent(
-                machine_id,
-                label,
-                now,
-                owner=owner,
-                status=1,
-                token=agent_token,
-                token_expires_at=token_expires_at,
-                client_version=client_version or None,
-            )
-        finally:
-            db.close()
-
-    _auto_bind_device_config(owner, machine_id, bit_api, api_token, source="register")
-
-    return {
-        "ok": True,
-        "data": {
-            "mode": "worker",
-            "heartbeat_ttl": ttl,
-            "agent_token": agent_token,
-            "token_expires_at": token_expires_at,
-        },
-    }
-
-
 def handle_client_activate(payload, request_host=""):
     activation_code = str(payload.get("activation_code") or "").strip()
     machine_id = str(payload.get("machine_id") or "").strip()
@@ -2023,11 +1956,9 @@ def handle_client_activate(payload, request_host=""):
     if not machine_id:
         return {"ok": False, "error": "missing_machine_id"}
     security = _load_agent_security()
-    register_token = security.get("register_token") or ""
-    if not register_token:
-        return {"ok": False, "error": "server_register_token_not_set"}
     max_devices_default = int(security.get("max_devices_per_account", 1) or 1)
     allow_rebind = bool(security.get("allow_rebind", False))
+    token_ttl = int(security.get("token_ttl_seconds", 3600) or 3600)
 
     db = Database()
     try:
@@ -2065,15 +1996,38 @@ def handle_client_activate(payload, request_host=""):
             if (not existing or str(existing.get("owner") or "").strip() != owner) and current_count >= max_devices:
                 return {"ok": False, "error": "device_limit_reached"}
 
+        agent_token = secrets.token_urlsafe(32)
+        token_expires_at = time.time() + token_ttl
+        existing_last_seen = None
+        existing_label = ""
+        existing_status = 1
+        if existing:
+            existing_last_seen = existing.get("last_seen")
+            existing_label = str(existing.get("label") or "").strip()
+            status_raw = existing.get("status", 1)
+            existing_status = 1 if status_raw is None else int(status_raw)
+        seed_last_seen = existing_last_seen if existing_last_seen not in (None, "") else 0.1
+        db.upsert_agent(
+            machine_id,
+            existing_label or machine_id,
+            seed_last_seen,
+            owner=owner,
+            status=existing_status,
+            token=agent_token,
+            token_expires_at=token_expires_at,
+            client_version=client_version or None,
+        )
+
         server_url = _build_server_base_url(request_host=request_host)
         return {
             "ok": True,
             "data": {
                 "owner": owner,
                 "server_url": server_url,
-                "register_token": register_token,
                 "expire_at": expire_at,
                 "max_devices": max_devices,
+                "agent_token": agent_token,
+                "token_expires_at": token_expires_at,
                 "client_version": client_version or "",
             },
         }
@@ -2082,70 +2036,39 @@ def handle_client_activate(payload, request_host=""):
 
 
 def handle_client_unbind(payload):
-    activation_code = str(payload.get("activation_code") or "").strip()
-    machine_id = str(payload.get("machine_id") or "").strip()
-    if not activation_code:
-        return {"ok": False, "error": "missing_activation_code"}
-    if not machine_id:
-        return {"ok": False, "error": "missing_machine_id"}
-
+    verified = _verify_client_identity(payload)
+    if not verified.get("ok"):
+        return verified
     db = Database()
     try:
-        account = db.get_user_account_by_activation_code(activation_code)
-        if not account:
-            return {"ok": False, "error": "invalid_activation_code"}
-        if int(account.get("status") or 0) == 0:
-            return {"ok": False, "error": "account_disabled"}
-        expired, _expire_at = _is_account_expired(account)
-        if expired:
-            return {"ok": False, "error": "account_expired"}
-
-        owner = str(account.get("username") or "").strip()
-        agent = db.get_agent(machine_id)
-        if not agent:
-            return {"ok": True}
-        if str(agent.get("owner") or "").strip() != owner:
-            return {"ok": False, "error": "unauthorized"}
-        db.unbind_agent(machine_id, owner=owner)
+        db.unbind_agent(verified.get("machine_id"), owner=verified.get("owner"))
     finally:
         db.close()
-
     return {"ok": True}
 
 
 def _verify_client_identity(payload, require_registered=False):
-    activation_code = str(payload.get("activation_code") or "").strip()
     machine_id = str(payload.get("machine_id") or "").strip()
-    if not activation_code:
-        return {"ok": False, "error": "missing_activation_code"}
     if not machine_id:
         return {"ok": False, "error": "missing_machine_id"}
-
+    ok, error, agent = _verify_agent_request(payload)
+    if not ok:
+        return {"ok": False, "error": error}
+    owner = str((agent or {}).get("owner") or "").strip()
+    if not owner:
+        return {"ok": False, "error": "unauthorized"}
     db = Database()
     try:
-        account = db.get_user_account_by_activation_code(activation_code)
+        account = db.get_user_account(owner)
         if not account:
-            return {"ok": False, "error": "invalid_activation_code"}
+            return {"ok": False, "error": "owner_not_found"}
         if int(account.get("status") or 0) == 0:
             return {"ok": False, "error": "account_disabled"}
         expired, expire_at = _is_account_expired(account)
         if expired:
             return {"ok": False, "error": "account_expired"}
-
-        owner = str(account.get("username") or "").strip()
-        agent = db.get_agent(machine_id)
-        if agent:
-            agent_owner = str(agent.get("owner") or "").strip()
-            if agent_owner and agent_owner != owner:
-                return {"ok": False, "error": "unauthorized"}
-            status_raw = agent.get("status", 1)
-            if status_raw is None:
-                status_raw = 1
-            if int(status_raw) == 0:
-                return {"ok": False, "error": "device_disabled"}
-        elif require_registered:
+        if require_registered and not agent:
             return {"ok": False, "error": "agent_not_registered"}
-
         return {
             "ok": True,
             "owner": owner,
@@ -2393,6 +2316,52 @@ def handle_agent_list(owner=""):
                 }
             )
         return {"ok": True, "agents": agents}
+    finally:
+        db.close()
+
+
+def handle_device_info_list(owner=""):
+    settings = _load_agent_settings()
+    ttl = float(settings.get("heartbeat_ttl", 180) or 180)
+    now = time.time()
+    owner = (owner or "").strip()
+    db = Database()
+    try:
+        configs = db.list_device_configs(owner) if owner else db.list_all_device_configs()
+        agent_map = {
+            str(row.get("machine_id") or "").strip(): row
+            for row in db.list_agents()
+            if str(row.get("machine_id") or "").strip()
+        }
+        rows = []
+        for cfg in configs:
+            machine_id = str(cfg.get("machine_id") or "").strip()
+            agent = agent_map.get(machine_id) if machine_id else None
+            last_seen = 0.0
+            online = False
+            client_version = ""
+            if agent:
+                try:
+                    last_seen = float(agent.get("last_seen") or 0)
+                except Exception:
+                    last_seen = 0.0
+                online = bool(last_seen) and (now - last_seen <= ttl)
+                client_version = str(agent.get("client_version") or "").strip()
+            rows.append(
+                {
+                    "id": cfg.get("id"),
+                    "owner": cfg.get("owner") or "",
+                    "name": cfg.get("name") or "",
+                    "machine_id": machine_id,
+                    "bit_api": str(cfg.get("bit_api") or "").strip(),
+                    "api_token": str(cfg.get("api_token") or "").strip(),
+                    "status": int(1 if cfg.get("status", None) is None else cfg.get("status")),
+                    "online": online,
+                    "last_seen": last_seen,
+                    "client_version": client_version,
+                }
+            )
+        return {"ok": True, "configs": rows}
     finally:
         db.close()
 

@@ -21,7 +21,7 @@ export FB_RPA_RUNTIME_DIR=/path/to/runtime
 ```
 
 ### 客户端（EXE 统一安装包）
-客户端交付形态为安装包 `FB_RPA_Setup.exe`，安装后运行 `FB_RPA_Client.exe`。
+客户端交付形态为安装包 `FB私聊助手安装包.exe`，安装后运行 `FB_RPA_Client.exe`。
 客户端本地填写 `bit_api`、`api_token`、激活码后即可运行，不需要本地安装 Python。
 
 若在源码模式下调试：
@@ -34,28 +34,20 @@ python3 client_app.py
 worker 只从服务器拉取统一任务队列，不再读取独立的本地 worker 配置文件。
 本地“运行 / 停止 / 暂停 / 继续”与后台控制共用同一条服务端任务链。
 
-### 本地单机测试（直接执行）
-```bash
-python3 main.py --window-token <窗口编号或ID>
-```
-说明：
-- `<窗口编号或ID>` 可用 BitBrowser 的窗口序号（seq）或 profile id。
-- 不加 `--window-token` 将按配置启动所有窗口。
-
 ## 配置说明
 
 ### 服务端配置
 `config/server.yaml`
 - `web_ui.host` / `web_ui.port`：服务端监听
 - `admin_account.*`：管理员账号
-- `agent_security.*`：注册/心跳/设备限制
+- `agent_security.*`：token 有效期、心跳与设备限制
 - `runtime_dir`：运行时目录（可选）
 
 ### 客户端配置
 `config/client.yaml`
 - `server_url`：服务端地址
 - `machine_id`：本机自动生成的设备标识
-- `activation_code`：本地保存的激活码
+- `agent_token` / `token_expires_at`：激活成功后保存的长期运行凭证
 - `bit_api` / `api_token`：本地唯一连接配置来源
 - `task_settings.*`：执行参数（本地保存）
 - `runtime_dir`：运行时目录（可选）
@@ -75,7 +67,7 @@ python3 main.py --window-token <窗口编号或ID>
 
 ## 敏感配置填写
 请在部署时手动填写以下字段，不要把真实值提交到源码基线：
-- `config/server.yaml`：`admin_account.password`、`agent_security.register_token`、`api_token`
+- `config/server.yaml`：`admin_account.password`、`api_token`
 - `config/client.yaml`：`api_token`
 
 ## 设备管理与租期控制
