@@ -295,8 +295,8 @@ def run_single_session(config, msgs, browser_settings, profile=None, startup_loc
             stats_account_id = owner_username or profile_account_id
             account_id = stats_account_id
             alert_account_id = label or profile_account_id
-            scraper = Scraper(page)
-            sender = Messager(page, task_cfg)
+            scraper = Scraper(page, window_label=alert_account_id)
+            sender = Messager(page, task_cfg, window_label=alert_account_id)
             max_messages = normalize_message_limit(task_cfg.get("max_messages_per_account", 0))
             if account_templates_used:
                 log.info(f"[{alert_account_id}] 使用账号专属文案 ({len(formal_templates)} 条)")

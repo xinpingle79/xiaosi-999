@@ -54,17 +54,49 @@ class Scraper:
         "you",
     }
 
-    def __init__(self, page):
+    def __init__(self, page, window_label=None):
         self.page = page
         self._current_user_id = None
+        self.window_label = (window_label or "").strip()
+
+    def _prefix(self):
+        return f"[{self.window_label}] " if self.window_label else ""
+
+    def _wait_for_condition(self, step_name, detail, checker, timeout=12.0, interval=0.35):
+        timeout = max(0.5, float(timeout or 0.5))
+        interval = max(0.05, float(interval or 0.05))
+        start = time.time()
+        log.info(f"{self._prefix()}{step_name}，{detail}...")
+        last_error = None
+        while time.time() - start < timeout:
+            try:
+                if checker():
+                    waited = time.time() - start
+                    log.info(f"{self._prefix()}{step_name}等待成功，耗时 {waited:.1f} 秒。")
+                    return True
+            except Exception as exc:
+                last_error = exc
+            time.sleep(interval)
+        waited = time.time() - start
+        if last_error:
+            log.warning(
+                f"{self._prefix()}{step_name}等待超时，已等待 {waited:.1f} 秒，"
+                f"{detail}失败: {last_error}"
+            )
+        else:
+            log.warning(
+                f"{self._prefix()}{step_name}等待超时，已等待 {waited:.1f} 秒，{detail}失败。"
+            )
+        return False
 
     def open_groups_feed(self):
         self._goto("https://www.facebook.com/groups/feed/", "小组首页")
+        self._wait_for_groups_list_ready(timeout=12.0, step_name="小组首页")
 
     def collect_joined_group_urls(self, max_scrolls=8):
         self.open_groups_feed()
         self._open_joined_groups_listing()
-        self._wait_for_groups_list_ready(timeout=6.0)
+        self._wait_for_groups_list_ready(timeout=6.0, step_name="已加入小组列表")
         self._scroll_joined_groups_container(to_top=True)
 
         group_urls = []
@@ -76,7 +108,7 @@ class Scraper:
         while unlimited or round_idx < int(max_scrolls):
             batch = self._extract_joined_group_urls()
             if not batch:
-                self._wait_for_groups_list_ready(timeout=3.0)
+                self._wait_for_groups_list_ready(timeout=3.0, step_name="已加入小组列表")
                 batch = self._extract_joined_group_urls()
             added = 0
             for item in batch:
@@ -112,16 +144,22 @@ class Scraper:
 
         members_url = f"{group_root}/members"
         self._goto(members_url, "小组成员页")
+        members_ready = self._wait_for_members_page_ready(timeout=22.0)
 
-        if not self.is_group_members_page():
+        if not self.is_group_members_page() or not members_ready:
             log.warning(f"成员页直达未命中，回退到小组主页再尝试: {group_root}")
             self._goto(group_root, "目标小组主页", settle_delay_range=(0.8, 1.2))
+            self._wait_for_group_page_ready(timeout=18.0)
             self._goto(members_url, "小组成员页", settle_delay_range=(1.0, 1.4))
+            members_ready = self._wait_for_members_page_ready(timeout=24.0)
 
+        if not members_ready:
+            log.warning(f"{self._prefix()}成员列表未完成加载，跳过当前小组: {group_url}")
+            return False
         if not self.is_group_members_page():
-            log.warning(f"当前 URL 未明确显示 members，但继续按成员页规则尝试: {self.page.url}")
+            log.warning(f"{self._prefix()}当前 URL 未明确显示 members，但成员列表已可用: {self.page.url}")
 
-        log.success(f"✅ 已进入成员视图: {self.page.url}")
+        log.success(f"{self._prefix()}✅ 已进入成员视图: {self.page.url}")
         return True
 
     def focus_newcomers_section(self, max_scroll_rounds=40):
@@ -208,8 +246,8 @@ class Scraper:
                     heading.first.scroll_into_view_if_needed(timeout=3000)
                     time.sleep(0.2)
                     self.page.evaluate("window.scrollBy(0, 220)")
-                    time.sleep(0.4)
-                    log.info(f"已定位到 {label} 区块，从这里开始采集。")
+                    self._wait_for_scroll_stable(timeout=1.8)
+                    log.info(f"{self._prefix()}已定位到 {label} 区块，从这里开始采集。")
                     return True
                 except Exception:
                     continue
@@ -218,7 +256,7 @@ class Scraper:
                 break
             time.sleep(0.2)
 
-        log.warning("未找到“小组新人”标题，跳过当前小组。")
+        log.warning(f"{self._prefix()}未找到“小组新人”标题，跳过当前小组。")
         return False
 
     def collect_visible_new_member_targets(self, anchor=None, require_after_anchor=False):
@@ -346,7 +384,7 @@ class Scraper:
 
     def scroll_to_top(self):
         self.page.evaluate("window.scrollTo(0, 0)")
-        time.sleep(0.4)
+        self._wait_for_scroll_stable(timeout=1.5)
 
     def is_group_members_page(self):
         return self._is_group_members_page(self.page.url)
@@ -365,13 +403,13 @@ class Scraper:
         if self._is_same_destination(self.page.url, url):
             return
 
-        log.info(f"正在打开{label}: {url}")
+        log.info(f"{self._prefix()}正在打开{label}: {url}")
         try:
-            self.page.goto(url, wait_until="commit", timeout=20000)
+            self.page.goto(url, wait_until="domcontentloaded", timeout=25000)
         except Exception as exc:
-            log.warning(f"{label}加载较慢，继续等待页面元素: {exc}")
+            log.warning(f"{self._prefix()}{label}加载较慢，继续等待页面元素: {exc}")
 
-        time.sleep(random.uniform(*settle_delay_range))
+        time.sleep(min(0.35, max(0.08, random.uniform(*settle_delay_range) / 5)))
         try:
             self.page.wait_for_load_state("domcontentloaded", timeout=networkidle_timeout)
         except Exception:
@@ -504,19 +542,91 @@ class Scraper:
                 }"""
             )
             if clicked:
-                time.sleep(random.uniform(1.0, 1.5))
-                self._wait_for_groups_list_ready(timeout=4.0)
+                time.sleep(random.uniform(0.15, 0.35))
+                self._wait_for_groups_list_ready(timeout=6.0, step_name="已加入小组列表")
         except Exception:
             return
 
-    def _wait_for_groups_list_ready(self, timeout=4.0):
+    def _wait_for_groups_list_ready(self, timeout=4.0, step_name="小组列表"):
+        return self._wait_for_condition(
+            step_name,
+            "等待小组列表出现",
+            self._has_groups_list_ready,
+            timeout=timeout,
+            interval=0.3,
+        )
+
+    def _wait_for_group_page_ready(self, timeout=18.0):
+        return self._wait_for_condition(
+            "目标小组主页",
+            "等待群组页面主区域出现",
+            self._has_group_page_ready,
+            timeout=timeout,
+            interval=0.35,
+        )
+
+    def _wait_for_members_page_ready(self, timeout=24.0):
+        return self._wait_for_condition(
+            "小组成员页",
+            "等待成员列表区域出现",
+            self._has_members_page_ready,
+            timeout=timeout,
+            interval=0.35,
+        )
+
+    def _has_groups_list_ready(self):
         try:
-            self.page.wait_for_function(
-                "() => !!document.querySelector('a[href*=\"/groups/\"]')",
-                timeout=int(max(0.5, timeout) * 1000),
+            return bool(
+                self.page.evaluate(
+                    """() => Array.from(document.querySelectorAll('a[href*="/groups/"]'))
+                        .some((a) => {
+                            const rect = a.getBoundingClientRect();
+                            return rect.width > 0 && rect.height > 0;
+                        })"""
+                )
             )
         except Exception:
-            pass
+            return False
+
+    def _has_group_page_ready(self):
+        try:
+            return bool(
+                self.page.evaluate(
+                    """() => {
+                        const main = document.querySelector('[role="main"]');
+                        if (main && main.getBoundingClientRect().height > 200) return true;
+                        const article = document.querySelector('div[role="feed"], div[data-pagelet]');
+                        return !!(article && article.getBoundingClientRect().height > 200);
+                    }"""
+                )
+            )
+        except Exception:
+            return False
+
+    def _has_members_page_ready(self):
+        try:
+            return bool(
+                self.page.evaluate(
+                    """() => {
+                        const url = location.pathname || '';
+                        const looksLikeMembers = url.includes('/members');
+                        const linksReady = Array.from(document.querySelectorAll('a[href*="/groups/"][href*="/user/"]'))
+                            .some((a) => {
+                                const rect = a.getBoundingClientRect();
+                                return rect.width > 0 && rect.height > 0;
+                            });
+                        const headings = ['Members', 'People', '成员', '成员页', '成员列表', '成员资料', 'People you may know'];
+                        const headingReady = Array.from(document.querySelectorAll('h1, h2, h3, span, div'))
+                            .some((el) => {
+                                const text = (el.innerText || '').trim();
+                                return headings.some((token) => text === token || text.includes(token));
+                            });
+                        return (looksLikeMembers || headingReady) && linksReady;
+                    }"""
+                )
+            )
+        except Exception:
+            return False
 
     def _scroll_joined_groups_container(self, to_top=False, step_ratio=0.85, min_px=900, smooth=False):
         try:

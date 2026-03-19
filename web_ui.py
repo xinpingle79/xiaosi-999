@@ -174,6 +174,27 @@ class TaskManager:
             return None, "执行端离线"
         return agent, None
 
+    def _find_existing_machine_action_task(self, db, owner_name, machine_id, action):
+        row = db.conn.execute(
+            """
+            SELECT id, status
+            FROM agent_tasks
+            WHERE owner = ?
+              AND assigned_machine_id = ?
+              AND action = ?
+              AND status IN ('pending', 'running')
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (owner_name, machine_id, action),
+        ).fetchone()
+        if not row:
+            return None
+        return {
+            "id": row["id"],
+            "status": row["status"],
+        }
+
     def _enqueue_owner_device_actions(
         self,
         action,
@@ -225,12 +246,18 @@ class TaskManager:
                         )
                         continue
                     has_online = True
-                    if hasattr(db, "clear_pending_agent_tasks"):
-                        db.clear_pending_agent_tasks(
-                            owner=owner_name,
-                            machine_id=machine_id,
-                            reason="stale_queue_cleanup",
+                    existing_task = self._find_existing_machine_action_task(
+                        db,
+                        owner_name,
+                        machine_id,
+                        action,
+                    )
+                    if existing_task:
+                        self._logs.append(
+                            f"=== 跳过重复 {action} 指令：执行端 {machine_id} 已存在任务#{existing_task['id']} ({existing_task['status']}) ==="
                         )
+                        task_ids.append((machine_id, existing_task["id"]))
+                        continue
                     bit_api = str(cfg.get("bit_api") or "").strip()
                     api_token = str(cfg.get("api_token") or "").strip()
                     if not bit_api or not api_token:
@@ -298,12 +325,17 @@ class TaskManager:
             if not agent:
                 return False, agent_error or "执行端离线"
             machine_id = (agent.get("machine_id") or "").strip()
-            if hasattr(db, "clear_pending_agent_tasks"):
-                db.clear_pending_agent_tasks(
-                    owner=owner_name,
-                    machine_id=machine_id,
-                    reason="stale_queue_cleanup",
+            existing_task = self._find_existing_machine_action_task(
+                db,
+                owner_name,
+                machine_id,
+                action,
+            )
+            if existing_task:
+                self._logs.append(
+                    f"=== 跳过重复 {action} 指令：执行端 {machine_id} 已存在任务#{existing_task['id']} ({existing_task['status']}) ==="
                 )
+                return True, None
             configs = db.list_device_configs(owner_name)
             target_cfg = None
             for cfg in configs:
@@ -390,12 +422,17 @@ class TaskManager:
                     time.sleep(0.5)
                     continue
 
-                if hasattr(db, "clear_pending_agent_tasks"):
-                    db.clear_pending_agent_tasks(
-                        owner=owner_name,
-                        machine_id=machine_id,
-                        reason="stale_queue_cleanup",
+                existing_task = self._find_existing_machine_action_task(
+                    db,
+                    owner_name,
+                    machine_id,
+                    action,
+                )
+                if existing_task:
+                    self._logs.append(
+                        f"=== 跳过重复 {action} 指令：执行端 {machine_id} 已存在任务#{existing_task['id']} ({existing_task['status']}) ==="
                     )
+                    return True, None
                 bit_api = str(target_cfg.get("bit_api") or "").strip()
                 target_api_token = str(target_cfg.get("api_token") or "").strip()
                 if not bit_api or not target_api_token:

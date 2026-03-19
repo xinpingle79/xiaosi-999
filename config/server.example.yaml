@@ -10,9 +10,9 @@ agent_security:
   allow_rebind: false
 admin_account:
   username: admin
-  password: CHANGE_ME
-bit_api: "http://127.0.0.1:54345"
-api_token: "CHANGE_ME"
+  password: ""
+bit_api: ""
+api_token: ""
 browser:
   auto_discover_bitbrowser: true
 task_settings:

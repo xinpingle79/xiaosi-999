@@ -34,7 +34,7 @@ if str(ROOT_DIR) not in sys.path:
 
 ENV_RUNTIME_DIR = "FB_RPA_RUNTIME_DIR"
 _RUNTIME_DIR = ""
-DEFAULT_BIT_API = "http://127.0.0.1:54345"
+DEFAULT_BIT_API = ""
 DEFAULT_POLL_INTERVAL = 2.0
 
 
@@ -197,8 +197,9 @@ def _load_client_config(config_path=None):
 
 def _refresh_runtime_config(cfg, config_path=None):
     config = _load_client_config(config_path)
+    locked_fields = cfg.get("_locked_fields") or set()
     runtime_dir = str(config.get("runtime_dir") or "").strip()
-    if runtime_dir:
+    if "runtime_dir" not in locked_fields and runtime_dir:
         cfg["runtime_dir"] = runtime_dir
         _set_runtime_dir(runtime_dir)
         os.environ[ENV_RUNTIME_DIR] = runtime_dir
@@ -207,21 +208,29 @@ def _refresh_runtime_config(cfg, config_path=None):
         os.environ[ENV_RUNTIME_DIR] = str(cfg["runtime_dir"])
 
     server_url = str(config.get("server_url") or "").strip().rstrip("/")
-    if server_url:
+    if "server_url" not in locked_fields and server_url:
         cfg["server_url"] = server_url
     bit_api = str(config.get("bit_api") or "").strip()
-    if bit_api:
+    if "bit_api" not in locked_fields and bit_api:
         cfg["bit_api"] = bit_api
     api_token = str(config.get("api_token") or "").strip()
-    if api_token:
+    if "api_token" not in locked_fields and api_token:
         cfg["api_token"] = api_token
     machine_id = str(config.get("machine_id") or "").strip()
-    if machine_id:
+    if "machine_id" not in locked_fields and machine_id:
         cfg["machine_id"] = machine_id
-    cfg["agent_token"] = str(config.get("agent_token") or "").strip()
-    cfg["token_expires_at"] = config.get("token_expires_at")
+    if "agent_token" not in locked_fields:
+        agent_token = str(config.get("agent_token") or "").strip()
+        if agent_token or not cfg.get("agent_token"):
+            cfg["agent_token"] = agent_token
+    if "token_expires_at" not in locked_fields:
+        token_expires_at = config.get("token_expires_at")
+        if token_expires_at not in (None, "", []):
+            cfg["token_expires_at"] = token_expires_at
+        elif not cfg.get("agent_token"):
+            cfg["token_expires_at"] = None
     client_version = str(config.get("client_version") or "").strip()
-    if client_version:
+    if "client_version" not in locked_fields and client_version:
         cfg["client_version"] = client_version
     poll_interval = config.get("poll_interval")
     if poll_interval not in (None, ""):
@@ -271,7 +280,8 @@ def _build_config(args):
         or DEFAULT_POLL_INTERVAL
     )
     runtime_dir = (
-        os.environ.get(ENV_RUNTIME_DIR)
+        args.runtime_dir
+        or os.environ.get(ENV_RUNTIME_DIR)
         or config.get("runtime_dir")
         or ""
     )
@@ -279,7 +289,8 @@ def _build_config(args):
         _set_runtime_dir(runtime_dir)
         os.environ[ENV_RUNTIME_DIR] = runtime_dir
     client_version = (
-        os.environ.get("FB_RPA_CLIENT_VERSION")
+        args.client_version
+        or os.environ.get("FB_RPA_CLIENT_VERSION")
         or config.get("client_version")
         or ""
     )
@@ -293,6 +304,23 @@ def _build_config(args):
         config["expire_at"] = license_data.get("expire_at")
     if license_data.get("max_devices") is not None:
         config["max_devices"] = license_data.get("max_devices")
+    agent_token = str(args.agent_token or config.get("agent_token") or "").strip()
+    token_expires_at = args.token_expires_at if args.token_expires_at not in (None, "") else config.get("token_expires_at")
+    locked_fields = {
+        key
+        for key, value in {
+            "server_url": args.server,
+            "bit_api": args.bit_api,
+            "api_token": args.api_token,
+            "owner": args.owner,
+            "machine_id": args.machine_id,
+            "runtime_dir": args.runtime_dir,
+            "client_version": args.client_version,
+            "agent_token": args.agent_token,
+            "token_expires_at": args.token_expires_at,
+        }.items()
+        if value not in (None, "")
+    }
     return {
         "server_url": server_url.rstrip("/"),
         "bit_api": bit_api,
@@ -303,10 +331,11 @@ def _build_config(args):
         "owner": owner,
         "runtime_dir": runtime_dir,
         "client_version": client_version,
-        "agent_token": str(config.get("agent_token") or "").strip(),
-        "token_expires_at": config.get("token_expires_at"),
+        "agent_token": agent_token,
+        "token_expires_at": token_expires_at,
         "expire_at": config.get("expire_at"),
         "max_devices": config.get("max_devices"),
+        "_locked_fields": locked_fields,
     }
 
 
@@ -383,7 +412,27 @@ def _token_expired(cfg):
         return False
 
 
-def _heartbeat_loop(cfg, stop_event, config_path=None):
+def _runtime_auth_message(error_code):
+    mapping = {
+        "invalid_token": "执行端认证失效（invalid_token），请回到客户端重新激活。",
+        "token_expired": "执行端本地凭证已过期，请回到客户端重新激活。",
+        "account_expired": "账号已到期，请回到客户端重新激活。",
+        "account_disabled": "账号已禁用，请回到客户端重新激活。",
+    }
+    return mapping.get(str(error_code or "").strip(), "执行端凭证异常，请回到客户端重新激活。")
+
+
+def _handle_runtime_auth_failure(worker, cfg, stop_event, error_code, config_path=None):
+    message = _runtime_auth_message(error_code)
+    print(message)
+    _clear_runtime_auth(cfg, config_path=config_path)
+    owner = str(cfg.get("owner") or "").strip()
+    if worker and owner:
+        worker._stop_process(owner)
+    stop_event.set()
+
+
+def _heartbeat_loop(cfg, stop_event, worker, config_path=None):
     while not stop_event.is_set():
         _refresh_runtime_config(cfg, config_path)
         if not _ensure_runtime_token(cfg, config_path=config_path):
@@ -402,12 +451,22 @@ def _heartbeat_loop(cfg, stop_event, config_path=None):
         )
         if isinstance(result, dict):
             if result.get("error") in ("token_expired", "invalid_token"):
-                _clear_runtime_auth(cfg, config_path=config_path)
-                stop_event.set()
+                _handle_runtime_auth_failure(
+                    worker,
+                    cfg,
+                    stop_event,
+                    result.get("error"),
+                    config_path=config_path,
+                )
                 break
             if result.get("error") in ("account_expired", "account_disabled"):
-                _clear_runtime_auth(cfg, config_path=config_path)
-                stop_event.set()
+                _handle_runtime_auth_failure(
+                    worker,
+                    cfg,
+                    stop_event,
+                    result.get("error"),
+                    config_path=config_path,
+                )
                 break
         stop_event.wait(30)
 
@@ -632,6 +691,10 @@ def main():
     parser.add_argument("--label", dest="label")
     parser.add_argument("--poll-interval", dest="poll_interval")
     parser.add_argument("--config", dest="config")
+    parser.add_argument("--agent-token", dest="agent_token")
+    parser.add_argument("--token-expires-at", dest="token_expires_at")
+    parser.add_argument("--runtime-dir", dest="runtime_dir")
+    parser.add_argument("--client-version", dest="client_version")
     args = parser.parse_args()
 
     cfg = _build_config(args)
@@ -643,14 +706,14 @@ def main():
         return
 
     stop_event = threading.Event()
+    worker = Worker(cfg)
     threading.Thread(
         target=_heartbeat_loop,
-        args=(cfg, stop_event, args.config),
+        args=(cfg, stop_event, worker, args.config),
         daemon=True,
     ).start()
 
-    worker = Worker(cfg)
-    while True:
+    while not stop_event.is_set():
         _refresh_runtime_config(cfg, args.config)
         if not _ensure_runtime_token(cfg, config_path=args.config):
             break
@@ -662,12 +725,22 @@ def main():
         )
         if isinstance(result, dict):
             if result.get("error") in ("token_expired", "invalid_token"):
-                _clear_runtime_auth(cfg, config_path=args.config)
-                time.sleep(cfg["poll_interval"])
+                _handle_runtime_auth_failure(
+                    worker,
+                    cfg,
+                    stop_event,
+                    result.get("error"),
+                    config_path=args.config,
+                )
                 break
             if result.get("error") in ("account_expired", "account_disabled"):
-                _clear_runtime_auth(cfg, config_path=args.config)
-                print("账号已到期，请先在客户端重新激活")
+                _handle_runtime_auth_failure(
+                    worker,
+                    cfg,
+                    stop_event,
+                    result.get("error"),
+                    config_path=args.config,
+                )
                 break
             if result.get("error") == "agent_disabled":
                 time.sleep(max(5.0, cfg["poll_interval"]))

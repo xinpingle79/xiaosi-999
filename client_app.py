@@ -51,7 +51,7 @@ def _find_root_dir():
 
 ROOT_DIR = _find_root_dir()
 ENV_RUNTIME_DIR = "FB_RPA_RUNTIME_DIR"
-DEFAULT_BIT_API = "http://127.0.0.1:54345"
+DEFAULT_BIT_API = ""
 STATUS_REFRESH_MS = 3000
 
 
@@ -322,13 +322,30 @@ def _client_can_use_token(client_config, license_data):
 
 
 class ClientApp:
+    WINDOW_WIDTH = 602
+    WINDOW_HEIGHT = 552
+    TITLE_BAR_HEIGHT = 36
+    SHELL_BG = "#edf4ff"
+    WINDOW_BG = "#dbe7f6"
+    PANEL_BG = "#eef5ff"
+    BORDER_COLOR = "#8fb1e3"
+    TITLE_BG = "#315f97"
+    TITLE_FG = "#ffffff"
+    HEADER_FONT = ("Microsoft YaHei", 12, "bold")
+    LABEL_FONT = ("Microsoft YaHei", 10, "bold")
+    TEXT_FONT = ("Consolas", 10)
+    NOTICE_FONT = ("Microsoft YaHei", 9)
+    SESSION_NOTICE_TEXT = "当前账号已到期或登录状态已失效，请重新输入有效激活码后继续使用。"
+
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("FB RPA 客户端")
-        self.root.geometry("760x620")
+        self.root.title("FB私聊助手 Pro")
+        self.root.configure(bg=self.WINDOW_BG)
+        self.root.overrideredirect(True)
+        self.root.geometry(self._centered_geometry(self.WINDOW_WIDTH, self.WINDOW_HEIGHT))
         self.root.resizable(False, False)
-        self.root.configure(bg="#f2f5f9")
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.root.bind("<Map>", self._handle_window_map)
 
         self.client_config = load_client_config()
         self.license_data = load_license()
@@ -340,9 +357,24 @@ class ClientApp:
         )
         self.worker_process = None
         self.status_job = None
+        self.log_job = None
         self.verified = False
         self.activation_screen = None
         self.ops_screen = None
+        self._drag_origin = None
+        self._is_minimizing = False
+        self._is_maximized = False
+        self._normal_geometry = self.root.geometry()
+        self._button_texts = {}
+        self._button_restore_modes = {}
+        self._button_state_snapshot = {
+            "agent_online": False,
+            "task_running": False,
+            "task_pending": False,
+        }
+        self._log_path = _runtime_path("logs", "worker.log")
+        self._log_offset = 0
+        self._log_follow_tail = True
 
         self.activation_code = tk.StringVar(value="")
         self.bit_api = tk.StringVar(
@@ -357,314 +389,458 @@ class ClientApp:
         self.server_text = tk.StringVar(value="")
         self.device_text = tk.StringVar(value="")
         self.activation_notice_text = tk.StringVar(value="")
+        self.window_count_text = tk.StringVar(value=self._initial_window_count())
+        self.window_no_text = tk.StringVar(value="")
+        self.sent_count_text = tk.StringVar(value="0")
+        self.failed_count_text = tk.StringVar(value="0")
+        self.maximize_button_text = tk.StringVar(value="□")
         self.activation_notice_label = None
+        self.log_text = None
+        self.message_text = None
+        self.verify_btn = None
+        self.single_run_btn = None
+        self.save_btn = None
 
         self._build_ui()
+        self._reset_log_session()
+        self._load_message_templates()
         self._load_existing_state()
         self._schedule_status_refresh(initial=True)
+        self._schedule_log_refresh(initial=True)
+
+    def _centered_geometry(self, width, height):
+        self.root.update_idletasks()
+        screen_w = max(self.root.winfo_screenwidth(), width)
+        screen_h = max(self.root.winfo_screenheight(), height)
+        pos_x = max((screen_w - width) // 2, 0)
+        pos_y = max((screen_h - height) // 2, 0)
+        return f"{width}x{height}+{pos_x}+{pos_y}"
+
+    def _initial_window_count(self):
+        raw = _parse_int(
+            (self.client_config.get("task_settings") or {}).get("max_windows") or 10,
+            10,
+        )
+        return str(raw if raw > 0 else 10)
 
     def _build_ui(self):
-        container = tk.Frame(self.root, bg="#f2f5f9")
-        container.pack(fill="both", expand=True, padx=18, pady=18)
+        self.viewport = tk.Frame(self.root, bg=self.WINDOW_BG)
+        self.viewport.pack(fill="both", expand=True)
 
-        self._build_activation_screen(container)
-        self._build_operation_screen(container)
+        self.shell = tk.Frame(
+            self.viewport,
+            bg=self.SHELL_BG,
+            highlightthickness=1,
+            highlightbackground=self.BORDER_COLOR,
+            bd=0,
+            width=self.WINDOW_WIDTH,
+            height=self.WINDOW_HEIGHT,
+        )
+        self.shell.place(relx=0.5, rely=0.5, anchor="center")
+        self.shell.pack_propagate(False)
+
+        self._build_title_bar(self.shell)
+
+        self.screen_host = tk.Frame(self.shell, bg=self.SHELL_BG)
+        self.screen_host.pack(fill="both", expand=True, padx=4, pady=(0, 4))
+        self.screen_host.pack_propagate(False)
+
+        self._build_activation_screen(self.screen_host)
+        self._build_operation_screen(self.screen_host)
+
+    def _build_title_bar(self, parent):
+        title_bar = tk.Frame(parent, bg=self.TITLE_BG, height=self.TITLE_BAR_HEIGHT)
+        title_bar.pack(fill="x")
+        title_bar.pack_propagate(False)
+        self.title_bar = title_bar
+
+        title_label = tk.Label(
+            title_bar,
+            text="FB私聊助手 Pro",
+            font=("Microsoft YaHei", 11, "bold"),
+            bg=self.TITLE_BG,
+            fg=self.TITLE_FG,
+        )
+        title_label.pack(side="left", padx=12)
+        self.title_label = title_label
+
+        button_frame = tk.Frame(title_bar, bg=self.TITLE_BG)
+        button_frame.pack(side="right", padx=8, pady=7)
+
+        self.minimize_btn = self._create_window_button(button_frame, "—", self._minimize_window)
+        self.minimize_btn.pack(side="left", padx=(0, 6))
+        self.maximize_btn = self._create_window_button(
+            button_frame,
+            self.maximize_button_text,
+            self._toggle_maximize,
+        )
+        self.maximize_btn.pack(side="left", padx=(0, 6))
+        self.close_btn = self._create_window_button(
+            button_frame,
+            "✕",
+            self._on_close,
+            bg="#e56b6f",
+            activebg="#d9485f",
+        )
+        self.close_btn.pack(side="left")
+
+        for widget in (title_bar, title_label):
+            widget.bind("<ButtonPress-1>", self._start_window_drag)
+            widget.bind("<B1-Motion>", self._drag_window)
+            widget.bind("<Double-Button-1>", lambda _event: self._toggle_maximize())
+
+    def _create_window_button(self, parent, text, command, bg="#5f86b8", activebg="#4f74a5"):
+        textvariable = text if isinstance(text, tk.StringVar) else None
+        btn = tk.Button(
+            parent,
+            text="" if textvariable else text,
+            textvariable=textvariable,
+            command=command,
+            width=2,
+            font=("Microsoft YaHei", 8, "bold"),
+            bg=bg,
+            fg="#ffffff",
+            activebackground=activebg,
+            activeforeground="#ffffff",
+            relief="flat",
+            bd=0,
+            padx=0,
+            pady=0,
+            cursor="hand2",
+        )
+        return btn
+
+    def _start_window_drag(self, event):
+        if self._is_maximized:
+            return
+        self._drag_origin = (event.x_root - self.root.winfo_x(), event.y_root - self.root.winfo_y())
+
+    def _drag_window(self, event):
+        if self._is_maximized or not self._drag_origin:
+            return
+        offset_x, offset_y = self._drag_origin
+        self.root.geometry(f"+{event.x_root - offset_x}+{event.y_root - offset_y}")
+
+    def _handle_window_map(self, _event=None):
+        if self._is_minimizing:
+            self._is_minimizing = False
+            self.root.after(10, lambda: self.root.overrideredirect(True))
+        elif not self.root.overrideredirect():
+            self.root.after(10, lambda: self.root.overrideredirect(True))
+
+    def _minimize_window(self):
+        self._is_minimizing = True
+        self.root.overrideredirect(False)
+        self.root.iconify()
+
+    def _toggle_maximize(self):
+        if self._is_maximized:
+            self._restore_window()
+        else:
+            self._maximize_window()
+
+    def _maximize_window(self):
+        self._normal_geometry = self.root.geometry()
+        screen_w = self.root.winfo_screenwidth()
+        screen_h = self.root.winfo_screenheight()
+        self.root.geometry(f"{screen_w}x{screen_h}+0+0")
+        self._is_maximized = True
+        self.maximize_button_text.set("❐")
+
+    def _restore_window(self):
+        self.root.geometry(self._normal_geometry)
+        self._is_maximized = False
+        self.maximize_button_text.set("□")
 
     def _build_activation_screen(self, parent):
-        font_title = ("Microsoft YaHei", 16, "bold")
-        font_label = ("Microsoft YaHei", 11)
-        font_small = ("Microsoft YaHei", 10)
+        self.activation_screen = tk.Frame(parent, bg=self.SHELL_BG)
+        self.activation_screen.place(x=0, y=0, relwidth=1, relheight=1)
 
-        self.activation_screen = tk.Frame(parent, bg="#f2f5f9")
         card = tk.Frame(
             self.activation_screen,
             bg="#ffffff",
             highlightthickness=1,
-            highlightbackground="#dbe3ef",
+            highlightbackground=self.BORDER_COLOR,
             bd=0,
         )
-        card.pack(fill="both", expand=True)
+        card.pack(fill="both", expand=True, padx=6, pady=6)
 
+        hero = tk.Frame(card, bg="#ffffff", height=112)
+        hero.pack(fill="x", padx=10, pady=(10, 8))
+        hero.pack_propagate(False)
         tk.Label(
-            card,
-            text="FB RPA 客户端",
-            font=font_title,
+            hero,
+            text="FB私聊助手",
+            font=("Microsoft YaHei", 28, "bold"),
             bg="#ffffff",
-            fg="#22324d",
-        ).pack(pady=(32, 10))
-        tk.Label(
-            card,
-            text="首次使用请先输入激活码，验证成功后才能进入操作界面。",
-            font=font_small,
-            bg="#ffffff",
-            fg="#64748b",
-        ).pack(pady=(0, 14))
+            fg="#7ba6d8",
+        ).pack(expand=True)
 
-        summary_frame = tk.Frame(
-            card,
-            bg="#f8fafc",
-            highlightthickness=1,
-            highlightbackground="#e2e8f0",
-        )
-        summary_frame.pack(fill="x", padx=20, pady=(0, 14))
-        tk.Label(
-            summary_frame,
-            textvariable=self.server_text,
-            font=font_small,
-            bg="#f8fafc",
-            fg="#4b5563",
-        ).pack(anchor="w", padx=12, pady=(10, 4))
-        tk.Label(
-            summary_frame,
-            textvariable=self.device_text,
-            font=font_small,
-            bg="#f8fafc",
-            fg="#4b5563",
-        ).pack(anchor="w", padx=12, pady=2)
-        tk.Label(
-            summary_frame,
-            textvariable=self.expire_text,
-            font=font_small,
-            bg="#f8fafc",
-            fg="#4b5563",
-        ).pack(anchor="w", padx=12, pady=(2, 10))
+        body = tk.Frame(card, bg="#ffffff")
+        body.pack(fill="both", expand=True, padx=26, pady=(0, 24))
+        body.grid_columnconfigure(0, weight=1)
+        body.grid_columnconfigure(1, weight=0)
 
-        activation_frame = tk.Frame(card, bg="#ffffff")
-        activation_frame.pack(fill="x", padx=20, pady=(0, 8))
         tk.Label(
-            activation_frame,
+            body,
             text="激活码",
-            font=font_label,
+            font=self.LABEL_FONT,
             bg="#ffffff",
-            fg="#22324d",
-        ).grid(row=0, column=0, sticky="w")
+            fg="#24416e",
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(6, 10))
+
         self.code_entry = tk.Entry(
-            activation_frame,
+            body,
             textvariable=self.activation_code,
-            width=34,
-            font=font_label,
+            font=("Microsoft YaHei", 15),
             relief="solid",
             bd=1,
+            highlightthickness=1,
+            highlightbackground=self.BORDER_COLOR,
+            highlightcolor="#5a8fe3",
+            bg="#ffffff",
+            fg="#24416e",
         )
-        self.code_entry.grid(row=0, column=1, padx=(12, 12), ipady=6, sticky="ew")
-        self.code_entry.bind("<Return>", lambda _event: self.on_verify())
-        tk.Button(
-            activation_frame,
-            text="验证",
-            font=font_label,
+        self.code_entry.grid(row=1, column=0, sticky="ew", ipady=8)
+        self.code_entry.bind("<Return>", lambda _event: self._trigger_verify())
+
+        self.verify_btn = tk.Button(
+            body,
+            text="验证激活",
+            font=("Microsoft YaHei", 10, "bold"),
             bg="#4f7df0",
             fg="#ffffff",
             activebackground="#3f6de0",
+            activeforeground="#ffffff",
             relief="flat",
-            width=10,
-            command=self.on_verify,
-        ).grid(row=0, column=2)
-        activation_frame.grid_columnconfigure(1, weight=1)
-        self.activation_notice_label = tk.Label(
-            card,
-            textvariable=self.activation_notice_text,
-            font=font_small,
-            bg="#ffffff",
-            fg="#475467",
-            justify="left",
-            wraplength=480,
+            width=12,
+            cursor="hand2",
+            command=self._trigger_verify,
         )
-        self.activation_notice_label.pack(fill="x", padx=20, pady=(0, 12))
+        self.verify_btn.grid(row=1, column=1, padx=(12, 0), ipady=4)
+        self._register_feedback_button("verify", self.verify_btn, "验证激活", managed=False)
+
+        tip_frame = tk.Frame(body, bg="#ffffff")
+        tip_frame.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(12, 0))
+        tip_frame.grid_columnconfigure(0, weight=1)
+        tip_frame.grid_columnconfigure(1, weight=1)
+
+        self.activation_notice_label = tk.Label(
+            tip_frame,
+            textvariable=self.activation_notice_text,
+            font=self.NOTICE_FONT,
+            bg="#ffffff",
+            fg="#6b7280",
+            justify="left",
+            anchor="w",
+            wraplength=380,
+        )
+        self.activation_notice_label.grid(row=0, column=0, sticky="w")
+        tk.Label(
+            tip_frame,
+            textvariable=self.server_text,
+            font=self.NOTICE_FONT,
+            bg="#ffffff",
+            fg="#8a94a6",
+            anchor="e",
+        ).grid(row=0, column=1, sticky="e")
 
     def _build_operation_screen(self, parent):
-        font_title = ("Microsoft YaHei", 16, "bold")
-        font_label = ("Microsoft YaHei", 11)
-        font_small = ("Microsoft YaHei", 10)
+        self.ops_screen = tk.Frame(parent, bg=self.SHELL_BG)
+        self.ops_screen.place(x=0, y=0, relwidth=1, relheight=1)
 
-        self.ops_screen = tk.Frame(parent, bg="#f2f5f9")
-
-        card = tk.Frame(
+        canvas = tk.Frame(
             self.ops_screen,
-            bg="#ffffff",
+            bg=self.SHELL_BG,
             highlightthickness=1,
-            highlightbackground="#dbe3ef",
+            highlightbackground=self.BORDER_COLOR,
             bd=0,
         )
-        card.pack(fill="both", expand=True)
+        canvas.pack(fill="both", expand=True, padx=6, pady=6)
+        canvas.pack_propagate(False)
 
-        tk.Label(
-            card,
-            text="FB RPA 客户端",
-            font=font_title,
+        toolbar = tk.Frame(canvas, bg=self.PANEL_BG, highlightthickness=1, highlightbackground=self.BORDER_COLOR, height=52)
+        toolbar.pack(fill="x", padx=6, pady=(6, 6))
+        toolbar.pack_propagate(False)
+
+        button_row = tk.Frame(toolbar, bg=self.PANEL_BG)
+        button_row.pack(side="left", padx=8, pady=7)
+        self.run_btn = self._create_action_button(button_row, "启动", "#4f7df0", self._trigger_run)
+        self.pause_btn = self._create_action_button(button_row, "暂停", "#ffffff", self._trigger_pause, fg="#24416e")
+        self.resume_btn = self._create_action_button(button_row, "继续", "#ffffff", self._trigger_resume, fg="#24416e")
+        self.stop_btn = self._create_action_button(button_row, "停止", "#ea5b64", self._trigger_stop)
+        for index, button in enumerate((self.run_btn, self.pause_btn, self.resume_btn, self.stop_btn)):
+            button.grid(row=0, column=index, padx=(0, 8 if index < 3 else 0))
+        self._register_feedback_button("run", self.run_btn, "启动", managed=True)
+        self._register_feedback_button("pause", self.pause_btn, "暂停", managed=True)
+        self._register_feedback_button("resume", self.resume_btn, "继续", managed=True)
+        self._register_feedback_button("stop", self.stop_btn, "停止", managed=True)
+
+        right_meta = tk.Frame(toolbar, bg=self.PANEL_BG)
+        right_meta.pack(side="right", padx=8, pady=6)
+        tk.Label(right_meta, text="窗口数量", font=self.LABEL_FONT, bg=self.PANEL_BG, fg="#24416e").grid(row=0, column=0, padx=(0, 8))
+        self.window_count_entry = self._create_entry(right_meta, self.window_count_text, width=6, justify="center")
+        self.window_count_entry.grid(row=0, column=1, padx=(0, 8), ipady=5)
+        self.save_btn = self._create_action_button(right_meta, "保存", "#ffffff", self._trigger_save, fg="#24416e", width=9)
+        self.save_btn.grid(row=0, column=2)
+        self._register_feedback_button("save", self.save_btn, "保存", managed=False)
+
+        conn_panel = tk.Frame(canvas, bg=self.PANEL_BG, highlightthickness=1, highlightbackground=self.BORDER_COLOR, height=88)
+        conn_panel.pack(fill="x", padx=6, pady=(0, 6))
+        conn_panel.pack_propagate(False)
+        left_block = tk.Frame(conn_panel, bg=self.PANEL_BG)
+        left_block.pack(side="left", fill="both", expand=True, padx=(8, 6), pady=10)
+        right_block = tk.Frame(conn_panel, bg=self.PANEL_BG)
+        right_block.pack(side="left", fill="both", expand=True, padx=(6, 8), pady=10)
+        self._build_labeled_row(left_block, 0, "本地地址", self.bit_api)
+        self._build_labeled_row(right_block, 0, "浏览器 API", self.api_token)
+
+        control_panel = tk.Frame(canvas, bg=self.PANEL_BG, highlightthickness=1, highlightbackground=self.BORDER_COLOR, height=70)
+        control_panel.pack(fill="x", padx=6, pady=(0, 6))
+        control_panel.pack_propagate(False)
+        left_control = tk.Frame(control_panel, bg=self.PANEL_BG)
+        left_control.pack(side="left", fill="y", expand=True, padx=(8, 6), pady=10)
+        right_control = tk.Frame(control_panel, bg=self.PANEL_BG)
+        right_control.pack(side="left", fill="y", expand=True, padx=(6, 8), pady=10)
+
+        tk.Label(left_control, text="发送频率", font=self.LABEL_FONT, bg=self.PANEL_BG, fg="#24416e").grid(row=0, column=0, sticky="w")
+        self.min_interval = self._create_entry(left_control, tk.StringVar(), width=6, justify="center")
+        self.min_interval.grid(row=0, column=1, padx=(12, 6), ipady=4)
+        tk.Label(left_control, text="—", font=self.LABEL_FONT, bg=self.PANEL_BG, fg="#24416e").grid(row=0, column=2, padx=4)
+        self.max_interval = self._create_entry(left_control, tk.StringVar(), width=6, justify="center")
+        self.max_interval.grid(row=0, column=3, padx=(4, 0), ipady=4)
+
+        tk.Label(right_control, text="窗口号", font=self.LABEL_FONT, bg=self.PANEL_BG, fg="#24416e").grid(row=0, column=0, sticky="w")
+        self.window_no_entry = self._create_entry(right_control, self.window_no_text, width=8, justify="center")
+        self.window_no_entry.grid(row=0, column=1, padx=(12, 10), ipady=4)
+        self.single_run_btn = self._create_action_button(right_control, "单独启动", "#4f7df0", self._trigger_single_run, width=13)
+        self.single_run_btn.grid(row=0, column=2)
+        self._register_feedback_button("single", self.single_run_btn, "单独启动", managed=False)
+
+        message_panel = tk.Frame(canvas, bg=self.PANEL_BG, highlightthickness=1, highlightbackground=self.BORDER_COLOR, height=146)
+        message_panel.pack(fill="x", padx=6, pady=(0, 6))
+        message_panel.pack_propagate(False)
+        tk.Label(message_panel, text="发送文本", font=self.LABEL_FONT, bg=self.PANEL_BG, fg="#24416e").pack(anchor="w", padx=10, pady=(8, 6))
+        message_body = tk.Frame(message_panel, bg=self.PANEL_BG)
+        message_body.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        self.message_text = tk.Text(
+            message_body,
+            font=("Consolas", 12),
             bg="#ffffff",
-            fg="#22324d",
-        ).pack(pady=(18, 10))
-
-        meta_frame = tk.Frame(card, bg="#f8fafc", highlightthickness=1, highlightbackground="#e2e8f0")
-        meta_frame.pack(fill="x", padx=20, pady=(0, 14))
-        tk.Label(
-            meta_frame,
-            textvariable=self.activation_text,
-            font=font_small,
-            bg="#f8fafc",
-            fg="#0f766e",
-        ).pack(anchor="w", padx=12, pady=(10, 4))
-        tk.Label(
-            meta_frame,
-            textvariable=self.server_text,
-            font=font_small,
-            bg="#f8fafc",
-            fg="#4b5563",
-        ).pack(anchor="w", padx=12, pady=2)
-        tk.Label(
-            meta_frame,
-            textvariable=self.expire_text,
-            font=font_small,
-            bg="#f8fafc",
-            fg="#4b5563",
-        ).pack(anchor="w", padx=12, pady=2)
-        tk.Label(
-            meta_frame,
-            textvariable=self.device_text,
-            font=font_small,
-            bg="#f8fafc",
-            fg="#4b5563",
-        ).pack(anchor="w", padx=12, pady=(2, 10))
-
-        config_frame = tk.Frame(card, bg="#ffffff")
-        config_frame.pack(fill="x", padx=20)
-        tk.Label(config_frame, text="BitBrowser 地址", font=font_label, bg="#ffffff").grid(
-            row=0, column=0, sticky="w", pady=(0, 10)
-        )
-        tk.Entry(
-            config_frame,
-            textvariable=self.bit_api,
-            font=font_label,
+            fg="#24416e",
             relief="solid",
             bd=1,
-        ).grid(row=0, column=1, sticky="ew", pady=(0, 10), ipady=6)
-        tk.Label(config_frame, text="API Token", font=font_label, bg="#ffffff").grid(
-            row=1, column=0, sticky="w", pady=(0, 10)
+            highlightthickness=1,
+            highlightbackground="#4f7df0",
+            highlightcolor="#4f7df0",
+            wrap="word",
+            height=5,
         )
-        tk.Entry(
-            config_frame,
-            textvariable=self.api_token,
-            font=font_label,
+        self.message_text.pack(side="left", fill="both", expand=True)
+        message_scroll = tk.Scrollbar(message_body, orient="vertical", command=self.message_text.yview)
+        message_scroll.pack(side="right", fill="y")
+        self.message_text.configure(yscrollcommand=message_scroll.set)
+
+        log_panel = tk.Frame(canvas, bg=self.PANEL_BG, highlightthickness=1, highlightbackground=self.BORDER_COLOR)
+        log_panel.pack(fill="both", expand=True, padx=6, pady=(0, 6))
+        log_header = tk.Frame(log_panel, bg=self.PANEL_BG)
+        log_header.pack(fill="x", padx=10, pady=(8, 6))
+        tk.Label(log_header, text="实时日志", font=self.LABEL_FONT, bg=self.PANEL_BG, fg="#24416e").pack(side="left")
+        counters = tk.Frame(log_header, bg=self.PANEL_BG)
+        counters.pack(side="right")
+        tk.Label(counters, text="已发送：", font=self.NOTICE_FONT, bg=self.PANEL_BG, fg="#24416e").pack(side="left")
+        tk.Label(counters, textvariable=self.sent_count_text, font=self.NOTICE_FONT, bg=self.PANEL_BG, fg="#24416e").pack(side="left", padx=(0, 12))
+        tk.Label(counters, text="失败：", font=self.NOTICE_FONT, bg=self.PANEL_BG, fg="#24416e").pack(side="left")
+        tk.Label(counters, textvariable=self.failed_count_text, font=self.NOTICE_FONT, bg=self.PANEL_BG, fg="#24416e").pack(side="left")
+
+        log_body = tk.Frame(log_panel, bg=self.PANEL_BG)
+        log_body.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        self.log_text = tk.Text(
+            log_body,
+            font=self.TEXT_FONT,
+            bg="#233f6f",
+            fg="#ffffff",
+            insertbackground="#ffffff",
             relief="solid",
             bd=1,
-            show="*",
-        ).grid(row=1, column=1, sticky="ew", pady=(0, 10), ipady=6)
-        config_frame.grid_columnconfigure(1, weight=1)
+            wrap="none",
+            spacing1=1,
+            spacing3=1,
+        )
+        self.log_text.grid(row=0, column=0, sticky="nsew")
+        y_scroll = tk.Scrollbar(log_body, orient="vertical", command=self.log_text.yview)
+        y_scroll.grid(row=0, column=1, sticky="ns")
+        x_scroll = tk.Scrollbar(log_body, orient="horizontal", command=self.log_text.xview)
+        x_scroll.grid(row=1, column=0, sticky="ew")
+        log_body.grid_rowconfigure(0, weight=1)
+        log_body.grid_columnconfigure(0, weight=1)
+        self.log_text.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
+        self.log_text.bind("<Key>", self._block_log_edit)
+        self.log_text.bind("<<Paste>>", lambda _event: "break")
+        self.log_text.bind("<MouseWheel>", self._update_log_follow_state)
+        self.log_text.bind("<Button-4>", self._update_log_follow_state)
+        self.log_text.bind("<Button-5>", self._update_log_follow_state)
+        self.log_text.bind("<ButtonRelease-1>", self._update_log_follow_state)
+        self.log_text.bind("<KeyRelease>", self._update_log_follow_state)
 
-        interval_frame = tk.Frame(card, bg="#ffffff")
-        interval_frame.pack(fill="x", padx=20, pady=(0, 12))
-        tk.Label(interval_frame, text="发送频率", font=font_label, bg="#ffffff").grid(
-            row=0, column=0, sticky="w"
+    def _build_labeled_row(self, parent, row, label_text, text_var):
+        parent.grid_columnconfigure(1, weight=1)
+        tk.Label(parent, text=label_text, font=self.LABEL_FONT, bg=self.PANEL_BG, fg="#24416e").grid(
+            row=row,
+            column=0,
+            sticky="w",
         )
-        self.min_interval = ttk.Combobox(
-            interval_frame,
-            width=6,
-            values=["2", "5", "10", "30", "60", "90", "120"],
-            state="readonly",
-        )
-        self.min_interval.grid(row=0, column=1, padx=(12, 8))
-        tk.Label(interval_frame, text="~", font=font_label, bg="#ffffff").grid(
-            row=0, column=2, padx=(0, 8)
-        )
-        self.max_interval = ttk.Combobox(
-            interval_frame,
-            width=6,
-            values=["6", "10", "20", "60", "90", "120", "180"],
-            state="readonly",
-        )
-        self.max_interval.grid(row=0, column=3, padx=(0, 8))
-        tk.Label(interval_frame, text="秒", font=font_label, bg="#ffffff").grid(
-            row=0, column=4, padx=(0, 16)
-        )
-        tk.Button(
-            interval_frame,
-            text="保存本地配置",
-            font=font_label,
+        entry = self._create_entry(parent, text_var)
+        entry.grid(row=row, column=1, sticky="ew", padx=(12, 0), ipady=4)
+        return entry
+
+    def _create_entry(self, parent, text_var, width=None, justify="left"):
+        return tk.Entry(
+            parent,
+            textvariable=text_var,
+            width=width,
+            justify=justify,
+            font=("Microsoft YaHei", 11),
+            relief="solid",
+            bd=1,
+            highlightthickness=1,
+            highlightbackground=self.BORDER_COLOR,
+            highlightcolor="#5a8fe3",
             bg="#ffffff",
-            fg="#22324d",
-            relief="solid",
-            bd=1,
-            width=16,
-            command=self.on_save_settings,
-        ).grid(row=0, column=5)
+            fg="#24416e",
+        )
 
-        status_card = tk.Frame(card, bg="#f8fafc", highlightthickness=1, highlightbackground="#e2e8f0")
-        status_card.pack(fill="x", padx=20, pady=(4, 14))
-        tk.Label(
-            status_card,
-            textvariable=self.run_status_text,
-            font=font_small,
-            bg="#f8fafc",
-            fg="#374151",
-            anchor="w",
-            justify="left",
-        ).pack(fill="x", padx=12, pady=12)
+    def _create_action_button(self, parent, text, bg, command, fg="#ffffff", width=9):
+        return tk.Button(
+            parent,
+            text=text,
+            font=("Microsoft YaHei", 10, "bold"),
+            bg=bg,
+            fg=fg,
+            activebackground=bg,
+            activeforeground=fg,
+            relief="flat",
+            bd=0,
+            width=width,
+            cursor="hand2",
+            command=command,
+            padx=0,
+            pady=6,
+        )
 
-        action_row = tk.Frame(card, bg="#ffffff")
-        action_row.pack(pady=(4, 0))
-        self.run_btn = tk.Button(
-            action_row,
-            text="运行",
-            font=font_label,
-            bg="#4f7df0",
-            fg="#ffffff",
-            activebackground="#3f6de0",
-            relief="flat",
-            width=10,
-            command=self.on_run,
-        )
-        self.run_btn.grid(row=0, column=0, padx=8)
-        self.stop_btn = tk.Button(
-            action_row,
-            text="停止",
-            font=font_label,
-            bg="#ef4444",
-            fg="#ffffff",
-            activebackground="#dc2626",
-            relief="flat",
-            width=10,
-            command=self.on_stop,
-            state="disabled",
-        )
-        self.stop_btn.grid(row=0, column=1, padx=8)
-        self.pause_btn = tk.Button(
-            action_row,
-            text="暂停",
-            font=font_label,
-            bg="#f59e0b",
-            fg="#ffffff",
-            activebackground="#d97706",
-            relief="flat",
-            width=10,
-            command=self.on_pause,
-            state="disabled",
-        )
-        self.pause_btn.grid(row=0, column=2, padx=8)
-        self.resume_btn = tk.Button(
-            action_row,
-            text="继续",
-            font=font_label,
-            bg="#10b981",
-            fg="#ffffff",
-            activebackground="#059669",
-            relief="flat",
-            width=10,
-            command=self.on_resume,
-            state="disabled",
-        )
-        self.resume_btn.grid(row=0, column=3, padx=8)
+    def _register_feedback_button(self, key, button, default_text, managed):
+        self._button_texts[key] = default_text
+        self._button_restore_modes[key] = managed
+        button._feedback_key = key
 
     def _set_activation_notice(self, message="", error=False):
         self.activation_notice_text.set(str(message or "").strip())
         if self.activation_notice_label:
-            self.activation_notice_label.configure(fg="#b42318" if error else "#475467")
+            self.activation_notice_label.configure(fg="#cf2d2d" if error else "#7f8ca3")
 
     def _show_activation_screen(self, message="", error=False):
-        if self.ops_screen:
-            self.ops_screen.pack_forget()
         if self.activation_screen:
-            self.activation_screen.pack(fill="both", expand=True)
-        self.root.geometry("560x320")
+            self.activation_screen.lift()
         self._set_activation_notice(message, error=error)
         try:
             self.code_entry.focus_set()
@@ -672,12 +848,103 @@ class ClientApp:
             pass
 
     def _show_operation_screen(self):
-        if self.activation_screen:
-            self.activation_screen.pack_forget()
         if self.ops_screen:
-            self.ops_screen.pack(fill="both", expand=True)
-        self.root.geometry("760x620")
+            self.ops_screen.lift()
         self._set_activation_notice("", error=False)
+
+    def _load_message_templates(self):
+        templates_text = ""
+        message_path = ROOT_DIR / "config" / "messages.yaml"
+        if message_path.exists():
+            try:
+                data = yaml.safe_load(message_path.read_text(encoding="utf-8")) or {}
+                templates = [
+                    str(item).strip()
+                    for item in (data.get("templates") or [])
+                    if str(item).strip()
+                ]
+                templates_text = "\n".join(templates)
+            except Exception:
+                templates_text = ""
+        if self.message_text is not None:
+            self.message_text.delete("1.0", tk.END)
+            if templates_text:
+                self.message_text.insert("1.0", templates_text)
+
+    def _reset_log_session(self):
+        self._log_offset = 0
+        self._log_follow_tail = True
+        try:
+            self._log_path.parent.mkdir(parents=True, exist_ok=True)
+            self._log_path.write_text("", encoding="utf-8")
+        except Exception:
+            pass
+        if self.log_text is not None:
+            self.log_text.delete("1.0", tk.END)
+
+    def _schedule_log_refresh(self, initial=False):
+        if self.log_job:
+            self.root.after_cancel(self.log_job)
+            self.log_job = None
+        delay = 500 if initial else 700
+        self.log_job = self.root.after(delay, self._poll_log)
+
+    def _poll_log(self):
+        try:
+            self._append_worker_log()
+        finally:
+            self._schedule_log_refresh()
+
+    def _append_worker_log(self):
+        if self.log_text is None:
+            return
+        if not self._log_path.exists():
+            return
+        try:
+            with self._log_path.open("r", encoding="utf-8", errors="ignore") as handle:
+                handle.seek(self._log_offset)
+                chunk = handle.read()
+                self._log_offset = handle.tell()
+        except Exception:
+            return
+        if not chunk:
+            return
+        self.log_text.insert(tk.END, chunk)
+        if self._log_follow_tail:
+            self.log_text.see(tk.END)
+
+    def _is_log_near_bottom(self):
+        if self.log_text is None:
+            return True
+        try:
+            _, last = self.log_text.yview()
+        except Exception:
+            return True
+        return last >= 0.995
+
+    def _update_log_follow_state(self, _event=None):
+        self.root.after_idle(lambda: setattr(self, "_log_follow_tail", self._is_log_near_bottom()))
+
+    def _block_log_edit(self, event):
+        allowed_keys = {
+            "Left",
+            "Right",
+            "Up",
+            "Down",
+            "Home",
+            "End",
+            "Prior",
+            "Next",
+            "Shift_L",
+            "Shift_R",
+            "Control_L",
+            "Control_R",
+        }
+        if event.keysym in allowed_keys:
+            return None
+        if (event.state & 0x4) and event.keysym.lower() in {"c", "a"}:
+            return None
+        return "break"
 
     def _load_existing_state(self):
         send_interval = (
@@ -685,8 +952,10 @@ class ClientApp:
         )
         min_value = str(_parse_int(send_interval[0] if len(send_interval) > 0 else 2, 2))
         max_value = str(_parse_int(send_interval[1] if len(send_interval) > 1 else 6, 6))
-        self.min_interval.set(min_value)
-        self.max_interval.set(max_value)
+        self.min_interval.delete(0, tk.END)
+        self.min_interval.insert(0, min_value)
+        self.max_interval.delete(0, tk.END)
+        self.max_interval.insert(0, max_value)
         owner = str(self.license_data.get("owner") or "").strip()
         license_expired = _license_is_expired(self.license_data)
         token_expired = _token_is_expired(self.client_config.get("token_expires_at"))
@@ -695,27 +964,24 @@ class ClientApp:
         if license_expired:
             self._clear_local_auth(preserve_license=True)
             self.activation_text.set("授权已到期")
-            self.run_status_text.set("账户已到期，请重新输入激活码验证")
-            self._show_activation_screen(
-                "当前账号已到期，请联系管理员续费或输入新的有效激活码后重新验证。",
-                error=True,
-            )
+            self.run_status_text.set("请重新输入激活码完成验证")
+            self._show_activation_screen(self.SESSION_NOTICE_TEXT, error=True)
         elif token_expired:
             self._clear_local_auth(preserve_license=True)
             self.activation_text.set("激活已失效")
-            self.run_status_text.set("本地凭证已过期，请重新输入激活码验证")
-            self._show_activation_screen(
-                "当前本地凭证已过期，请重新输入激活码完成验证。",
-                error=True,
-            )
+            self.run_status_text.set("请重新输入激活码完成验证")
+            self._show_activation_screen(self.SESSION_NOTICE_TEXT, error=True)
         elif self.verified:
             self.activation_text.set(f"已激活：{owner}" if owner else "已激活")
-            self._show_operation_screen()
+            self.refresh_remote_status(silent=True)
+            if self.verified:
+                self._show_operation_screen()
         else:
             self.activation_text.set("未激活")
             self.run_status_text.set("请先完成激活验证")
             self._show_activation_screen(
-                "首次使用请先输入激活码，验证成功后才能进入操作界面。"
+                "验证成功后自动进入操作界面",
+                error=False,
             )
         self._apply_button_state(agent_online=False, task_running=False, task_pending=False)
 
@@ -843,6 +1109,40 @@ class ClientApp:
                 return False
             worker_cmd = [sys.executable, str(worker_script)]
 
+        agent_token = self._current_agent_token()
+        if not agent_token:
+            messagebox.showerror("提示", "当前缺少有效 agent_token，请重新激活。")
+            self._show_activation_screen("请重新输入激活码。", error=True)
+            return False
+
+        bit_api = _normalize_bit_api(self.bit_api.get())
+        api_token = str(self.api_token.get() or "").strip()
+        owner = str(self.license_data.get("owner") or "").strip()
+        runtime_dir = str(_runtime_dir())
+        client_version = str(self.client_config.get("client_version") or "").strip()
+        token_expires_at = self.client_config.get("token_expires_at")
+
+        worker_cmd.extend([
+            "--server",
+            self.server_url,
+            "--bit-api",
+            bit_api,
+            "--api-token",
+            api_token,
+            "--owner",
+            owner,
+            "--machine-id",
+            self.machine_id,
+            "--agent-token",
+            agent_token,
+            "--runtime-dir",
+            runtime_dir,
+            "--client-version",
+            client_version,
+        ])
+        if token_expires_at not in (None, ""):
+            worker_cmd.extend(["--token-expires-at", str(token_expires_at)])
+
         log_path = _runtime_path("logs", "worker.log")
         log_path.parent.mkdir(parents=True, exist_ok=True)
         creationflags = 0
@@ -858,6 +1158,7 @@ class ClientApp:
                 stderr=log_path.open("a", encoding="utf-8"),
                 creationflags=creationflags,
                 cwd=str(ROOT_DIR),
+                env={**os.environ, ENV_RUNTIME_DIR: runtime_dir},
                 **kwargs,
             )
         except Exception as exc:
@@ -875,6 +1176,11 @@ class ClientApp:
         return False
 
     def _apply_button_state(self, agent_online, task_running, task_pending):
+        self._button_state_snapshot = {
+            "agent_online": bool(agent_online),
+            "task_running": bool(task_running),
+            "task_pending": bool(task_pending),
+        }
         is_busy = bool(task_running or task_pending)
         self.run_btn.config(state="normal" if self.verified and not is_busy else "disabled")
         self.stop_btn.config(state="normal" if agent_online and is_busy else "disabled")
@@ -901,7 +1207,7 @@ class ClientApp:
                     self.activation_text.set("激活已失效")
                 self.run_status_text.set("请重新输入激活码完成验证")
                 self._apply_button_state(agent_online=False, task_running=False, task_pending=False)
-                self._show_activation_screen(_translate_client_error(error_code), error=True)
+                self._show_activation_screen(self.SESSION_NOTICE_TEXT, error=True)
                 return None
             if not silent:
                 self.run_status_text.set(
@@ -939,6 +1245,53 @@ class ClientApp:
         finally:
             self._schedule_status_refresh()
 
+    def _with_button_feedback(self, key, busy_text, callback):
+        button = getattr(self, f"{key}_btn", None)
+        if button is None:
+            callback()
+            return
+        default_text = self._button_texts.get(key, button.cget("text"))
+        managed = self._button_restore_modes.get(key, False)
+        previous_state = button.cget("state")
+        button.config(text=busy_text, state="disabled", relief="sunken")
+        self.root.configure(cursor="watch")
+        self.root.update_idletasks()
+        try:
+            callback()
+        finally:
+            if button.winfo_exists():
+                button.config(text=default_text, relief="flat")
+                if managed:
+                    self._apply_button_state(**self._button_state_snapshot)
+                else:
+                    button.config(state=previous_state if previous_state in {"normal", "disabled"} else "normal")
+            self.root.configure(cursor="")
+            self.root.update_idletasks()
+
+    def _trigger_verify(self):
+        self._with_button_feedback("verify", "验证中...", self.on_verify)
+
+    def _trigger_run(self):
+        self._with_button_feedback("run", "启动中...", self.on_run)
+
+    def _trigger_pause(self):
+        self._with_button_feedback("pause", "暂停中...", self.on_pause)
+
+    def _trigger_resume(self):
+        self._with_button_feedback("resume", "继续中...", self.on_resume)
+
+    def _trigger_stop(self):
+        self._with_button_feedback("stop", "停止中...", self.on_stop)
+
+    def _trigger_save(self):
+        self._with_button_feedback("save", "保存中...", self.on_save_settings)
+
+    def _trigger_single_run(self):
+        self._with_button_feedback("single", "处理中...", self._show_single_run_hint)
+
+    def _show_single_run_hint(self):
+        messagebox.showinfo("提示", "单独启动当前版本仅保留界面入口，请使用正式启动链。")
+
     def on_verify(self):
         code = str(self.activation_code.get() or "").strip()
         if not code:
@@ -958,10 +1311,11 @@ class ClientApp:
             if str(data.get("error") or "").strip() == "account_expired":
                 self.activation_text.set("授权已到期")
                 self.run_status_text.set("账户已到期，请联系管理员续费")
+                self._show_activation_screen(self.SESSION_NOTICE_TEXT, error=True)
             else:
                 self.activation_text.set("未激活")
                 self.run_status_text.set("激活失败，请重新输入有效激活码")
-            self._show_activation_screen(error_text, error=True)
+                self._show_activation_screen(error_text, error=True)
             messagebox.showerror("提示", error_text)
             return
         info = data.get("data") or {}
@@ -1035,8 +1389,10 @@ class ClientApp:
         if self.status_job:
             self.root.after_cancel(self.status_job)
             self.status_job = None
+        if self.log_job:
+            self.root.after_cancel(self.log_job)
+            self.log_job = None
         self.root.destroy()
-
 
 def main():
     root = tk.Tk()

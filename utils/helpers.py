@@ -604,27 +604,6 @@ class Database:
         self.conn.commit()
         return cursor.lastrowid
 
-    def clear_pending_agent_tasks(self, owner=None, machine_id=None, reason="stale_queue_cleanup"):
-        conditions = ["status = 'pending'"]
-        params = []
-        if owner:
-            conditions.append("owner = ?")
-            params.append(owner)
-        if machine_id:
-            conditions.append("assigned_machine_id = ?")
-            params.append(machine_id)
-        where = " AND ".join(conditions)
-        now = time.time()
-        self.conn.execute(
-            f"""
-            UPDATE agent_tasks
-            SET status = ?, error = ?, updated_at = ?
-            WHERE {where}
-            """,
-            ["failed", reason, now, *params],
-        )
-        self.conn.commit()
-
     def claim_agent_task(self, machine_id):
         row = self.conn.execute(
             """

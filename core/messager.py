@@ -143,8 +143,9 @@ class Messager:
     ]
     PROFILE_ACTION_TEXTS = ADD_FRIEND_TEXTS + FOLLOW_ONLY_TEXTS + CONNECT_TEXTS
 
-    def __init__(self, page, task_cfg=None):
+    def __init__(self, page, task_cfg=None, window_label=None):
         self.page = page
+        self.window_label = (window_label or "").strip()
         task_cfg = task_cfg or {}
         self._pause_flag_path = self._resolve_pause_flag(task_cfg)
         try:
@@ -183,6 +184,44 @@ class Messager:
         self.default_close_delay_ms = int(
             task_cfg.get("default_close_delay_ms", 800) or 800
         )
+        self.hover_card_wait_timeout_ms = int(
+            task_cfg.get("hover_card_wait_timeout_ms", 8000) or 8000
+        )
+        self.message_button_wait_timeout_ms = int(
+            task_cfg.get("message_button_wait_timeout_ms", 10000) or 10000
+        )
+        self.chat_session_wait_timeout_ms = int(
+            task_cfg.get("chat_session_wait_timeout_ms", 12000) or 12000
+        )
+        self.editor_ready_wait_timeout_ms = int(
+            task_cfg.get("editor_ready_wait_timeout_ms", 8000) or 8000
+        )
+
+    def _prefix(self):
+        return f"[{self.window_label}] " if self.window_label else ""
+
+    def _wait_for_condition(self, step_name, detail, checker, timeout_ms, interval=0.2):
+        timeout_ms = max(300, int(timeout_ms or 300))
+        interval = max(0.05, float(interval or 0.05))
+        start = time.time()
+        log.info(f"{self._prefix()}{step_name}，{detail}...")
+        last_error = None
+        while (time.time() - start) * 1000 < timeout_ms:
+            self._wait_if_paused()
+            try:
+                result = checker()
+            except Exception as exc:
+                result = None
+                last_error = exc
+            if result:
+                waited = time.time() - start
+                log.info(f"{self._prefix()}{step_name}等待成功，耗时 {waited:.1f} 秒。")
+                return result
+            self._sleep(interval, min_seconds=0.02)
+        waited = time.time() - start
+        suffix = f": {last_error}" if last_error else ""
+        log.warning(f"{self._prefix()}{step_name}等待超时，已等待 {waited:.1f} 秒，{detail}失败{suffix}")
+        return None
 
     def _resolve_pause_flag(self, task_cfg):
         pause_flag = (os.environ.get(self.ENV_PAUSE_FLAG) or "").strip()
@@ -283,66 +322,30 @@ class Messager:
                     self._sleep(0.2)
                 self._wait_if_paused()
             if use_fast:
-                # 快速判定：在页面内完成滚动/悬停/查找/点击，减少往返
-                button = None
-                try:
-                    fast_result = self._fast_try_click_message_button(link)
-                except Exception:
-                    fast_result = "error"
-                if fast_result == "clicked":
-                    button = True
-                elif fast_result == "no_button":
+                button = self._wait_for_fast_message_entry(
+                    link,
+                    name=name,
+                    timeout_ms=self.message_button_wait_timeout_ms,
+                )
+                if button is None:
                     gate_reason = self._detect_profile_message_gate(link)
                     if gate_reason:
-                        log.info(f"成员资料卡限制，跳过: {name} ({gate_reason})")
+                        log.info(f"{self._prefix()}成员资料卡限制，跳过: {name} ({gate_reason})")
                         self._fast_close_hover_card()
                         return {"status": "skip", "reason": gate_reason}
-                    log.info(f"当前成员卡片没有可用的发消息按钮，跳过: {name}")
+                    log.info(f"{self._prefix()}等待“发消息”按钮超时，跳过当前成员: {name}")
                     self._fast_close_hover_card()
-                    return {"status": "skip", "reason": "message_button_not_found"}
-                elif fast_result == "hover_fail":
-                    # 轻微加一次重试，避免卡片未渲染就误判
-                    try:
-                        fast_result = self._fast_try_click_message_button(
-                            link, hover_delay_ms=max(0, int(self.fast_hover_sleep_ms) + 120)
-                        )
-                    except Exception:
-                        fast_result = "error"
-                    if fast_result == "clicked":
-                        button = True
-                    elif fast_result == "no_button":
-                        gate_reason = self._detect_profile_message_gate(link)
-                        if gate_reason:
-                            log.info(f"成员资料卡限制，跳过: {name} ({gate_reason})")
-                            self._fast_close_hover_card()
-                            return {"status": "skip", "reason": gate_reason}
-                        log.info(f"当前成员卡片没有可用的发消息按钮，跳过: {name}")
-                        self._fast_close_hover_card()
-                        return {"status": "skip", "reason": "message_button_not_found"}
-                    else:
-                        log.info(f"成员卡片无法稳定悬停，跳过: {name}")
-                        self._dismiss_member_hover_card()
-                        return {"status": "skip", "reason": "member_hover_timeout"}
-                else:
-                    # 快速模式禁用慢兜底：直接跳过，避免卡顿
-                    gate_reason = self._detect_profile_message_gate(link)
-                    if gate_reason:
-                        log.info(f"成员资料卡限制，跳过: {name} ({gate_reason})")
-                        self._fast_close_hover_card()
-                        return {"status": "skip", "reason": gate_reason}
-                    log.info(f"当前成员卡片没有可用的发消息按钮，跳过: {name}")
-                    self._fast_close_hover_card()
-                    return {"status": "skip", "reason": "message_button_not_found"}
+                    return {"status": "skip", "reason": "message_button_timeout"}
             else:
                 if not self.force_hover_card and self.quick_no_button_precheck:
                     quick_state = self._fast_try_click_message_button(link, click=False)
                     if quick_state == "no_button":
                         gate_reason = self._detect_profile_message_gate(link)
                         if gate_reason:
-                            log.info(f"成员资料卡限制，跳过: {name} ({gate_reason})")
+                            log.info(f"{self._prefix()}成员资料卡限制，跳过: {name} ({gate_reason})")
                             self._fast_close_hover_card()
                             return {"status": "skip", "reason": gate_reason}
-                        log.info(f"当前成员卡片没有可用的发消息按钮，跳过: {name}")
+                        log.info(f"{self._prefix()}当前成员卡片没有可用的发消息按钮，跳过: {name}")
                         self._fast_close_hover_card()
                         return {"status": "skip", "reason": "message_button_not_found"}
                 try:
@@ -351,33 +354,29 @@ class Messager:
                     try:
                         link.hover(timeout=max(action_timeout, 1200))
                     except Exception:
-                        log.info(f"成员卡片无法稳定悬停，跳过: {name}")
+                        log.info(f"{self._prefix()}成员卡片无法稳定悬停，跳过: {name}")
                         return {"status": "skip", "reason": "member_hover_timeout"}
-                link_box = self._wait_for_stable_box(link, max_rounds=2, delay=0.08)
-                hover_card = self._find_hover_card_container(link_box) if link_box else None
+                hover_card = self._wait_for_hover_card(link, timeout_ms=self.hover_card_wait_timeout_ms)
                 if not hover_card:
-                    self._sleep(random.uniform(0.22, 0.38))
-                    self._wait_if_paused()
-                    hover_card = self._ensure_hover_card(link)
-                if not hover_card:
-                    log.info(f"成员卡片未弹出，跳过: {name}")
+                    log.info(f"{self._prefix()}等待成员资料卡超时，跳过: {name}")
                     self._dismiss_member_hover_card()
                     return {"status": "skip", "reason": "member_hover_timeout"}
-                button = self._find_member_card_message_button(link, hover_card=hover_card)
-                if not button:
-                    self._sleep(0.12)
-                    button = self._find_member_card_message_button(link, hover_card=hover_card)
+                button = self._wait_for_member_card_message_button(
+                    link,
+                    hover_card=hover_card,
+                    timeout_ms=self.message_button_wait_timeout_ms,
+                )
                 if not button:
                     gate_reason = self._detect_profile_message_gate(link, hover_card=hover_card)
                     if gate_reason:
-                        log.info(f"成员资料卡限制，跳过: {name} ({gate_reason})")
+                        log.info(f"{self._prefix()}成员资料卡限制，跳过: {name} ({gate_reason})")
                         self._fast_close_hover_card()
                         return {"status": "skip", "reason": gate_reason}
                     if hover_card:
-                        log.info(f"资料卡可见但无法直接发消息，跳过: {name}")
+                        log.info(f"{self._prefix()}等待“发消息”按钮超时，跳过当前成员: {name}")
                         self._fast_close_hover_card()
-                        return {"status": "skip", "reason": "profile_message_unavailable"}
-                    log.info(f"当前成员卡片没有可用的发消息按钮，跳过: {name}")
+                        return {"status": "skip", "reason": "message_button_timeout"}
+                    log.info(f"{self._prefix()}当前成员卡片没有可用的发消息按钮，跳过: {name}")
                     self._fast_close_hover_card()
                     return {"status": "skip", "reason": "message_button_not_found"}
 
@@ -396,10 +395,12 @@ class Messager:
                         log.warning(f"发消息按钮点击失败，跳过: {name}")
                         self._dismiss_member_hover_card()
                         return {"status": "skip", "reason": "message_button_click_failed"}
-            self._sleep(random.uniform(0.25, 0.45))
             self._wait_if_paused()
 
-            chat_session = self._wait_for_chat_session(expected_name=name)
+            chat_session = self._wait_for_chat_session(
+                expected_name=name,
+                timeout_ms=self.chat_session_wait_timeout_ms,
+            )
             if not chat_session:
                 restriction = self._detect_chat_restriction(expected_name=name)
                 if restriction:
@@ -413,8 +414,15 @@ class Messager:
                         "alert_text": self.STRANGER_LIMIT_ALERT_TEXT,
                     }
                 self._close_visible_chat_windows()
-                log.warning(f"聊天窗口未正常打开，跳过: {name}")
+                log.warning(f"{self._prefix()}聊天窗口未正常打开，跳过: {name}")
                 return {"status": "skip", "reason": "chat_editor_not_found"}
+
+            if not self._wait_for_editor_ready(
+                chat_session["editor"],
+                timeout_ms=self.editor_ready_wait_timeout_ms,
+            ):
+                log.warning(f"{self._prefix()}输入框未准备就绪，跳过: {name}")
+                return {"status": "skip", "reason": "chat_editor_not_ready"}
 
             if self._check_stranger_limit_global():
                 log.warning(f"进入聊天后检测到陌生消息数量已达上限: {name}")
@@ -536,7 +544,7 @@ class Messager:
     def _type_and_send(self, editor, text, delay_range):
         before_hits = self._count_message_hits(editor, text)
         editor.click()
-        self._sleep(0.4)
+        self._sleep(0.08)
 
         min_delay, max_delay = delay_range
         for char in text:
@@ -1569,46 +1577,138 @@ class Messager:
 
     def _wait_for_chat_session(self, expected_name=None, timeout_ms=10000):
         timeout_ms = self._scale_ms(timeout_ms, min_ms=2000)
-        deadline = time.time() + timeout_ms / 1000
-        while time.time() < deadline:
-            self._wait_if_paused()
-            fallback_sessions = []
-            for selector in self.MESSAGE_EDITOR_SELECTORS:
-                locator = self.page.locator(selector)
-                count = locator.count()
-                for idx in range(count - 1, -1, -1):
-                    editor = locator.nth(idx)
-                    try:
-                        if not editor.is_visible(timeout=self._scale_ms(200, min_ms=80)):
-                            continue
-                        editor_box = editor.bounding_box()
-                        if not editor_box:
-                            continue
-                        viewport_size = self.page.viewport_size
-                        viewport_width = (
-                            viewport_size["width"]
-                            if viewport_size
-                            else self.page.evaluate("window.innerWidth")
-                        )
-                        if editor_box["x"] < viewport_width * 0.35:
-                            continue
+        result = self._wait_for_condition(
+            "聊天窗口",
+            "等待聊天输入框出现",
+            lambda: self._locate_chat_session(expected_name=expected_name),
+            timeout_ms=timeout_ms,
+            interval=0.25,
+        )
+        return result
 
-                        close_button = self._find_chat_close_button(editor, expected_name)
-                        if close_button:
-                            return {"editor": editor, "close_button": close_button}
-
-                        close_button = self._find_chat_close_button(editor, None)
-                        if close_button:
-                            fallback_sessions.append(
-                                {"editor": editor, "close_button": close_button}
-                            )
-                    except Exception:
+    def _locate_chat_session(self, expected_name=None):
+        fallback_sessions = []
+        for selector in self.MESSAGE_EDITOR_SELECTORS:
+            locator = self.page.locator(selector)
+            count = locator.count()
+            for idx in range(count - 1, -1, -1):
+                editor = locator.nth(idx)
+                try:
+                    if not editor.is_visible(timeout=self._scale_ms(200, min_ms=80)):
+                        continue
+                    editor_box = editor.bounding_box()
+                    if not editor_box:
+                        continue
+                    viewport_size = self.page.viewport_size
+                    viewport_width = (
+                        viewport_size["width"]
+                        if viewport_size
+                        else self.page.evaluate("window.innerWidth")
+                    )
+                    if editor_box["x"] < viewport_width * 0.35:
                         continue
 
-            if expected_name and len(fallback_sessions) == 1:
-                return fallback_sessions[0]
-            self._sleep(0.25)
+                    close_button = self._find_chat_close_button(editor, expected_name)
+                    if close_button:
+                        return {"editor": editor, "close_button": close_button}
+
+                    close_button = self._find_chat_close_button(editor, None)
+                    if close_button:
+                        fallback_sessions.append({"editor": editor, "close_button": close_button})
+                except Exception:
+                    continue
+        if expected_name and len(fallback_sessions) == 1:
+            return fallback_sessions[0]
         return None
+
+    def _wait_for_editor_ready(self, editor, timeout_ms=None):
+        timeout_ms = self._scale_ms(timeout_ms or self.editor_ready_wait_timeout_ms, min_ms=1500)
+        result = self._wait_for_condition(
+            "聊天输入框",
+            "等待输入框可见且可写",
+            lambda: self._editor_ready(editor),
+            timeout_ms=timeout_ms,
+            interval=0.2,
+        )
+        return bool(result)
+
+    def _editor_ready(self, editor):
+        try:
+            if not editor.is_visible(timeout=self._scale_ms(160, min_ms=80)):
+                return False
+            return bool(
+                editor.evaluate(
+                    """(el) => {
+                        if (!el) return false;
+                        if (el.getAttribute && el.getAttribute('aria-disabled') === 'true') return false;
+                        const style = window.getComputedStyle(el);
+                        if (!style || style.visibility === 'hidden' || style.display === 'none') return false;
+                        const rect = el.getBoundingClientRect();
+                        if (!rect.width || !rect.height) return false;
+                        return !!(el.isContentEditable || el.getAttribute('contenteditable') === 'true');
+                    }"""
+                )
+            )
+        except Exception:
+            return False
+
+    def _wait_for_hover_card(self, link, timeout_ms=None):
+        timeout_ms = self._scale_ms(timeout_ms or self.hover_card_wait_timeout_ms, min_ms=1500)
+        link_box = self._wait_for_stable_box(link, max_rounds=2, delay=0.08)
+        if not link_box:
+            return None
+        return self._wait_for_condition(
+            "成员资料卡",
+            "等待资料卡区域渲染完成",
+            lambda: self._find_hover_card_container(link_box) or self._ensure_hover_card(link),
+            timeout_ms=timeout_ms,
+            interval=0.25,
+        )
+
+    def _wait_for_member_card_message_button(self, link, hover_card=None, timeout_ms=None):
+        timeout_ms = self._scale_ms(timeout_ms or self.message_button_wait_timeout_ms, min_ms=1500)
+        state = {"hover_card": hover_card}
+
+        def _locate():
+            current_card = state["hover_card"]
+            if current_card is None:
+                current_card = self._ensure_hover_card(link)
+                state["hover_card"] = current_card
+            if current_card is None:
+                return None
+            button = self._find_member_card_message_button(link, hover_card=current_card)
+            return button
+
+        return self._wait_for_condition(
+            "发消息按钮",
+            "等待资料卡中的“发消息”按钮可点击",
+            _locate,
+            timeout_ms=timeout_ms,
+            interval=0.25,
+        )
+
+    def _wait_for_fast_message_entry(self, link, name=None, timeout_ms=None):
+        timeout_ms = self._scale_ms(timeout_ms or self.message_button_wait_timeout_ms, min_ms=1500)
+
+        def _attempt():
+            try:
+                result = self._fast_try_click_message_button(link)
+            except Exception:
+                result = "error"
+            if result == "clicked":
+                return True
+            if result == "no_button":
+                return None
+            return False
+
+        result = self._wait_for_condition(
+            "发消息按钮",
+            f"等待成员卡片上的“发消息”按钮就绪{f' ({name})' if name else ''}",
+            _attempt,
+            timeout_ms=timeout_ms,
+            interval=0.25,
+        )
+        return True if result else None
 
     def _find_chat_close_button(self, editor, expected_name=None):
         try:
