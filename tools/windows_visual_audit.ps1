@@ -89,6 +89,10 @@ foreach ($target in $targets) {
     $windows = [WindowAudit]::GetVisibleWindows([uint32]$proc.Id)
     $screenshotPath = Join-Path $OutputDir "$($target.name).png"
     $shotSaved = Save-DesktopScreenshot -Path $screenshotPath
+    $screenshotValue = ""
+    if ($shotSaved) {
+      $screenshotValue = $screenshotPath
+    }
     $results += @{
       name = $target.name
       path = $target.path
@@ -97,7 +101,7 @@ foreach ($target in $targets) {
       has_visible_windows = ($windows.Count -gt 0)
       windows = $windows
       screenshot_saved = $shotSaved
-      screenshot = (if ($shotSaved) { $screenshotPath } else { "" })
+      screenshot = $screenshotValue
     }
   } finally {
     if ($proc -and -not $proc.HasExited) {
