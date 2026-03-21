@@ -1,0 +1,414 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>客户端 UI 预览</title>
+  <style>
+    :root {
+      --page-bg: #dbe7f6;
+      --shell-bg: #edf4ff;
+      --panel-bg: #eef5ff;
+      --border: #8fb1e3;
+      --title-bg: #315f97;
+      --title-fg: #ffffff;
+      --primary: #4f7df0;
+      --danger: #ea5b64;
+      --text: #24416e;
+      --muted: #4c6388;
+      --log-bg: #233f6f;
+      --log-border: #2d528e;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+      background: var(--page-bg);
+      color: var(--text);
+    }
+
+    .page {
+      min-height: 100vh;
+      padding: 22px 20px 28px;
+    }
+
+    .tabs {
+      display: flex;
+      justify-content: center;
+      gap: 16px;
+      margin-bottom: 16px;
+    }
+
+    .tab {
+      min-width: 128px;
+      border: 1px solid var(--border);
+      background: #ffffff;
+      color: var(--text);
+      border-radius: 12px;
+      padding: 10px 18px;
+      font-size: 13px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    .tab.active {
+      background: var(--primary);
+      color: #fff;
+      box-shadow: 0 8px 18px rgba(79, 125, 240, 0.25);
+    }
+
+    .intro {
+      text-align: center;
+      color: var(--muted);
+      font-size: 14px;
+      margin-bottom: 18px;
+    }
+
+    .preview-shell {
+      width: 640px;
+      margin: 0 auto;
+      border: 1px solid var(--border);
+      background: var(--shell-bg);
+      box-shadow: 0 10px 24px rgba(49, 95, 151, 0.12);
+    }
+
+    .titlebar {
+      height: 38px;
+      background: var(--title-bg);
+      color: var(--title-fg);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 10px;
+    }
+
+    .titlebar .name {
+      font-size: 14px;
+      font-weight: 700;
+    }
+
+    .win-actions {
+      display: flex;
+      gap: 6px;
+    }
+
+    .win-btn {
+      width: 20px;
+      height: 20px;
+      border-radius: 4px;
+      background: rgba(255,255,255,0.22);
+      position: relative;
+    }
+
+    .win-btn.close {
+      background: #e56b6f;
+    }
+
+    .window {
+      padding: 8px 8px 10px;
+    }
+
+    .panel {
+      border: 1px solid var(--border);
+      background: var(--panel-bg);
+      margin-bottom: 3px;
+    }
+
+    .toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      min-height: 46px;
+      padding: 7px 10px;
+    }
+
+    .toolbar-left,
+    .toolbar-right,
+    .row,
+    .row-left,
+    .row-right {
+      display: flex;
+      align-items: center;
+    }
+
+    .toolbar-left {
+      gap: 6px;
+    }
+
+    .btn {
+      min-width: 38px;
+      height: 30px;
+      border-radius: 4px;
+      border: 1px solid #7ea3dc;
+      background: #fff;
+      color: var(--text);
+      font-size: 12px;
+      font-weight: 700;
+      padding: 0 10px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .btn.primary {
+      background: var(--primary);
+      color: #fff;
+      border-color: var(--primary);
+    }
+
+    .btn.danger {
+      background: var(--danger);
+      color: #fff;
+      border-color: var(--danger);
+    }
+
+    .params {
+      padding: 9px 10px 10px;
+    }
+
+    .row {
+      justify-content: space-between;
+      gap: 10px;
+    }
+
+    .row + .row {
+      margin-top: 9px;
+    }
+
+    .field-group {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .label {
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--text);
+      white-space: nowrap;
+    }
+
+    .input {
+      height: 32px;
+      border: 1px solid var(--border);
+      background: #fff;
+      padding: 0 10px;
+      color: var(--text);
+      font-size: 12px;
+      display: flex;
+      align-items: center;
+      overflow: hidden;
+      white-space: nowrap;
+    }
+
+    .w-local { width: 190px; }
+    .w-api { width: 250px; }
+    .w-small { width: 52px; justify-content: center; }
+    .w-count { width: 46px; justify-content: center; }
+    .w-no { width: 64px; justify-content: center; }
+
+    .dash {
+      width: 14px;
+      text-align: center;
+      font-weight: 700;
+    }
+
+    .section-title {
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--text);
+      padding: 6px 10px 4px;
+    }
+
+    .text-box,
+    .log-box {
+      margin: 0 10px 10px;
+      border: 1px solid #7ba6d8;
+      background: #fff;
+      min-height: 98px;
+      padding: 10px 12px;
+      font-family: Consolas, monospace;
+      font-size: 12px;
+      white-space: pre-wrap;
+      line-height: 1.45;
+    }
+
+    .log-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 6px 10px 4px;
+      color: var(--text);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .log-meta {
+      font-weight: 400;
+      color: var(--muted);
+    }
+
+    .log-box {
+      min-height: 192px;
+      background: var(--log-bg);
+      border-color: var(--log-border);
+      color: #fff;
+    }
+
+    .screen {
+      display: none;
+    }
+
+    .screen.active {
+      display: block;
+    }
+
+    .activation-body {
+      padding: 22px;
+    }
+
+    .activation-title {
+      font-size: 24px;
+      font-weight: 700;
+      margin-bottom: 18px;
+      color: var(--text);
+    }
+
+    .notice {
+      margin-top: 14px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.55;
+    }
+
+    .notice.error {
+      color: #d9485f;
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <div class="tabs">
+      <button class="tab" data-screen="activation">预览激活页</button>
+      <button class="tab" data-screen="expired">预览到期页</button>
+      <button class="tab active" data-screen="operation">预览操作页</button>
+    </div>
+    <div class="intro">当前页面是基于正式客户端当前结构做的网页镜像，用于直接看比例、间距和布局。</div>
+
+    <div class="preview-shell">
+      <div class="titlebar">
+        <div class="name">FB私聊助手 Pro</div>
+        <div class="win-actions">
+          <div class="win-btn"></div>
+          <div class="win-btn"></div>
+          <div class="win-btn close"></div>
+        </div>
+      </div>
+
+      <div class="window">
+        <div class="screen" id="screen-activation">
+          <div class="panel activation-body">
+            <div class="activation-title">激活码</div>
+            <div class="row-left" style="gap: 12px;">
+              <div class="input" style="width: 360px; height: 40px;">请输入激活码</div>
+              <button class="btn primary" style="height: 40px; min-width: 96px;">验证激活</button>
+            </div>
+            <div class="notice">验证成功后自动进入操作界面。</div>
+          </div>
+        </div>
+
+        <div class="screen" id="screen-expired">
+          <div class="panel activation-body">
+            <div class="activation-title">激活码</div>
+            <div class="row-left" style="gap: 12px;">
+              <div class="input" style="width: 360px; height: 40px;">请输入激活码</div>
+              <button class="btn primary" style="height: 40px; min-width: 96px;">验证激活</button>
+            </div>
+            <div class="notice error">当前账号已到期或登录状态已失效，请重新输入有效激活码后继续使用。</div>
+          </div>
+        </div>
+
+        <div class="screen active" id="screen-operation">
+          <div class="panel toolbar">
+            <div class="toolbar-left">
+              <button class="btn primary">启动</button>
+              <button class="btn danger">停止</button>
+              <button class="btn">暂停</button>
+              <button class="btn">继续</button>
+            </div>
+            <div class="toolbar-right">
+              <button class="btn">保存</button>
+            </div>
+          </div>
+
+          <div class="panel params">
+            <div class="row">
+              <div class="row-left field-group">
+                <div class="label">本地地址</div>
+                <div class="input w-local">http://127.0.0.1:54346</div>
+              </div>
+              <div class="row-right field-group">
+                <div class="label">浏览器 API</div>
+                <div class="input w-api">745b99c1c93f42cf8ce884e0cf301649</div>
+              </div>
+            </div>
+            <div class="row">
+              <div class="row-left field-group">
+                <div class="label">发送频率</div>
+                <div class="input w-small">2</div>
+                <div class="dash">—</div>
+                <div class="input w-small">6</div>
+              </div>
+              <div class="row-right field-group">
+                <div class="label">窗口数量</div>
+                <div class="input w-count">10</div>
+                <div class="label">窗口号</div>
+                <div class="input w-no"></div>
+                <button class="btn primary" style="min-width: 78px;">单独启动</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="section-title">发送文本</div>
+            <div class="text-box">Hello
+Hello, nice to meet you</div>
+          </div>
+
+          <div class="panel">
+            <div class="log-head">
+              <div>实时日志</div>
+              <div class="log-meta">已发送： 0　失败： 0</div>
+            </div>
+            <div class="log-box">[32m2026-03-19 03:48:54 [INFO] === 开始执行 ===
+[32m2026-03-19 03:48:54 [WARNING] BitBrowser 会话关闭，当前窗口跳过
+[32m2026-03-19 03:48:54 [INFO] 正在收集已加入小组（轮次: 4），本轮新增 1 个
+=== 主任务 超时退出，发送强制终止 ===
+/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib
+UserWarning:
+resource_tracker: There appear to be 8 leaked semaphore objects to clean up at shutdown
+=== 任务结束，退出码: -15 ===</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const tabs = document.querySelectorAll('.tab');
+    const screens = document.querySelectorAll('.screen');
+
+    tabs.forEach((tab) => {
+      tab.addEventListener('click', () => {
+        const screen = tab.dataset.screen;
+        tabs.forEach((item) => item.classList.toggle('active', item === tab));
+        screens.forEach((item) => item.classList.toggle('active', item.id === `screen-${screen}`));
+      });
+    });
+  </script>
+</body>
+</html>

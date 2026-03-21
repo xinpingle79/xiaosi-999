@@ -365,7 +365,7 @@ def _client_can_use_token(client_config, license_data):
 class ClientApp:
     WINDOW_WIDTH = 602
     WINDOW_HEIGHT = 552
-    TITLE_BAR_HEIGHT = 38
+    TITLE_BAR_HEIGHT = 36
     SHELL_BG = "#edf4ff"
     WINDOW_BG = "#dbe7f6"
     PANEL_BG = "#eef5ff"
@@ -376,17 +376,15 @@ class ClientApp:
     ACTIVATION_GLOW = "#eef6ff"
     ACTIVATION_LINE = "#d8e8ff"
     ACTIVATION_GRID = "#f2f8ff"
-    TITLE_FONT = ("Microsoft YaHei", 15, "bold")
+    TITLE_FONT = ("Microsoft YaHei", 13, "bold")
     TOOLBAR_FONT = ("Microsoft YaHei", 11, "bold")
-    TOP_BUTTON_FONT = ("Microsoft YaHei", 12, "bold")
     HEADER_FONT = ("Microsoft YaHei", 12, "bold")
     LABEL_FONT = ("Microsoft YaHei", 12, "bold")
-    PANEL_TITLE_FONT = ("Microsoft YaHei", 11, "bold")
-    SECTION_LABEL_FONT = ("Microsoft YaHei", 14, "bold")
-    SECTION_TITLE_FONT = ("Microsoft YaHei", 14, "bold")
-    META_FONT = ("Microsoft YaHei", 14)
-    TEXT_FONT = ("Microsoft YaHei", 11)
-    MESSAGE_FONT = ("Consolas", 13)
+    SECTION_LABEL_FONT = ("Microsoft YaHei", 11, "bold")
+    SECTION_TITLE_FONT = ("Microsoft YaHei", 12, "bold")
+    META_FONT = ("Microsoft YaHei", 10)
+    TEXT_FONT = ("Consolas", 10)
+    MESSAGE_FONT = ("Consolas", 11)
     NOTICE_FONT = ("Microsoft YaHei", 9)
     SESSION_NOTICE_TEXT = "当前账号已到期或登录状态已失效，请重新输入有效激活码后继续使用。"
 
@@ -915,19 +913,17 @@ class ClientApp:
         self.ops_screen = tk.Frame(parent, bg=self.SHELL_BG)
         self.ops_screen.place(x=0, y=0, relwidth=1, relheight=1)
 
-        canvas = tk.Frame(
+        shell = tk.Frame(
             self.ops_screen,
             bg=self.SHELL_BG,
             highlightthickness=0,
             bd=0,
         )
-        canvas.pack(fill="both", expand=True, padx=4, pady=4)
-        canvas.pack_propagate(False)
-
-        right_edge_pad = 10
+        shell.pack(fill="both", expand=True, padx=4, pady=4)
+        shell.pack_propagate(False)
 
         toolbar = tk.Frame(
-            canvas,
+            shell,
             bg=self.PANEL_BG,
             highlightthickness=1,
             highlightbackground=self.BORDER_COLOR,
@@ -937,26 +933,25 @@ class ClientApp:
         toolbar.pack_propagate(False)
 
         button_row = tk.Frame(toolbar, bg=self.PANEL_BG)
-        button_row.place(x=8, y=5, width=182, height=34)
-        button_row.grid_anchor("nw")
+        button_row.pack(side="left", padx=(10, 0), pady=6)
         self.run_btn = self._create_action_button(button_row, "启动", "#4f7df0", self._trigger_run, width=8)
+        self.stop_btn = self._create_action_button(button_row, "停止", "#ea5b64", self._trigger_stop, width=8)
         self.pause_btn = self._create_action_button(
             button_row, "暂停", "#ffffff", self._trigger_pause, fg="#24416e", width=8
         )
         self.resume_btn = self._create_action_button(
             button_row, "继续", "#ffffff", self._trigger_resume, fg="#24416e", width=8
         )
-        self.stop_btn = self._create_action_button(button_row, "停止", "#ea5b64", self._trigger_stop, width=8)
         for index, button in enumerate((self.run_btn, self.stop_btn, self.pause_btn, self.resume_btn)):
-            self._mount_toolbar_button(button_row, button, index, padx=(0, 2 if index < 3 else 0))
+            button.configure(font=("Microsoft YaHei", 11, "bold"), padx=0, pady=2)
+            button.pack(side="left", padx=(0, 6 if index < 3 else 0), ipady=2)
         self._register_feedback_button("run", self.run_btn, "启动", managed=True)
         self._register_feedback_button("pause", self.pause_btn, "暂停", managed=True)
         self._register_feedback_button("resume", self.resume_btn, "继续", managed=True)
         self._register_feedback_button("stop", self.stop_btn, "停止", managed=True)
 
         right_meta = tk.Frame(toolbar, bg=self.PANEL_BG)
-        right_meta.place(relx=1.0, x=-(44 + right_edge_pad), y=5, width=44, height=34)
-        right_meta.grid_anchor("ne")
+        right_meta.pack(side="right", padx=(0, 10), pady=6)
         self.save_btn = self._create_action_button(
             right_meta,
             "保存",
@@ -965,103 +960,106 @@ class ClientApp:
             fg="#24416e",
             width=8,
         )
-        self._mount_toolbar_button(right_meta, self.save_btn, 0, align="right")
+        self.save_btn.configure(font=("Microsoft YaHei", 11, "bold"), padx=0, pady=2)
+        self.save_btn.pack(ipady=2)
         self._register_feedback_button("save", self.save_btn, "保存", managed=False)
 
         param_panel = tk.Frame(
-            canvas,
+            shell,
             bg=self.PANEL_BG,
             highlightthickness=1,
             highlightbackground=self.BORDER_COLOR,
-            height=86,
+            height=88,
         )
         param_panel.pack(fill="x", padx=6, pady=(0, 2))
         param_panel.pack_propagate(False)
-        param_panel.grid_anchor("center")
-        param_panel.grid_columnconfigure(0, minsize=66)
-        param_panel.grid_columnconfigure(1, weight=0, minsize=170)
-        param_panel.grid_columnconfigure(2, minsize=58)
-        param_panel.grid_columnconfigure(3, weight=1, minsize=228)
-        param_panel.grid_rowconfigure(0, minsize=32)
-        param_panel.grid_rowconfigure(1, minsize=32)
+        top_row = tk.Frame(param_panel, bg=self.PANEL_BG)
+        top_row.pack(fill="x", padx=10, pady=(8, 4))
+        bottom_row = tk.Frame(param_panel, bg=self.PANEL_BG)
+        bottom_row.pack(fill="x", padx=10, pady=(0, 8))
 
+        local_group = tk.Frame(top_row, bg=self.PANEL_BG)
+        local_group.pack(side="left")
         tk.Label(
-            param_panel, text="本地地址", font=self.SECTION_LABEL_FONT, bg=self.PANEL_BG, fg="#24416e"
-        ).grid(row=0, column=0, sticky="w", padx=(10, 4), pady=(6, 0))
-        local_field_width = 158
-        local_field = tk.Frame(param_panel, bg=self.PANEL_BG, width=local_field_width, height=32)
-        local_field.grid(row=0, column=1, sticky="w", padx=(0, 3), pady=(6, 0))
-        local_field.grid_propagate(False)
-        self.bit_api_entry = self._create_entry(local_field, self.bit_api, font=("Microsoft YaHei", 14))
-        self.bit_api_entry.pack(fill="both", expand=True, ipady=5)
+            local_group, text="本地地址", font=self.SECTION_LABEL_FONT, bg=self.PANEL_BG, fg="#24416e"
+        ).pack(side="left", padx=(0, 8))
+        local_field_width = 190
+        local_field = tk.Frame(local_group, bg=self.PANEL_BG, width=local_field_width, height=30)
+        local_field.pack(side="left")
+        local_field.pack_propagate(False)
+        self.bit_api_entry = self._create_entry(local_field, self.bit_api, font=("Microsoft YaHei", 11))
+        self.bit_api_entry.pack(fill="both", expand=True, ipady=4)
 
+        api_group = tk.Frame(top_row, bg=self.PANEL_BG)
+        api_group.pack(side="right")
         tk.Label(
-            param_panel, text="浏览器 API", font=self.SECTION_LABEL_FONT, bg=self.PANEL_BG, fg="#24416e"
-        ).grid(row=0, column=2, sticky="w", padx=(0, 2), pady=(6, 0))
-        api_field = tk.Frame(param_panel, bg=self.PANEL_BG, width=252, height=32)
-        api_field.grid(row=0, column=3, sticky="e", padx=(0, right_edge_pad), pady=(6, 0))
-        api_field.grid_propagate(False)
-        self.api_token_entry = self._create_entry(api_field, self.api_token, font=("Microsoft YaHei", 13))
-        self.api_token_entry.pack(fill="both", expand=True, ipady=5)
+            api_group, text="浏览器 API", font=self.SECTION_LABEL_FONT, bg=self.PANEL_BG, fg="#24416e"
+        ).pack(side="left", padx=(0, 8))
+        api_field = tk.Frame(api_group, bg=self.PANEL_BG, width=212, height=30)
+        api_field.pack(side="left")
+        api_field.pack_propagate(False)
+        self.api_token_entry = self._create_entry(api_field, self.api_token, font=("Microsoft YaHei", 11))
+        self.api_token_entry.pack(fill="both", expand=True, ipady=4)
 
+        freq_group = tk.Frame(bottom_row, bg=self.PANEL_BG)
+        freq_group.pack(side="left")
         tk.Label(
-            param_panel, text="发送频率", font=self.SECTION_LABEL_FONT, bg=self.PANEL_BG, fg="#24416e"
-        ).grid(row=1, column=0, sticky="w", padx=(10, 4), pady=(8, 6))
-        interval_stack = tk.Frame(param_panel, bg=self.PANEL_BG, width=local_field_width, height=32)
-        interval_stack.grid(row=1, column=1, sticky="w", pady=(8, 6))
+            freq_group, text="发送频率", font=self.SECTION_LABEL_FONT, bg=self.PANEL_BG, fg="#24416e"
+        ).pack(side="left", padx=(0, 8))
+        interval_stack = tk.Frame(freq_group, bg=self.PANEL_BG, width=150, height=30)
+        interval_stack.pack(side="left")
         interval_stack.grid_propagate(False)
         self.min_interval = self._create_entry(
-            interval_stack, tk.StringVar(), width=5, justify="center", font=("Microsoft YaHei", 14)
+            interval_stack, tk.StringVar(), width=5, justify="center", font=("Microsoft YaHei", 11)
         )
-        self.min_interval.place(x=0, y=0, width=52, height=32)
+        self.min_interval.place(x=0, y=0, width=52, height=30)
         tk.Label(interval_stack, text="—", font=self.LABEL_FONT, bg=self.PANEL_BG, fg="#24416e").place(
-            x=73, y=7, width=12, height=18
+            x=70, y=5, width=14, height=20
         )
         self.max_interval = self._create_entry(
-            interval_stack, tk.StringVar(), width=5, justify="center", font=("Microsoft YaHei", 14)
+            interval_stack, tk.StringVar(), width=5, justify="center", font=("Microsoft YaHei", 11)
         )
-        self.max_interval.place(x=local_field_width - 52, y=0, width=52, height=32)
+        self.max_interval.place(x=98, y=0, width=52, height=30)
 
+        window_group = tk.Frame(bottom_row, bg=self.PANEL_BG)
+        window_group.pack(side="right")
         tk.Label(
-            param_panel, text="窗口数量", font=self.SECTION_LABEL_FONT, bg=self.PANEL_BG, fg="#24416e"
-        ).grid(row=1, column=2, sticky="w", padx=(0, 2), pady=(8, 6))
-        window_action = tk.Frame(param_panel, bg=self.PANEL_BG, width=228, height=32)
-        window_action.grid(row=1, column=3, sticky="e", pady=(8, 6), padx=(0, right_edge_pad))
-        window_action.grid_anchor("ne")
-        window_action.grid_propagate(False)
-        window_action.grid_columnconfigure(0, minsize=24)
-        window_action.grid_columnconfigure(1, minsize=44)
-        window_action.grid_columnconfigure(2, minsize=58)
-        window_action.grid_columnconfigure(3, weight=1)
-        window_action.grid_columnconfigure(4, minsize=54)
+            window_group, text="窗口数量", font=self.SECTION_LABEL_FONT, bg=self.PANEL_BG, fg="#24416e"
+        ).pack(side="left", padx=(0, 8))
+        count_field = tk.Frame(window_group, bg=self.PANEL_BG, width=46, height=30)
+        count_field.pack(side="left")
+        count_field.pack_propagate(False)
         self.window_count_entry = self._create_entry(
-            window_action,
+            count_field,
             self.window_count_text,
             width=3,
             justify="center",
-            font=("Microsoft YaHei", 13),
+            font=("Microsoft YaHei", 11),
         )
-        self.window_count_entry.grid(row=0, column=0, sticky="w", ipady=5, padx=(0, 8))
+        self.window_count_entry.pack(fill="both", expand=True, ipady=4)
         tk.Label(
-            window_action, text="窗口号", font=self.SECTION_LABEL_FONT, bg=self.PANEL_BG, fg="#24416e"
-        ).grid(row=0, column=1, sticky="w", padx=(0, 4))
+            window_group, text="窗口号", font=self.SECTION_LABEL_FONT, bg=self.PANEL_BG, fg="#24416e"
+        ).pack(side="left", padx=(12, 8))
+        no_field = tk.Frame(window_group, bg=self.PANEL_BG, width=64, height=30)
+        no_field.pack(side="left")
+        no_field.pack_propagate(False)
         self.window_no_entry = self._create_entry(
-            window_action,
+            no_field,
             self.window_no_text,
             width=7,
             justify="center",
-            font=("Microsoft YaHei", 14),
+            font=("Microsoft YaHei", 11),
         )
-        self.window_no_entry.grid(row=0, column=2, sticky="w", ipady=5, padx=(0, 6))
+        self.window_no_entry.pack(fill="both", expand=True, ipady=4)
         self.single_run_btn = self._create_action_button(
-            window_action, "单独启动", "#4f7df0", self._trigger_single_run, width=12
+            window_group, "单独启动", "#4f7df0", self._trigger_single_run, width=8
         )
-        self.single_run_btn.grid(row=0, column=4, sticky="e")
-        self.single_run_btn.configure(width=6, font=("Microsoft YaHei", 14, "bold"))
+        self.single_run_btn.configure(font=("Microsoft YaHei", 11, "bold"), padx=0, pady=2)
+        self.single_run_btn.pack(side="left", padx=(12, 0), ipady=2)
         self._register_feedback_button("single", self.single_run_btn, "单独启动", managed=False)
 
         message_panel = tk.Frame(
-            canvas,
+            shell,
             bg=self.PANEL_BG,
             highlightthickness=1,
             highlightbackground=self.BORDER_COLOR,
@@ -1076,8 +1074,16 @@ class ClientApp:
             bg=self.PANEL_BG,
             fg="#24416e",
         ).pack(anchor="w", padx=10, pady=(3, 3))
-        self.message_text = tk.Text(
+        message_body = tk.Frame(
             message_panel,
+            bg="#ffffff",
+            highlightthickness=1,
+            highlightbackground="#7ba6d8",
+            bd=0,
+        )
+        message_body.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        self.message_text = tk.Text(
+            message_body,
             font=self.MESSAGE_FONT,
             bg="#ffffff",
             fg="#24416e",
@@ -1089,13 +1095,13 @@ class ClientApp:
             padx=10,
             pady=12,
         )
-        self.message_text.pack(side="left", fill="both", expand=True, padx=(10, 0), pady=(0, 10))
-        message_scroll = tk.Scrollbar(message_panel, orient="vertical", command=self.message_text.yview)
-        message_scroll.pack(side="right", fill="y", padx=(0, 10), pady=(0, 10))
+        self.message_text.pack(side="left", fill="both", expand=True, padx=(8, 0), pady=8)
+        message_scroll = tk.Scrollbar(message_body, orient="vertical", command=self.message_text.yview)
+        message_scroll.pack(side="right", fill="y", padx=(0, 8), pady=8)
         self.message_text.configure(yscrollcommand=message_scroll.set)
 
         log_panel = tk.Frame(
-            canvas,
+            shell,
             bg=self.PANEL_BG,
             highlightthickness=1,
             highlightbackground=self.BORDER_COLOR,
@@ -1112,8 +1118,16 @@ class ClientApp:
         tk.Label(counters, text="失败：", font=self.META_FONT, bg=self.PANEL_BG, fg="#315070").pack(side="left")
         tk.Label(counters, textvariable=self.failed_count_text, font=self.META_FONT, bg=self.PANEL_BG, fg="#315070").pack(side="left")
 
-        self.log_text = tk.Text(
+        log_body = tk.Frame(
             log_panel,
+            bg="#233f6f",
+            highlightthickness=1,
+            highlightbackground="#2d528e",
+            bd=0,
+        )
+        log_body.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        self.log_text = tk.Text(
+            log_body,
             font=self.TEXT_FONT,
             bg="#233f6f",
             fg="#ffffff",
@@ -1127,11 +1141,11 @@ class ClientApp:
             padx=10,
             pady=12,
         )
-        self.log_text.pack(side="left", fill="both", expand=True, padx=(10, 0), pady=(0, 10))
-        y_scroll = tk.Scrollbar(log_panel, orient="vertical", command=self.log_text.yview)
-        y_scroll.pack(side="right", fill="y", padx=(0, 10), pady=(0, 28))
-        x_scroll = tk.Scrollbar(log_panel, orient="horizontal", command=self.log_text.xview)
-        x_scroll.pack(side="bottom", fill="x", padx=10, pady=(0, 10))
+        self.log_text.pack(side="left", fill="both", expand=True, padx=(8, 0), pady=8)
+        y_scroll = tk.Scrollbar(log_body, orient="vertical", command=self.log_text.yview)
+        y_scroll.pack(side="right", fill="y", padx=(0, 8), pady=(8, 28))
+        x_scroll = tk.Scrollbar(log_body, orient="horizontal", command=self.log_text.xview)
+        x_scroll.pack(side="bottom", fill="x", padx=8, pady=(0, 8))
         self.log_text.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
         self.log_text.bind("<Key>", self._block_log_edit)
         self.log_text.bind("<<Paste>>", lambda _event: "break")
@@ -1175,14 +1189,6 @@ class ClientApp:
             pady=3,
             disabledforeground=fg,
         )
-
-    def _mount_toolbar_button(self, parent, button, column, padx=(0, 0), align="left"):
-        slot = tk.Frame(parent, bg=self.PANEL_BG, width=44, height=34)
-        slot.grid(row=0, column=column, padx=padx)
-        slot.grid_propagate(False)
-        button.configure(font=("Microsoft YaHei", 14, "bold"), padx=0, pady=1)
-        button_x = 4 if align == "right" else 0
-        button.place(in_=slot, x=button_x, y=2, width=40, height=30)
 
     def _register_feedback_button(self, key, button, default_text, managed):
         self._button_texts[key] = default_text
