@@ -1029,7 +1029,7 @@ class ClientApp:
         window_action.grid(row=1, column=3, sticky="e", pady=(8, 6), padx=(0, right_edge_pad))
         window_action.grid_anchor("ne")
         window_action.grid_propagate(False)
-        window_action.grid_columnconfigure(0, minsize=48)
+        window_action.grid_columnconfigure(0, minsize=24)
         window_action.grid_columnconfigure(1, minsize=44)
         window_action.grid_columnconfigure(2, minsize=58)
         window_action.grid_columnconfigure(3, weight=1)
@@ -1041,7 +1041,7 @@ class ClientApp:
             justify="center",
             font=("Microsoft YaHei", 13),
         )
-        self.window_count_entry.grid(row=0, column=0, sticky="w", ipady=5, padx=(-24, 8))
+        self.window_count_entry.grid(row=0, column=0, sticky="w", ipady=5, padx=(0, 8))
         tk.Label(
             window_action, text="窗口号", font=self.SECTION_LABEL_FONT, bg=self.PANEL_BG, fg="#24416e"
         ).grid(row=0, column=1, sticky="w", padx=(0, 4))
