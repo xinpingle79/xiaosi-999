@@ -1,4 +1,7 @@
 .DS_Store
+**/.DS_Store
+__MACOSX/
+**/__MACOSX/
 __pycache__/
 *.pyc
 *.pyo
@@ -9,9 +12,20 @@ dist/
 Output/
 
 runtime/
+runtime/**
 *.log
 *.pid
+*.cookies
+*.session
+*.session-*
+*.db
 *.db-shm
 *.db-wal
+*.sqlite
+*.sqlite3
+*.sqlite-shm
+*.sqlite-wal
+.git/
 
 config/server.yaml
+config/client.yaml

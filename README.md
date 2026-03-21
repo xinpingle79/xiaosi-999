@@ -52,6 +52,16 @@ worker 只从服务器拉取统一任务队列，不再读取独立的本地 wor
 - `task_settings.*`：执行参数（本地保存）
 - `runtime_dir`：运行时目录（可选）
 
+仓库只跟踪配置模板：
+- `config/client.example.yaml`
+- `config/server.example.yaml`
+
+本地真实配置文件：
+- `config/client.yaml`
+- `config/server.yaml`
+
+均属于实例私有文件，不进入源码基线，由运行环境复制模板后人工填写或由激活流程生成。
+
 ## 日志位置
 程序运行后会自动创建 `runtime` 目录：
 - `runtime/logs/server.log`
@@ -62,13 +72,36 @@ worker 只从服务器拉取统一任务队列，不再读取独立的本地 wor
 交付包应只包含运行所需源码与配置模板，以下内容不进入交付包：
 - `runtime/`（运行日志与数据库）
 - `dist/`（历史打包产物）
+- `Output/`
+- `.git/`
+- `__MACOSX/`
 - `.venv/`、`__pycache__/`、`.DS_Store`
-- `*.db`、`*.log`、`*.wal`、`*.shm`、`*.pid`、`*.cookies`
+- `*.db`、`*.sqlite*`、`*.log`、`*.wal`、`*.shm`、`*.pid`、`*.cookies`、`*.session*`
+- `config/server.yaml`
+- `config/client.yaml`
+- `config/messages.server.yaml`
 
 ## 敏感配置填写
 请在部署时手动填写以下字段，不要把真实值提交到源码基线：
 - `config/server.yaml`：`admin_account.password`、`api_token`
-- `config/client.yaml`：`api_token`
+- `config/client.yaml`：`agent_token`、`api_token`
+
+## 干净打包链
+当前唯一正式打包链为 GitHub Actions：
+- `/Users/a123/Downloads/融合的fb/.github/workflows/build-windows.yml`
+
+打包前后都必须执行：
+```bash
+python3 tools/release_preflight.py
+```
+
+当前客户端交付目录只允许包含：
+- `FB_RPA_Client.exe`
+- `FB_RPA_Worker.exe`
+- `FB_RPA_Main.exe`
+- `FB_Group_RPA_Alert.exe`
+- `config/messages.yaml`
+- `config/client.example.yaml`
 
 ## 设备管理与租期控制
 - 设备管理页提供纯设备列表（设备ID / 归属账号 / 在线状态 / 最后心跳 / 客户端版本 / 状态）
