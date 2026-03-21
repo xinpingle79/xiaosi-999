@@ -13,6 +13,9 @@ ArchitecturesInstallIn64BitMode=x64compatible
 WizardStyle=modern
 SetupIconFile=assets\fb_chat_helper.ico
 UninstallDisplayIcon={app}\FB_RPA_Client.exe
+CloseApplications=yes
+CloseApplicationsFilter=FB_RPA_Client.exe
+RestartApplications=no
 
 [Tasks]
 Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "附加任务:"; Flags: unchecked
