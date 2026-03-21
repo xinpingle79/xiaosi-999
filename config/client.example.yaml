@@ -23,13 +23,6 @@ task_settings:
   - 100
   - 300
   speed_factor: 0.85
-  fast_message_button_only: false
-  force_hover_card: true
-  fast_action_timeout_ms: 2000
-  fast_visible_timeout_ms: 220
-  fast_hover_sleep_ms: 120
-  fast_retry_sleep_ms: 120
-  quick_no_button_precheck: false
   stranger_limit_cache_ms: 1200
   send_interval_seconds:
   - 2

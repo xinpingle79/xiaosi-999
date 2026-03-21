@@ -1,5 +1,6 @@
 import json
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -93,6 +94,8 @@ def _default_client_config() -> dict:
         "browser": {
             "auto_discover_bitbrowser": True,
         },
+        "message_templates": [],
+        "window_no": "",
         "task_settings": {
             "max_messages_per_account": 0,
             "scroll_times": 0,
@@ -103,13 +106,6 @@ def _default_client_config() -> dict:
             "account_restricted_signal_threshold": 3,
             "typing_delay": [100, 300],
             "speed_factor": 0.85,
-            "fast_message_button_only": False,
-            "force_hover_card": True,
-            "fast_action_timeout_ms": 2000,
-            "fast_visible_timeout_ms": 220,
-            "fast_hover_sleep_ms": 120,
-            "fast_retry_sleep_ms": 120,
-            "quick_no_button_precheck": False,
             "stranger_limit_cache_ms": 1200,
             "send_interval_seconds": [2, 6],
             "max_windows": 0,
@@ -125,6 +121,27 @@ def _sanitize_client_config(data: dict) -> dict:
     cleaned["bit_api"] = _normalize_bit_api(cleaned.get("bit_api") or DEFAULT_BIT_API)
     cleaned["api_token"] = str(cleaned.get("api_token") or "").strip()
     cleaned["agent_token"] = str(cleaned.get("agent_token") or "").strip()
+    cleaned["window_no"] = str(cleaned.get("window_no") or "").strip()
+    templates = cleaned.get("message_templates") or []
+    if not isinstance(templates, list):
+        templates = []
+    cleaned["message_templates"] = [
+        str(item).strip()
+        for item in templates
+        if str(item).strip()
+    ]
+    task_settings = cleaned.get("task_settings")
+    if isinstance(task_settings, dict):
+        for key in (
+            "fast_message_button_only",
+            "force_hover_card",
+            "fast_action_timeout_ms",
+            "fast_visible_timeout_ms",
+            "fast_hover_sleep_ms",
+            "fast_retry_sleep_ms",
+            "quick_no_button_precheck",
+        ):
+            task_settings.pop(key, None)
     if cleaned.get("token_expires_at") in ("", []):
         cleaned["token_expires_at"] = None
     for key in ("activation_code", "register_token", "owner", "expire_at", "max_devices"):
@@ -209,6 +226,30 @@ def _runtime_path(*parts: str) -> Path:
 
 def _license_path() -> Path:
     return _runtime_path("license.json")
+
+
+def _sanitize_owner(owner):
+    if not owner:
+        return ""
+    return "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in str(owner))
+
+
+def _worker_pid_path() -> Path:
+    return _runtime_path("data", "worker.pid")
+
+
+def _stop_flag_path(owner: str) -> Path:
+    base = "stop_default.flag"
+    if owner:
+        base = f"stop_{_sanitize_owner(owner)}.flag"
+    return _runtime_path("data", base)
+
+
+def _pause_flag_path(owner: str) -> Path:
+    base = "pause_default.flag"
+    if owner:
+        base = f"pause_{_sanitize_owner(owner)}.flag"
+    return _runtime_path("data", base)
 
 
 def load_license() -> dict:
@@ -324,16 +365,28 @@ def _client_can_use_token(client_config, license_data):
 class ClientApp:
     WINDOW_WIDTH = 602
     WINDOW_HEIGHT = 552
-    TITLE_BAR_HEIGHT = 36
+    TITLE_BAR_HEIGHT = 38
     SHELL_BG = "#edf4ff"
     WINDOW_BG = "#dbe7f6"
     PANEL_BG = "#eef5ff"
     BORDER_COLOR = "#8fb1e3"
     TITLE_BG = "#315f97"
     TITLE_FG = "#ffffff"
+    ACTIVATION_BG = "#fbfdff"
+    ACTIVATION_GLOW = "#eef6ff"
+    ACTIVATION_LINE = "#d8e8ff"
+    ACTIVATION_GRID = "#f2f8ff"
+    TITLE_FONT = ("Microsoft YaHei", 15, "bold")
+    TOOLBAR_FONT = ("Microsoft YaHei", 11, "bold")
+    TOP_BUTTON_FONT = ("Microsoft YaHei", 12, "bold")
     HEADER_FONT = ("Microsoft YaHei", 12, "bold")
-    LABEL_FONT = ("Microsoft YaHei", 10, "bold")
-    TEXT_FONT = ("Consolas", 10)
+    LABEL_FONT = ("Microsoft YaHei", 12, "bold")
+    PANEL_TITLE_FONT = ("Microsoft YaHei", 11, "bold")
+    SECTION_LABEL_FONT = ("Microsoft YaHei", 14, "bold")
+    SECTION_TITLE_FONT = ("Microsoft YaHei", 14, "bold")
+    META_FONT = ("Microsoft YaHei", 14)
+    TEXT_FONT = ("Microsoft YaHei", 11)
+    MESSAGE_FONT = ("Consolas", 13)
     NOTICE_FONT = ("Microsoft YaHei", 9)
     SESSION_NOTICE_TEXT = "当前账号已到期或登录状态已失效，请重新输入有效激活码后继续使用。"
 
@@ -371,6 +424,11 @@ class ClientApp:
             "agent_online": False,
             "task_running": False,
             "task_pending": False,
+            "task_paused": False,
+            "config_synced": False,
+            "device_bound": False,
+            "start_ready": False,
+            "start_block_reason": "",
         }
         self._log_path = _runtime_path("logs", "worker.log")
         self._log_offset = 0
@@ -383,14 +441,9 @@ class ClientApp:
         self.api_token = tk.StringVar(
             value=str(self.client_config.get("api_token") or "").strip()
         )
-        self.activation_text = tk.StringVar(value="未激活")
-        self.expire_text = tk.StringVar(value="到期时间：-")
-        self.run_status_text = tk.StringVar(value="执行端未连接")
-        self.server_text = tk.StringVar(value="")
-        self.device_text = tk.StringVar(value="")
         self.activation_notice_text = tk.StringVar(value="")
         self.window_count_text = tk.StringVar(value=self._initial_window_count())
-        self.window_no_text = tk.StringVar(value="")
+        self.window_no_text = tk.StringVar(value=str(self.client_config.get("window_no") or ""))
         self.sent_count_text = tk.StringVar(value="0")
         self.failed_count_text = tk.StringVar(value="0")
         self.maximize_button_text = tk.StringVar(value="□")
@@ -407,6 +460,148 @@ class ClientApp:
         self._load_existing_state()
         self._schedule_status_refresh(initial=True)
         self._schedule_log_refresh(initial=True)
+
+    def _runtime_owner(self):
+        return str((self.license_data or {}).get("owner") or "").strip()
+
+    def _remove_runtime_marker(self, path: Path):
+        try:
+            if path.exists():
+                path.unlink()
+        except Exception:
+            pass
+
+    def _clear_runtime_control_flags(self):
+        owner = self._runtime_owner()
+        self._remove_runtime_marker(_stop_flag_path(owner))
+        self._remove_runtime_marker(_pause_flag_path(owner))
+
+    def _read_worker_pid(self):
+        path = _worker_pid_path()
+        if not path.exists():
+            return None
+        try:
+            value = int(str(path.read_text(encoding="utf-8")).strip())
+        except Exception:
+            self._remove_runtime_marker(path)
+            return None
+        return value if value > 0 else None
+
+    def _write_worker_pid(self, pid):
+        path = _worker_pid_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(str(int(pid)), encoding="utf-8")
+        except Exception:
+            pass
+
+    def _clear_worker_pid(self):
+        self._remove_runtime_marker(_worker_pid_path())
+
+    def _is_pid_running(self, pid):
+        if not pid:
+            return False
+        try:
+            os.kill(int(pid), 0)
+        except OSError:
+            return False
+        except Exception:
+            return False
+        return True
+
+    def _terminate_pid(self, pid, wait_seconds=6.0):
+        if not pid:
+            return False
+        pid = int(pid)
+        if not self._is_pid_running(pid):
+            return True
+        if sys.platform.startswith("win"):
+            create_no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+            try:
+                subprocess.run(
+                    ["taskkill", "/PID", str(pid), "/T", "/F"],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    creationflags=create_no_window,
+                )
+            except Exception:
+                pass
+            deadline = time.time() + max(wait_seconds, 1.0)
+            while time.time() < deadline:
+                if not self._is_pid_running(pid):
+                    return True
+                time.sleep(0.2)
+            return not self._is_pid_running(pid)
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except Exception:
+            pass
+        deadline = time.time() + max(wait_seconds, 1.0)
+        while time.time() < deadline:
+            if not self._is_pid_running(pid):
+                return True
+            time.sleep(0.2)
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except Exception:
+            pass
+        time.sleep(0.2)
+        return not self._is_pid_running(pid)
+
+    def _cleanup_stale_worker_process(self):
+        pid = self._read_worker_pid()
+        if not pid:
+            return
+        active_pid = None
+        if self.worker_process and self.worker_process.poll() is None:
+            active_pid = self.worker_process.pid
+        if active_pid == pid:
+            return
+        if self._is_pid_running(pid):
+            self._terminate_pid(pid)
+        self._clear_worker_pid()
+
+    def _wait_for_remote_task_clear(self, timeout=8.0):
+        if not self.verified or not self._current_agent_token():
+            return False
+        deadline = time.time() + max(timeout, 0.5)
+        while time.time() < deadline:
+            info = self.refresh_remote_status(silent=True)
+            if info and not info.get("task_running") and not info.get("task_pending"):
+                return True
+            time.sleep(0.5)
+        return False
+
+    def _shutdown_worker_runtime(self, send_stop=True):
+        target_pids = []
+        if self.worker_process and self.worker_process.poll() is None:
+            target_pids.append(self.worker_process.pid)
+        worker_pid = self._read_worker_pid()
+        if worker_pid and worker_pid not in target_pids:
+            target_pids.append(worker_pid)
+        local_worker_alive = any(self._is_pid_running(pid) for pid in target_pids)
+        stop_sent = False
+        if send_stop and local_worker_alive and self.verified and self._current_agent_token():
+            payload = {
+                "agent_token": self._current_agent_token(),
+                "machine_id": self.machine_id,
+            }
+            ok, _data = self._post_client_api("/api/client/stop", payload, timeout=10)
+            stop_sent = bool(ok)
+        if stop_sent:
+            self._wait_for_remote_task_clear(timeout=8.0)
+            deadline = time.time() + 4.0
+            while time.time() < deadline:
+                if not any(self._is_pid_running(pid) for pid in target_pids):
+                    break
+                time.sleep(0.2)
+        for pid in target_pids:
+            self._terminate_pid(pid)
+        self.worker_process = None
+        self._clear_worker_pid()
+        self._clear_runtime_control_flags()
+        self._apply_button_state(agent_online=False, task_running=False, task_pending=False)
 
     def _centered_geometry(self, width, height):
         self.root.update_idletasks()
@@ -457,7 +652,7 @@ class ClientApp:
         title_label = tk.Label(
             title_bar,
             text="FB私聊助手 Pro",
-            font=("Microsoft YaHei", 11, "bold"),
+            font=self.TITLE_FONT,
             bg=self.TITLE_BG,
             fg=self.TITLE_FG,
         )
@@ -465,7 +660,7 @@ class ClientApp:
         self.title_label = title_label
 
         button_frame = tk.Frame(title_bar, bg=self.TITLE_BG)
-        button_frame.pack(side="right", padx=8, pady=7)
+        button_frame.pack(side="right", padx=8, pady=8)
 
         self.minimize_btn = self._create_window_button(button_frame, "—", self._minimize_window)
         self.minimize_btn.pack(side="left", padx=(0, 6))
@@ -497,7 +692,8 @@ class ClientApp:
             textvariable=textvariable,
             command=command,
             width=2,
-            font=("Microsoft YaHei", 8, "bold"),
+            height=1,
+            font=("Microsoft YaHei", 9, "bold"),
             bg=bg,
             fg="#ffffff",
             activebackground=activebg,
@@ -558,34 +754,36 @@ class ClientApp:
 
         card = tk.Frame(
             self.activation_screen,
-            bg="#ffffff",
+            bg=self.ACTIVATION_BG,
             highlightthickness=1,
             highlightbackground=self.BORDER_COLOR,
             bd=0,
         )
         card.pack(fill="both", expand=True, padx=6, pady=6)
 
-        hero = tk.Frame(card, bg="#ffffff", height=112)
+        hero = tk.Frame(card, bg=self.ACTIVATION_BG, height=112)
         hero.pack(fill="x", padx=10, pady=(10, 8))
         hero.pack_propagate(False)
+        self._build_activation_backdrop(hero, mode="hero")
         tk.Label(
             hero,
             text="FB私聊助手",
             font=("Microsoft YaHei", 28, "bold"),
-            bg="#ffffff",
+            bg=self.ACTIVATION_BG,
             fg="#7ba6d8",
         ).pack(expand=True)
 
-        body = tk.Frame(card, bg="#ffffff")
+        body = tk.Frame(card, bg=self.ACTIVATION_BG)
         body.pack(fill="both", expand=True, padx=26, pady=(0, 24))
         body.grid_columnconfigure(0, weight=1)
         body.grid_columnconfigure(1, weight=0)
+        self._build_activation_backdrop(body, mode="body")
 
         tk.Label(
             body,
             text="激活码",
-            font=self.LABEL_FONT,
-            bg="#ffffff",
+            font=("Microsoft YaHei", 20, "bold"),
+            bg=self.ACTIVATION_BG,
             fg="#24416e",
         ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(6, 10))
 
@@ -607,20 +805,20 @@ class ClientApp:
         self.verify_btn = tk.Button(
             body,
             text="验证激活",
-            font=("Microsoft YaHei", 10, "bold"),
+            font=("Microsoft YaHei", 18, "bold"),
             bg="#4f7df0",
             fg="#ffffff",
             activebackground="#3f6de0",
             activeforeground="#ffffff",
             relief="flat",
-            width=12,
+            width=8,
             cursor="hand2",
             command=self._trigger_verify,
         )
         self.verify_btn.grid(row=1, column=1, padx=(12, 0), ipady=4)
         self._register_feedback_button("verify", self.verify_btn, "验证激活", managed=False)
 
-        tip_frame = tk.Frame(body, bg="#ffffff")
+        tip_frame = tk.Frame(body, bg=self.ACTIVATION_BG)
         tip_frame.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(12, 0))
         tip_frame.grid_columnconfigure(0, weight=1)
         tip_frame.grid_columnconfigure(1, weight=1)
@@ -628,22 +826,91 @@ class ClientApp:
         self.activation_notice_label = tk.Label(
             tip_frame,
             textvariable=self.activation_notice_text,
-            font=self.NOTICE_FONT,
-            bg="#ffffff",
+            font=("Microsoft YaHei", 11),
+            bg=self.ACTIVATION_BG,
             fg="#6b7280",
             justify="left",
             anchor="w",
             wraplength=380,
         )
         self.activation_notice_label.grid(row=0, column=0, sticky="w")
-        tk.Label(
-            tip_frame,
-            textvariable=self.server_text,
-            font=self.NOTICE_FONT,
-            bg="#ffffff",
-            fg="#8a94a6",
-            anchor="e",
-        ).grid(row=0, column=1, sticky="e")
+
+    def _build_activation_backdrop(self, host, mode):
+        canvas = tk.Canvas(
+            host,
+            bg=self.ACTIVATION_BG,
+            highlightthickness=0,
+            bd=0,
+            relief="flat",
+        )
+        canvas.place(x=0, y=0, relwidth=1, relheight=1)
+        canvas.lower()
+        canvas.bind(
+            "<Configure>",
+            lambda _event, target=canvas, canvas_mode=mode: self._paint_activation_backdrop(target, canvas_mode),
+        )
+        self.root.after_idle(lambda target=canvas, canvas_mode=mode: self._paint_activation_backdrop(target, canvas_mode))
+        return canvas
+
+    def _paint_activation_backdrop(self, canvas, mode):
+        width = max(int(canvas.winfo_width()), 1)
+        height = max(int(canvas.winfo_height()), 1)
+        if width <= 1 or height <= 1:
+            return
+        canvas.delete("bg")
+        canvas.create_rectangle(0, 0, width, height, fill=self.ACTIVATION_BG, outline="", tags="bg")
+        if mode == "hero":
+            canvas.create_oval(-96, -64, width * 0.46, height * 1.08, fill=self.ACTIVATION_GLOW, outline="", tags="bg")
+            canvas.create_oval(width * 0.50, -42, width + 120, height * 0.88, fill="#f3f9ff", outline="", tags="bg")
+            canvas.create_line(26, height - 20, width - 34, height - 20, fill=self.ACTIVATION_LINE, width=1, tags="bg")
+            for index in range(2):
+                y = 24 + (index * 14)
+                canvas.create_line(
+                    width * 0.62,
+                    y,
+                    width - 30,
+                    y,
+                    fill=self.ACTIVATION_LINE,
+                    width=1,
+                    dash=(3, 9),
+                    tags="bg",
+                )
+            canvas.create_line(
+                width * 0.16,
+                18,
+                width * 0.30,
+                height - 28,
+                fill="#edf5ff",
+                width=1,
+                tags="bg",
+            )
+            return
+
+        inset_left = 16
+        inset_top = 18
+        inset_right = width - 18
+        inset_bottom = height - 18
+        for x in range(inset_left, inset_right, 38):
+            canvas.create_line(x, inset_top, x, inset_bottom, fill=self.ACTIVATION_GRID, width=1, tags="bg")
+        for y in range(inset_top, inset_bottom, 38):
+            canvas.create_line(inset_left, y, inset_right, y, fill=self.ACTIVATION_GRID, width=1, tags="bg")
+        points = [
+            (width * 0.14, height * 0.24),
+            (width * 0.24, height * 0.18),
+            (width * 0.34, height * 0.28),
+            (width * 0.80, height * 0.18),
+            (width * 0.72, height * 0.30),
+            (width * 0.86, height * 0.34),
+        ]
+        lines = ((0, 1), (1, 2), (3, 4), (4, 5))
+        for start, end in lines:
+            x1, y1 = points[start]
+            x2, y2 = points[end]
+            canvas.create_line(x1, y1, x2, y2, fill=self.ACTIVATION_LINE, width=1, tags="bg")
+        for x, y in points:
+            canvas.create_oval(x - 2, y - 2, x + 2, y + 2, fill=self.ACTIVATION_LINE, outline="", tags="bg")
+        canvas.create_oval(width - 176, height - 148, width + 22, height + 30, fill="#f5faff", outline="", tags="bg")
+        canvas.create_oval(-60, height - 120, width * 0.28, height + 42, fill="#f7fbff", outline="", tags="bg")
 
     def _build_operation_screen(self, parent):
         self.ops_screen = tk.Frame(parent, bg=self.SHELL_BG)
@@ -652,128 +919,220 @@ class ClientApp:
         canvas = tk.Frame(
             self.ops_screen,
             bg=self.SHELL_BG,
-            highlightthickness=1,
-            highlightbackground=self.BORDER_COLOR,
+            highlightthickness=0,
             bd=0,
         )
-        canvas.pack(fill="both", expand=True, padx=6, pady=6)
+        canvas.pack(fill="both", expand=True, padx=4, pady=4)
         canvas.pack_propagate(False)
 
-        toolbar = tk.Frame(canvas, bg=self.PANEL_BG, highlightthickness=1, highlightbackground=self.BORDER_COLOR, height=52)
-        toolbar.pack(fill="x", padx=6, pady=(6, 6))
+        right_edge_pad = 10
+
+        toolbar = tk.Frame(
+            canvas,
+            bg=self.PANEL_BG,
+            highlightthickness=1,
+            highlightbackground=self.BORDER_COLOR,
+            height=44,
+        )
+        toolbar.pack(fill="x", padx=6, pady=(4, 2))
         toolbar.pack_propagate(False)
 
         button_row = tk.Frame(toolbar, bg=self.PANEL_BG)
-        button_row.pack(side="left", padx=8, pady=7)
-        self.run_btn = self._create_action_button(button_row, "启动", "#4f7df0", self._trigger_run)
-        self.pause_btn = self._create_action_button(button_row, "暂停", "#ffffff", self._trigger_pause, fg="#24416e")
-        self.resume_btn = self._create_action_button(button_row, "继续", "#ffffff", self._trigger_resume, fg="#24416e")
-        self.stop_btn = self._create_action_button(button_row, "停止", "#ea5b64", self._trigger_stop)
-        for index, button in enumerate((self.run_btn, self.pause_btn, self.resume_btn, self.stop_btn)):
-            button.grid(row=0, column=index, padx=(0, 8 if index < 3 else 0))
+        button_row.place(x=8, y=5, width=182, height=34)
+        button_row.grid_anchor("nw")
+        self.run_btn = self._create_action_button(button_row, "启动", "#4f7df0", self._trigger_run, width=8)
+        self.pause_btn = self._create_action_button(
+            button_row, "暂停", "#ffffff", self._trigger_pause, fg="#24416e", width=8
+        )
+        self.resume_btn = self._create_action_button(
+            button_row, "继续", "#ffffff", self._trigger_resume, fg="#24416e", width=8
+        )
+        self.stop_btn = self._create_action_button(button_row, "停止", "#ea5b64", self._trigger_stop, width=8)
+        for index, button in enumerate((self.run_btn, self.stop_btn, self.pause_btn, self.resume_btn)):
+            self._mount_toolbar_button(button_row, button, index, padx=(0, 2 if index < 3 else 0))
         self._register_feedback_button("run", self.run_btn, "启动", managed=True)
         self._register_feedback_button("pause", self.pause_btn, "暂停", managed=True)
         self._register_feedback_button("resume", self.resume_btn, "继续", managed=True)
         self._register_feedback_button("stop", self.stop_btn, "停止", managed=True)
 
         right_meta = tk.Frame(toolbar, bg=self.PANEL_BG)
-        right_meta.pack(side="right", padx=8, pady=6)
-        tk.Label(right_meta, text="窗口数量", font=self.LABEL_FONT, bg=self.PANEL_BG, fg="#24416e").grid(row=0, column=0, padx=(0, 8))
-        self.window_count_entry = self._create_entry(right_meta, self.window_count_text, width=6, justify="center")
-        self.window_count_entry.grid(row=0, column=1, padx=(0, 8), ipady=5)
-        self.save_btn = self._create_action_button(right_meta, "保存", "#ffffff", self._trigger_save, fg="#24416e", width=9)
-        self.save_btn.grid(row=0, column=2)
+        right_meta.place(relx=1.0, x=-(44 + right_edge_pad), y=5, width=44, height=34)
+        right_meta.grid_anchor("ne")
+        self.save_btn = self._create_action_button(
+            right_meta,
+            "保存",
+            "#ffffff",
+            self._trigger_save,
+            fg="#24416e",
+            width=8,
+        )
+        self._mount_toolbar_button(right_meta, self.save_btn, 0, align="right")
         self._register_feedback_button("save", self.save_btn, "保存", managed=False)
 
-        conn_panel = tk.Frame(canvas, bg=self.PANEL_BG, highlightthickness=1, highlightbackground=self.BORDER_COLOR, height=88)
-        conn_panel.pack(fill="x", padx=6, pady=(0, 6))
-        conn_panel.pack_propagate(False)
-        left_block = tk.Frame(conn_panel, bg=self.PANEL_BG)
-        left_block.pack(side="left", fill="both", expand=True, padx=(8, 6), pady=10)
-        right_block = tk.Frame(conn_panel, bg=self.PANEL_BG)
-        right_block.pack(side="left", fill="both", expand=True, padx=(6, 8), pady=10)
-        self._build_labeled_row(left_block, 0, "本地地址", self.bit_api)
-        self._build_labeled_row(right_block, 0, "浏览器 API", self.api_token)
+        param_panel = tk.Frame(
+            canvas,
+            bg=self.PANEL_BG,
+            highlightthickness=1,
+            highlightbackground=self.BORDER_COLOR,
+            height=86,
+        )
+        param_panel.pack(fill="x", padx=6, pady=(0, 2))
+        param_panel.pack_propagate(False)
+        param_panel.grid_anchor("center")
+        param_panel.grid_columnconfigure(0, minsize=66)
+        param_panel.grid_columnconfigure(1, weight=0, minsize=170)
+        param_panel.grid_columnconfigure(2, minsize=58)
+        param_panel.grid_columnconfigure(3, weight=1, minsize=228)
+        param_panel.grid_rowconfigure(0, minsize=32)
+        param_panel.grid_rowconfigure(1, minsize=32)
 
-        control_panel = tk.Frame(canvas, bg=self.PANEL_BG, highlightthickness=1, highlightbackground=self.BORDER_COLOR, height=70)
-        control_panel.pack(fill="x", padx=6, pady=(0, 6))
-        control_panel.pack_propagate(False)
-        left_control = tk.Frame(control_panel, bg=self.PANEL_BG)
-        left_control.pack(side="left", fill="y", expand=True, padx=(8, 6), pady=10)
-        right_control = tk.Frame(control_panel, bg=self.PANEL_BG)
-        right_control.pack(side="left", fill="y", expand=True, padx=(6, 8), pady=10)
+        tk.Label(
+            param_panel, text="本地地址", font=self.SECTION_LABEL_FONT, bg=self.PANEL_BG, fg="#24416e"
+        ).grid(row=0, column=0, sticky="w", padx=(10, 4), pady=(6, 0))
+        local_field_width = 158
+        local_field = tk.Frame(param_panel, bg=self.PANEL_BG, width=local_field_width, height=32)
+        local_field.grid(row=0, column=1, sticky="w", padx=(0, 3), pady=(6, 0))
+        local_field.grid_propagate(False)
+        self.bit_api_entry = self._create_entry(local_field, self.bit_api, font=("Microsoft YaHei", 14))
+        self.bit_api_entry.pack(fill="both", expand=True, ipady=5)
 
-        tk.Label(left_control, text="发送频率", font=self.LABEL_FONT, bg=self.PANEL_BG, fg="#24416e").grid(row=0, column=0, sticky="w")
-        self.min_interval = self._create_entry(left_control, tk.StringVar(), width=6, justify="center")
-        self.min_interval.grid(row=0, column=1, padx=(12, 6), ipady=4)
-        tk.Label(left_control, text="—", font=self.LABEL_FONT, bg=self.PANEL_BG, fg="#24416e").grid(row=0, column=2, padx=4)
-        self.max_interval = self._create_entry(left_control, tk.StringVar(), width=6, justify="center")
-        self.max_interval.grid(row=0, column=3, padx=(4, 0), ipady=4)
+        tk.Label(
+            param_panel, text="浏览器 API", font=self.SECTION_LABEL_FONT, bg=self.PANEL_BG, fg="#24416e"
+        ).grid(row=0, column=2, sticky="w", padx=(0, 2), pady=(6, 0))
+        api_field = tk.Frame(param_panel, bg=self.PANEL_BG, width=252, height=32)
+        api_field.grid(row=0, column=3, sticky="e", padx=(0, right_edge_pad), pady=(6, 0))
+        api_field.grid_propagate(False)
+        self.api_token_entry = self._create_entry(api_field, self.api_token, font=("Microsoft YaHei", 13))
+        self.api_token_entry.pack(fill="both", expand=True, ipady=5)
 
-        tk.Label(right_control, text="窗口号", font=self.LABEL_FONT, bg=self.PANEL_BG, fg="#24416e").grid(row=0, column=0, sticky="w")
-        self.window_no_entry = self._create_entry(right_control, self.window_no_text, width=8, justify="center")
-        self.window_no_entry.grid(row=0, column=1, padx=(12, 10), ipady=4)
-        self.single_run_btn = self._create_action_button(right_control, "单独启动", "#4f7df0", self._trigger_single_run, width=13)
-        self.single_run_btn.grid(row=0, column=2)
+        tk.Label(
+            param_panel, text="发送频率", font=self.SECTION_LABEL_FONT, bg=self.PANEL_BG, fg="#24416e"
+        ).grid(row=1, column=0, sticky="w", padx=(10, 4), pady=(8, 6))
+        interval_stack = tk.Frame(param_panel, bg=self.PANEL_BG, width=local_field_width, height=32)
+        interval_stack.grid(row=1, column=1, sticky="w", pady=(8, 6))
+        interval_stack.grid_propagate(False)
+        self.min_interval = self._create_entry(
+            interval_stack, tk.StringVar(), width=5, justify="center", font=("Microsoft YaHei", 14)
+        )
+        self.min_interval.place(x=0, y=0, width=52, height=32)
+        tk.Label(interval_stack, text="—", font=self.LABEL_FONT, bg=self.PANEL_BG, fg="#24416e").place(
+            x=73, y=7, width=12, height=18
+        )
+        self.max_interval = self._create_entry(
+            interval_stack, tk.StringVar(), width=5, justify="center", font=("Microsoft YaHei", 14)
+        )
+        self.max_interval.place(x=local_field_width - 52, y=0, width=52, height=32)
+
+        tk.Label(
+            param_panel, text="窗口数量", font=self.SECTION_LABEL_FONT, bg=self.PANEL_BG, fg="#24416e"
+        ).grid(row=1, column=2, sticky="w", padx=(0, 2), pady=(8, 6))
+        window_action = tk.Frame(param_panel, bg=self.PANEL_BG, width=228, height=32)
+        window_action.grid(row=1, column=3, sticky="e", pady=(8, 6), padx=(0, right_edge_pad))
+        window_action.grid_anchor("ne")
+        window_action.grid_propagate(False)
+        window_action.grid_columnconfigure(0, minsize=48)
+        window_action.grid_columnconfigure(1, minsize=44)
+        window_action.grid_columnconfigure(2, minsize=58)
+        window_action.grid_columnconfigure(3, weight=1)
+        window_action.grid_columnconfigure(4, minsize=54)
+        self.window_count_entry = self._create_entry(
+            window_action,
+            self.window_count_text,
+            width=3,
+            justify="center",
+            font=("Microsoft YaHei", 13),
+        )
+        self.window_count_entry.grid(row=0, column=0, sticky="w", ipady=5, padx=(-24, 8))
+        tk.Label(
+            window_action, text="窗口号", font=self.SECTION_LABEL_FONT, bg=self.PANEL_BG, fg="#24416e"
+        ).grid(row=0, column=1, sticky="w", padx=(0, 4))
+        self.window_no_entry = self._create_entry(
+            window_action,
+            self.window_no_text,
+            width=7,
+            justify="center",
+            font=("Microsoft YaHei", 14),
+        )
+        self.window_no_entry.grid(row=0, column=2, sticky="w", ipady=5, padx=(0, 6))
+        self.single_run_btn = self._create_action_button(
+            window_action, "单独启动", "#4f7df0", self._trigger_single_run, width=12
+        )
+        self.single_run_btn.grid(row=0, column=4, sticky="e")
+        self.single_run_btn.configure(width=6, font=("Microsoft YaHei", 14, "bold"))
         self._register_feedback_button("single", self.single_run_btn, "单独启动", managed=False)
 
-        message_panel = tk.Frame(canvas, bg=self.PANEL_BG, highlightthickness=1, highlightbackground=self.BORDER_COLOR, height=146)
-        message_panel.pack(fill="x", padx=6, pady=(0, 6))
+        message_panel = tk.Frame(
+            canvas,
+            bg=self.PANEL_BG,
+            highlightthickness=1,
+            highlightbackground=self.BORDER_COLOR,
+            height=134,
+        )
+        message_panel.pack(fill="x", padx=6, pady=(0, 2))
         message_panel.pack_propagate(False)
-        tk.Label(message_panel, text="发送文本", font=self.LABEL_FONT, bg=self.PANEL_BG, fg="#24416e").pack(anchor="w", padx=10, pady=(8, 6))
-        message_body = tk.Frame(message_panel, bg=self.PANEL_BG)
-        message_body.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        tk.Label(
+            message_panel,
+            text="发送文本",
+            font=self.SECTION_TITLE_FONT,
+            bg=self.PANEL_BG,
+            fg="#24416e",
+        ).pack(anchor="w", padx=10, pady=(3, 3))
         self.message_text = tk.Text(
-            message_body,
-            font=("Consolas", 12),
+            message_panel,
+            font=self.MESSAGE_FONT,
             bg="#ffffff",
             fg="#24416e",
-            relief="solid",
-            bd=1,
-            highlightthickness=1,
-            highlightbackground="#4f7df0",
-            highlightcolor="#4f7df0",
+            relief="flat",
+            bd=0,
+            highlightthickness=0,
             wrap="word",
             height=5,
+            padx=10,
+            pady=12,
         )
-        self.message_text.pack(side="left", fill="both", expand=True)
-        message_scroll = tk.Scrollbar(message_body, orient="vertical", command=self.message_text.yview)
-        message_scroll.pack(side="right", fill="y")
+        self.message_text.pack(side="left", fill="both", expand=True, padx=(10, 0), pady=(0, 10))
+        message_scroll = tk.Scrollbar(message_panel, orient="vertical", command=self.message_text.yview)
+        message_scroll.pack(side="right", fill="y", padx=(0, 10), pady=(0, 10))
         self.message_text.configure(yscrollcommand=message_scroll.set)
 
-        log_panel = tk.Frame(canvas, bg=self.PANEL_BG, highlightthickness=1, highlightbackground=self.BORDER_COLOR)
-        log_panel.pack(fill="both", expand=True, padx=6, pady=(0, 6))
+        log_panel = tk.Frame(
+            canvas,
+            bg=self.PANEL_BG,
+            highlightthickness=1,
+            highlightbackground=self.BORDER_COLOR,
+            bd=0,
+        )
+        log_panel.pack(fill="both", expand=True, padx=6, pady=(0, 4))
         log_header = tk.Frame(log_panel, bg=self.PANEL_BG)
-        log_header.pack(fill="x", padx=10, pady=(8, 6))
-        tk.Label(log_header, text="实时日志", font=self.LABEL_FONT, bg=self.PANEL_BG, fg="#24416e").pack(side="left")
+        log_header.pack(fill="x", padx=10, pady=(3, 3))
+        tk.Label(log_header, text="实时日志", font=self.SECTION_TITLE_FONT, bg=self.PANEL_BG, fg="#24416e").pack(side="left")
         counters = tk.Frame(log_header, bg=self.PANEL_BG)
         counters.pack(side="right")
-        tk.Label(counters, text="已发送：", font=self.NOTICE_FONT, bg=self.PANEL_BG, fg="#24416e").pack(side="left")
-        tk.Label(counters, textvariable=self.sent_count_text, font=self.NOTICE_FONT, bg=self.PANEL_BG, fg="#24416e").pack(side="left", padx=(0, 12))
-        tk.Label(counters, text="失败：", font=self.NOTICE_FONT, bg=self.PANEL_BG, fg="#24416e").pack(side="left")
-        tk.Label(counters, textvariable=self.failed_count_text, font=self.NOTICE_FONT, bg=self.PANEL_BG, fg="#24416e").pack(side="left")
+        tk.Label(counters, text="已发送：", font=self.META_FONT, bg=self.PANEL_BG, fg="#315070").pack(side="left")
+        tk.Label(counters, textvariable=self.sent_count_text, font=self.META_FONT, bg=self.PANEL_BG, fg="#315070").pack(side="left", padx=(0, 12))
+        tk.Label(counters, text="失败：", font=self.META_FONT, bg=self.PANEL_BG, fg="#315070").pack(side="left")
+        tk.Label(counters, textvariable=self.failed_count_text, font=self.META_FONT, bg=self.PANEL_BG, fg="#315070").pack(side="left")
 
-        log_body = tk.Frame(log_panel, bg=self.PANEL_BG)
-        log_body.pack(fill="both", expand=True, padx=10, pady=(0, 10))
         self.log_text = tk.Text(
-            log_body,
+            log_panel,
             font=self.TEXT_FONT,
             bg="#233f6f",
             fg="#ffffff",
             insertbackground="#ffffff",
-            relief="solid",
-            bd=1,
+            relief="flat",
+            bd=0,
+            highlightthickness=0,
             wrap="none",
             spacing1=1,
             spacing3=1,
+            padx=10,
+            pady=12,
         )
-        self.log_text.grid(row=0, column=0, sticky="nsew")
-        y_scroll = tk.Scrollbar(log_body, orient="vertical", command=self.log_text.yview)
-        y_scroll.grid(row=0, column=1, sticky="ns")
-        x_scroll = tk.Scrollbar(log_body, orient="horizontal", command=self.log_text.xview)
-        x_scroll.grid(row=1, column=0, sticky="ew")
-        log_body.grid_rowconfigure(0, weight=1)
-        log_body.grid_columnconfigure(0, weight=1)
+        self.log_text.pack(side="left", fill="both", expand=True, padx=(10, 0), pady=(0, 10))
+        y_scroll = tk.Scrollbar(log_panel, orient="vertical", command=self.log_text.yview)
+        y_scroll.pack(side="right", fill="y", padx=(0, 10), pady=(0, 28))
+        x_scroll = tk.Scrollbar(log_panel, orient="horizontal", command=self.log_text.xview)
+        x_scroll.pack(side="bottom", fill="x", padx=10, pady=(0, 10))
         self.log_text.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
         self.log_text.bind("<Key>", self._block_log_edit)
         self.log_text.bind("<<Paste>>", lambda _event: "break")
@@ -783,24 +1142,13 @@ class ClientApp:
         self.log_text.bind("<ButtonRelease-1>", self._update_log_follow_state)
         self.log_text.bind("<KeyRelease>", self._update_log_follow_state)
 
-    def _build_labeled_row(self, parent, row, label_text, text_var):
-        parent.grid_columnconfigure(1, weight=1)
-        tk.Label(parent, text=label_text, font=self.LABEL_FONT, bg=self.PANEL_BG, fg="#24416e").grid(
-            row=row,
-            column=0,
-            sticky="w",
-        )
-        entry = self._create_entry(parent, text_var)
-        entry.grid(row=row, column=1, sticky="ew", padx=(12, 0), ipady=4)
-        return entry
-
-    def _create_entry(self, parent, text_var, width=None, justify="left"):
+    def _create_entry(self, parent, text_var, width=None, justify="left", font=None):
         return tk.Entry(
             parent,
             textvariable=text_var,
             width=width,
             justify=justify,
-            font=("Microsoft YaHei", 11),
+            font=font or ("Microsoft YaHei", 11),
             relief="solid",
             bd=1,
             highlightthickness=1,
@@ -814,7 +1162,7 @@ class ClientApp:
         return tk.Button(
             parent,
             text=text,
-            font=("Microsoft YaHei", 10, "bold"),
+            font=self.TOOLBAR_FONT,
             bg=bg,
             fg=fg,
             activebackground=bg,
@@ -825,13 +1173,37 @@ class ClientApp:
             cursor="hand2",
             command=command,
             padx=0,
-            pady=6,
+            pady=3,
+            disabledforeground=fg,
         )
+
+    def _mount_toolbar_button(self, parent, button, column, padx=(0, 0), align="left"):
+        slot = tk.Frame(parent, bg=self.PANEL_BG, width=44, height=34)
+        slot.grid(row=0, column=column, padx=padx)
+        slot.grid_propagate(False)
+        button.configure(font=("Microsoft YaHei", 14, "bold"), padx=0, pady=1)
+        button_x = 4 if align == "right" else 0
+        button.place(in_=slot, x=button_x, y=2, width=40, height=30)
 
     def _register_feedback_button(self, key, button, default_text, managed):
         self._button_texts[key] = default_text
         self._button_restore_modes[key] = managed
         button._feedback_key = key
+
+    def _shade_hex(self, color, factor):
+        value = str(color or "").strip()
+        if len(value) != 7 or not value.startswith("#"):
+            return value
+        try:
+            red = max(0, min(255, int(value[1:3], 16)))
+            green = max(0, min(255, int(value[3:5], 16)))
+            blue = max(0, min(255, int(value[5:7], 16)))
+        except ValueError:
+            return value
+        red = max(0, min(255, int(red * factor)))
+        green = max(0, min(255, int(green * factor)))
+        blue = max(0, min(255, int(blue * factor)))
+        return f"#{red:02x}{green:02x}{blue:02x}"
 
     def _set_activation_notice(self, message="", error=False):
         self.activation_notice_text.set(str(message or "").strip())
@@ -854,18 +1226,23 @@ class ClientApp:
 
     def _load_message_templates(self):
         templates_text = ""
-        message_path = ROOT_DIR / "config" / "messages.yaml"
-        if message_path.exists():
-            try:
-                data = yaml.safe_load(message_path.read_text(encoding="utf-8")) or {}
-                templates = [
-                    str(item).strip()
-                    for item in (data.get("templates") or [])
-                    if str(item).strip()
-                ]
-                templates_text = "\n".join(templates)
-            except Exception:
-                templates_text = ""
+        saved_templates = self.client_config.get("message_templates") or []
+        if isinstance(saved_templates, list):
+            templates = [str(item).strip() for item in saved_templates if str(item).strip()]
+            templates_text = "\n".join(templates)
+        if not templates_text:
+            message_path = ROOT_DIR / "config" / "messages.yaml"
+            if message_path.exists():
+                try:
+                    data = yaml.safe_load(message_path.read_text(encoding="utf-8")) or {}
+                    templates = [
+                        str(item).strip()
+                        for item in (data.get("templates") or [])
+                        if str(item).strip()
+                    ]
+                    templates_text = "\n".join(templates)
+                except Exception:
+                    templates_text = ""
         if self.message_text is not None:
             self.message_text.delete("1.0", tk.END)
             if templates_text:
@@ -874,6 +1251,7 @@ class ClientApp:
     def _reset_log_session(self):
         self._log_offset = 0
         self._log_follow_tail = True
+        self._set_runtime_counters(0, 0)
         try:
             self._log_path.parent.mkdir(parents=True, exist_ok=True)
             self._log_path.write_text("", encoding="utf-8")
@@ -895,7 +1273,7 @@ class ClientApp:
         finally:
             self._schedule_log_refresh()
 
-    def _append_worker_log(self):
+    def _append_local_worker_log(self):
         if self.log_text is None:
             return
         if not self._log_path.exists():
@@ -909,9 +1287,54 @@ class ClientApp:
             return
         if not chunk:
             return
+        sent_patterns = ("✅ 成员页消息已发送",)
+        failed_patterns = (
+            "处理成员失败",
+            "发送流程中断",
+            "消息被拒绝",
+            "聊天窗口限制提示命中",
+            "输入框未准备就绪",
+            "连接浏览器失败",
+            "未能收集到任何已加入小组",
+            "正式发送文案为空",
+            "当前窗口已被系统限制继续发送消息",
+            "当前账号已被限制继续向该类用户发起消息",
+        )
+        sent_delta = sum(
+            1 for line in chunk.splitlines() if any(token in line for token in sent_patterns)
+        )
+        failed_delta = sum(
+            1 for line in chunk.splitlines() if any(token in line for token in failed_patterns)
+        )
+        if sent_delta or failed_delta:
+            try:
+                current_sent = int(self.sent_count_text.get() or 0)
+            except Exception:
+                current_sent = 0
+            try:
+                current_failed = int(self.failed_count_text.get() or 0)
+            except Exception:
+                current_failed = 0
+            self._set_runtime_counters(current_sent + sent_delta, current_failed + failed_delta)
         self.log_text.insert(tk.END, chunk)
         if self._log_follow_tail:
             self.log_text.see(tk.END)
+
+    def _set_runtime_counters(self, sent, failed):
+        self.sent_count_text.set(str(max(0, int(sent or 0))))
+        self.failed_count_text.set(str(max(0, int(failed or 0))))
+
+    def _collect_message_templates(self):
+        if self.message_text is None:
+            return []
+        return [
+            str(line).strip()
+            for line in self.message_text.get("1.0", tk.END).splitlines()
+            if str(line).strip()
+        ]
+
+    def _append_worker_log(self):
+        self._append_local_worker_log()
 
     def _is_log_near_bottom(self):
         if self.log_text is None:
@@ -950,48 +1373,40 @@ class ClientApp:
         send_interval = (
             self.client_config.get("task_settings", {}).get("send_interval_seconds") or [2, 6]
         )
+        task_settings = self.client_config.get("task_settings") or {}
         min_value = str(_parse_int(send_interval[0] if len(send_interval) > 0 else 2, 2))
         max_value = str(_parse_int(send_interval[1] if len(send_interval) > 1 else 6, 6))
         self.min_interval.delete(0, tk.END)
         self.min_interval.insert(0, min_value)
         self.max_interval.delete(0, tk.END)
         self.max_interval.insert(0, max_value)
+        window_count = _parse_int(task_settings.get("max_windows"), 10)
+        if window_count <= 0 and str(task_settings.get("max_windows") or "").strip() == "":
+            window_count = 10
+        self.window_count_text.set(str(window_count if window_count >= 0 else 10))
+        self.window_no_text.set(str(self.client_config.get("window_no") or "").strip())
         owner = str(self.license_data.get("owner") or "").strip()
         license_expired = _license_is_expired(self.license_data)
         token_expired = _token_is_expired(self.client_config.get("token_expires_at"))
         self.verified = _client_can_use_token(self.client_config, self.license_data)
-        self._update_meta_text(owner=owner)
         if license_expired:
             self._clear_local_auth(preserve_license=True)
-            self.activation_text.set("授权已到期")
-            self.run_status_text.set("请重新输入激活码完成验证")
             self._show_activation_screen(self.SESSION_NOTICE_TEXT, error=True)
         elif token_expired:
             self._clear_local_auth(preserve_license=True)
-            self.activation_text.set("激活已失效")
-            self.run_status_text.set("请重新输入激活码完成验证")
             self._show_activation_screen(self.SESSION_NOTICE_TEXT, error=True)
         elif self.verified:
-            self.activation_text.set(f"已激活：{owner}" if owner else "已激活")
-            self.refresh_remote_status(silent=True)
+            info = self.refresh_remote_status(silent=True)
             if self.verified:
                 self._show_operation_screen()
+            if not info:
+                self._apply_button_state(agent_online=False, task_running=False, task_pending=False)
         else:
-            self.activation_text.set("未激活")
-            self.run_status_text.set("请先完成激活验证")
             self._show_activation_screen(
                 "验证成功后自动进入操作界面",
                 error=False,
             )
-        self._apply_button_state(agent_online=False, task_running=False, task_pending=False)
-
-    def _update_meta_text(self, owner=""):
-        self.server_text.set(f"服务器：{self.server_url or DEFAULT_SERVER_URL}")
-        self.expire_text.set(
-            f"到期时间：{_format_expire_at((self.license_data or {}).get('expire_at'))}"
-        )
-        owner_suffix = f" | 归属：{owner}" if owner else ""
-        self.device_text.set(f"设备ID：{self.machine_id}{owner_suffix}")
+            self._apply_button_state(agent_online=False, task_running=False, task_pending=False)
 
     def _current_agent_token(self):
         return str(self.client_config.get("agent_token") or "").strip()
@@ -1009,7 +1424,6 @@ class ClientApp:
             save_license({})
         self.server_url = _normalize_server_url(config.get("server_url") or DEFAULT_SERVER_URL)
         self.machine_id = str(config.get("machine_id") or self.machine_id).strip()
-        self._update_meta_text(owner=str(self.license_data.get("owner") or "").strip())
 
     def _store_local_auth(self, agent_token, token_expires_at):
         config = self._build_client_config()
@@ -1029,8 +1443,17 @@ class ClientApp:
             min_value, max_value = max_value, min_value
         return [min_value, max_value]
 
+    def _collect_window_count(self):
+        raw = str(self.window_count_text.get() or "").strip()
+        if not raw:
+            return 10
+        value = _parse_int(raw, 10)
+        return max(0, value)
+
     def _build_client_config(self):
         interval = self._collect_send_interval()
+        max_windows = self._collect_window_count()
+        message_templates = self._collect_message_templates()
         config = load_client_config()
         config["server_url"] = self.server_url or DEFAULT_SERVER_URL
         config["machine_id"] = self.machine_id
@@ -1038,8 +1461,11 @@ class ClientApp:
         config["token_expires_at"] = config.get("token_expires_at", self.client_config.get("token_expires_at"))
         config["bit_api"] = _normalize_bit_api(self.bit_api.get())
         config["api_token"] = str(self.api_token.get() or "").strip()
+        config["window_no"] = str(self.window_no_text.get() or "").strip()
+        config["message_templates"] = message_templates
         config.setdefault("task_settings", {})
         config["task_settings"]["send_interval_seconds"] = interval
+        config["task_settings"]["max_windows"] = max_windows
         return config
 
     def _save_local_config(self, require_connection_fields=False):
@@ -1052,7 +1478,6 @@ class ClientApp:
         self.client_config = config
         self.server_url = _normalize_server_url(config.get("server_url") or DEFAULT_SERVER_URL)
         self.machine_id = str(config.get("machine_id") or self.machine_id).strip()
-        self._update_meta_text(owner=str(self.license_data.get("owner") or "").strip())
         return True
 
     def _post_client_api(self, path, payload, timeout=12):
@@ -1081,6 +1506,13 @@ class ClientApp:
             "bit_api": _normalize_bit_api(self.bit_api.get()),
             "api_token": str(self.api_token.get() or "").strip(),
             "name": socket.gethostname(),
+            "task_settings": {
+                "send_interval_seconds": self._collect_send_interval(),
+                "max_windows": self._collect_window_count(),
+            },
+            "messages": {
+                "templates": self._collect_message_templates(),
+            },
         }
         ok, data = self._post_client_api("/api/client/sync-config", payload)
         if not ok and show_error:
@@ -1088,9 +1520,19 @@ class ClientApp:
         return ok
 
     def _ensure_worker_running(self, wait_online=False):
+        local_worker_alive = False
+        if self.worker_process and self.worker_process.poll() is None:
+            local_worker_alive = True
+        else:
+            if self.worker_process and self.worker_process.poll() is not None:
+                self.worker_process = None
+            worker_pid = self._read_worker_pid()
+            local_worker_alive = self._is_pid_running(worker_pid)
         status = self.refresh_remote_status(silent=True)
-        if status and status.get("agent_online"):
+        if status and status.get("agent_online") and local_worker_alive:
             return True
+        if not local_worker_alive:
+            self._cleanup_stale_worker_process()
         if self.worker_process and self.worker_process.poll() is None:
             if not wait_online:
                 return True
@@ -1147,23 +1589,38 @@ class ClientApp:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         creationflags = 0
         kwargs = {}
+        stdout_handle = None
         if sys.platform.startswith("win"):
-            creationflags = 0x00000008 | 0x00000200
+            create_no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+            create_new_process_group = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+            creationflags = create_no_window | create_new_process_group
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = 0
+            kwargs["startupinfo"] = startupinfo
         else:
             kwargs["start_new_session"] = True
         try:
+            stdout_handle = log_path.open("a", encoding="utf-8")
             self.worker_process = subprocess.Popen(
                 worker_cmd,
-                stdout=log_path.open("a", encoding="utf-8"),
-                stderr=log_path.open("a", encoding="utf-8"),
+                stdout=stdout_handle,
+                stderr=stdout_handle,
                 creationflags=creationflags,
                 cwd=str(ROOT_DIR),
                 env={**os.environ, ENV_RUNTIME_DIR: runtime_dir},
                 **kwargs,
             )
+            self._write_worker_pid(self.worker_process.pid)
         except Exception as exc:
             messagebox.showerror("提示", f"启动 worker 失败：{exc}")
             return False
+        finally:
+            if stdout_handle is not None:
+                try:
+                    stdout_handle.close()
+                except Exception:
+                    pass
 
         if not wait_online:
             return True
@@ -1175,17 +1632,35 @@ class ClientApp:
         messagebox.showwarning("提示", "worker 已启动，但执行端尚未连上服务器")
         return False
 
-    def _apply_button_state(self, agent_online, task_running, task_pending):
+    def _apply_button_state(
+        self,
+        agent_online,
+        task_running,
+        task_pending,
+        task_paused=False,
+        config_synced=False,
+        device_bound=False,
+        start_ready=False,
+        start_block_reason="",
+    ):
         self._button_state_snapshot = {
             "agent_online": bool(agent_online),
             "task_running": bool(task_running),
             "task_pending": bool(task_pending),
+            "task_paused": bool(task_paused),
+            "config_synced": bool(config_synced),
+            "device_bound": bool(device_bound),
+            "start_ready": bool(start_ready),
+            "start_block_reason": str(start_block_reason or "").strip(),
         }
-        is_busy = bool(task_running or task_pending)
-        self.run_btn.config(state="normal" if self.verified and not is_busy else "disabled")
+        is_running = bool(task_running)
+        is_pending = bool(task_pending)
+        is_paused = bool(task_paused)
+        is_busy = bool(is_running or is_pending or is_paused)
+        self.run_btn.config(state="normal" if self.verified and start_ready and not is_busy else "disabled")
         self.stop_btn.config(state="normal" if agent_online and is_busy else "disabled")
-        self.pause_btn.config(state="normal" if agent_online and is_busy else "disabled")
-        self.resume_btn.config(state="normal" if agent_online else "disabled")
+        self.pause_btn.config(state="normal" if agent_online and is_running and not is_paused else "disabled")
+        self.resume_btn.config(state="normal" if agent_online and is_paused else "disabled")
 
     def refresh_remote_status(self, silent=False):
         if not self.verified:
@@ -1199,38 +1674,49 @@ class ClientApp:
             error_code = str(data.get("error") or "").strip()
             if error_code in CLIENT_REACTIVATION_ERRORS:
                 self._clear_local_auth(preserve_license=True)
-                if error_code == "account_expired":
-                    self.activation_text.set("授权已到期")
-                elif error_code == "account_disabled":
-                    self.activation_text.set("账户已禁用")
-                else:
-                    self.activation_text.set("激活已失效")
-                self.run_status_text.set("请重新输入激活码完成验证")
                 self._apply_button_state(agent_online=False, task_running=False, task_pending=False)
                 self._show_activation_screen(self.SESSION_NOTICE_TEXT, error=True)
                 return None
             if not silent:
-                self.run_status_text.set(
-                    f"执行端状态获取失败：{_translate_client_error(data.get('error'))}"
+                self._set_activation_notice(
+                    f"执行端状态获取失败：{_translate_client_error(data.get('error'))}",
+                    error=True,
                 )
             self._apply_button_state(agent_online=False, task_running=False, task_pending=False)
             return None
 
         info = data.get("data") or {}
-        owner = str(info.get("owner") or self.license_data.get("owner") or "").strip()
-        if owner:
-            self.activation_text.set(f"已激活：{owner}")
-        state_text = str(info.get("state_text") or "状态未知").strip()
-        config_text = "配置已同步" if info.get("config_synced") else "配置未同步"
-        bind_text = "自动绑定完成" if info.get("device_bound") else "等待绑定"
-        self.run_status_text.set(f"{state_text} | {config_text} | {bind_text}")
-        self._update_meta_text(owner=owner)
         self._apply_button_state(
             agent_online=bool(info.get("agent_online")),
             task_running=bool(info.get("task_running")),
             task_pending=bool(info.get("task_pending")),
+            task_paused=bool(info.get("task_paused")),
+            config_synced=bool(info.get("config_synced")),
+            device_bound=bool(info.get("device_bound")),
+            start_ready=bool(info.get("start_ready")),
+            start_block_reason=info.get("start_block_reason") or "",
         )
         return info
+
+    def _translate_start_block_reason(self, reason):
+        mapping = {
+            "config_not_synced": "设备配置尚未同步完成",
+            "device_not_bound": "设备绑定尚未完成",
+            "missing_connection_fields": "设备配置缺少接口参数",
+            "agent_offline": "执行端尚未在线",
+        }
+        return mapping.get(str(reason or "").strip(), "执行端尚未就绪")
+
+    def _wait_for_remote_start_ready(self, timeout=8.0):
+        deadline = time.time() + max(timeout, 0.5)
+        last_info = None
+        while time.time() < deadline:
+            info = self.refresh_remote_status(silent=True)
+            if info and info.get("start_ready"):
+                return info
+            last_info = info or last_info
+            time.sleep(0.5)
+        return last_info
 
     def _schedule_status_refresh(self, initial=False):
         if self.status_job:
@@ -1253,14 +1739,28 @@ class ClientApp:
         default_text = self._button_texts.get(key, button.cget("text"))
         managed = self._button_restore_modes.get(key, False)
         previous_state = button.cget("state")
-        button.config(text=busy_text, state="disabled", relief="sunken")
+        original_bg = button.cget("bg")
+        original_active_bg = button.cget("activebackground")
+        pressed_bg = self._shade_hex(original_bg, 0.88)
+        button.config(
+            text=busy_text or default_text,
+            state="disabled",
+            relief="sunken",
+            bg=pressed_bg,
+            activebackground=pressed_bg,
+        )
         self.root.configure(cursor="watch")
         self.root.update_idletasks()
         try:
             callback()
         finally:
             if button.winfo_exists():
-                button.config(text=default_text, relief="flat")
+                button.config(
+                    text=default_text,
+                    relief="flat",
+                    bg=original_bg,
+                    activebackground=original_active_bg,
+                )
                 if managed:
                     self._apply_button_state(**self._button_state_snapshot)
                 else:
@@ -1272,25 +1772,22 @@ class ClientApp:
         self._with_button_feedback("verify", "验证中...", self.on_verify)
 
     def _trigger_run(self):
-        self._with_button_feedback("run", "启动中...", self.on_run)
+        self._with_button_feedback("run", None, self.on_run)
 
     def _trigger_pause(self):
-        self._with_button_feedback("pause", "暂停中...", self.on_pause)
+        self._with_button_feedback("pause", None, self.on_pause)
 
     def _trigger_resume(self):
-        self._with_button_feedback("resume", "继续中...", self.on_resume)
+        self._with_button_feedback("resume", None, self.on_resume)
 
     def _trigger_stop(self):
-        self._with_button_feedback("stop", "停止中...", self.on_stop)
+        self._with_button_feedback("stop", None, self.on_stop)
 
     def _trigger_save(self):
-        self._with_button_feedback("save", "保存中...", self.on_save_settings)
+        self._with_button_feedback("save", None, self.on_save_settings)
 
     def _trigger_single_run(self):
-        self._with_button_feedback("single", "处理中...", self._show_single_run_hint)
-
-    def _show_single_run_hint(self):
-        messagebox.showinfo("提示", "单独启动当前版本仅保留界面入口，请使用正式启动链。")
+        self._with_button_feedback("single", None, self.on_single_run)
 
     def on_verify(self):
         code = str(self.activation_code.get() or "").strip()
@@ -1309,12 +1806,8 @@ class ClientApp:
             self.verified = False
             error_text = _translate_client_error(data.get("error"))
             if str(data.get("error") or "").strip() == "account_expired":
-                self.activation_text.set("授权已到期")
-                self.run_status_text.set("账户已到期，请联系管理员续费")
                 self._show_activation_screen(self.SESSION_NOTICE_TEXT, error=True)
             else:
-                self.activation_text.set("未激活")
-                self.run_status_text.set("激活失败，请重新输入有效激活码")
                 self._show_activation_screen(error_text, error=True)
             messagebox.showerror("提示", error_text)
             return
@@ -1331,15 +1824,13 @@ class ClientApp:
         self.verified = bool(self._current_agent_token())
         if not self._save_local_config(require_connection_fields=False):
             return
-        self.activation_text.set(f"已激活：{self.license_data.get('owner') or ''}")
-        self.run_status_text.set("激活成功，请继续配置本地连接参数后开始运行")
-        self._update_meta_text(owner=str(self.license_data.get("owner") or "").strip())
         self._show_operation_screen()
         local_bit_api = _normalize_bit_api(self.bit_api.get())
         local_api_token = str(self.api_token.get() or "").strip()
         if local_bit_api and local_api_token:
             self._sync_config_to_server(show_error=False)
             self._ensure_worker_running(wait_online=False)
+            self._wait_for_remote_start_ready(timeout=8.0)
             self.refresh_remote_status(silent=True)
         messagebox.showinfo("提示", "激活成功，已进入操作界面")
 
@@ -1363,6 +1854,13 @@ class ClientApp:
                 return
             if not self._ensure_worker_running(wait_online=True):
                 return
+            ready_info = self._wait_for_remote_start_ready(timeout=8.0)
+            if not ready_info or not ready_info.get("start_ready"):
+                reason_text = self._translate_start_block_reason(
+                    (ready_info or {}).get("start_block_reason")
+                )
+                messagebox.showerror("提示", f"start 失败：{reason_text}")
+                return
         payload = {
             "agent_token": self._current_agent_token(),
             "machine_id": self.machine_id,
@@ -1375,6 +1873,38 @@ class ClientApp:
 
     def on_run(self):
         self._send_control("start")
+
+    def on_single_run(self):
+        if not self.verified:
+            messagebox.showwarning("提示", "请先完成激活验证")
+            return
+        window_token = str(self.window_no_text.get() or "").strip()
+        if not window_token:
+            messagebox.showwarning("提示", "请输入窗口号")
+            return
+        if not self._save_local_config(require_connection_fields=True):
+            return
+        if not self._sync_config_to_server(show_error=True):
+            return
+        if not self._ensure_worker_running(wait_online=True):
+            return
+        ready_info = self._wait_for_remote_start_ready(timeout=8.0)
+        if not ready_info or not ready_info.get("start_ready"):
+            reason_text = self._translate_start_block_reason(
+                (ready_info or {}).get("start_block_reason")
+            )
+            messagebox.showerror("提示", f"单独启动失败：{reason_text}")
+            return
+        payload = {
+            "agent_token": self._current_agent_token(),
+            "machine_id": self.machine_id,
+            "window_token": window_token,
+        }
+        ok, data = self._post_client_api("/api/client/restart-window", payload, timeout=15)
+        if not ok:
+            messagebox.showerror("提示", f"单独启动失败：{data.get('error')}")
+            return
+        self.refresh_remote_status(silent=True)
 
     def on_stop(self):
         self._send_control("stop")
@@ -1392,6 +1922,10 @@ class ClientApp:
         if self.log_job:
             self.root.after_cancel(self.log_job)
             self.log_job = None
+        try:
+            self._shutdown_worker_runtime(send_stop=True)
+        except Exception:
+            pass
         self.root.destroy()
 
 def main():

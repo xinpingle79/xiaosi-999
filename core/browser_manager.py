@@ -25,11 +25,53 @@ class BrowserManager:
     def close(self, session):
         if not session:
             return
+        seen = set()
 
-        try:
-            session["browser"].close()
-        except Exception as exc:
-            log.warning(f"关闭 BitBrowser 会话失败: {exc}")
+        def _safe_close(label, target):
+            if target is None:
+                return
+            marker = id(target)
+            if marker in seen:
+                return
+            seen.add(marker)
+            try:
+                is_closed = getattr(target, "is_closed", None)
+                if callable(is_closed) and is_closed():
+                    return
+            except Exception:
+                pass
+            try:
+                target.close()
+            except Exception as exc:
+                message = str(exc)
+                if (
+                    "Event loop is closed" in message
+                    or "Target page, context or browser has been closed" in message
+                    or "has been closed" in message
+                ):
+                    log.info(f"BitBrowser {label} 已处于关闭状态，跳过重复关闭。")
+                    return
+                log.warning(f"关闭 BitBrowser {label} 失败: {exc}")
+
+        page = session.get("page")
+        context = session.get("context")
+        browser = session.get("browser")
+
+        _safe_close("page", page)
+        if context is not None:
+            try:
+                for extra_page in list(getattr(context, "pages", []) or []):
+                    _safe_close("page", extra_page)
+            except Exception:
+                pass
+        _safe_close("context", context)
+        if browser is not None:
+            try:
+                for extra_context in list(getattr(browser, "contexts", []) or []):
+                    _safe_close("context", extra_context)
+            except Exception:
+                pass
+        _safe_close("browser", browser)
 
     def _open_bitbrowser(self, playwright, browser_id=None):
         browser_id = browser_id or self._pick_default_bitbrowser_id()

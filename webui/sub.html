@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>客户管理</title>
-    <link rel="stylesheet" href="/style.css?v=20260319b" />
+    <link rel="stylesheet" href="/style.css?v=20260321i" />
   </head>
   <body>
     <div id="app-screen" class="screen">
@@ -20,6 +20,13 @@
             <div class="nav-item" data-page="device" data-title="设备管理">设备管理</div>
             <div class="nav-item" data-page="template" data-title="文案管理">文案管理</div>
           </nav>
+          <div class="sidebar-footer">
+            <div class="account-card">
+              <div id="current-account-name" class="account-name">-</div>
+              <div id="current-account-role" class="account-role">子账户</div>
+              <button id="logout-btn" class="logout-btn" type="button">退出</button>
+            </div>
+          </div>
         </aside>
 
         <div class="main">
@@ -103,6 +110,9 @@
             </section>
 
             <section class="card control-card" data-page="task">
+              <div class="card-header">
+                <div class="card-title">任务管理</div>
+              </div>
               <div class="control-row">
                 <div class="control-actions">
                   <button id="start-btn" class="primary">启动</button>
@@ -151,7 +161,7 @@
 
             <section class="card" data-page="template">
               <div class="card-header">
-                <div class="card-title">发送文本</div>
+                <div class="card-title">文案管理</div>
               </div>
               <div class="form-field full">
                 <textarea id="templates" rows="10"></textarea>
@@ -162,7 +172,7 @@
               <div class="card-header">
                 <div class="card-title">设备管理</div>
               </div>
-              <div class="table-wrap">
+              <div class="table-wrap table-scroll-y">
                 <table class="data-table table-nowrap">
                   <thead>
                     <tr>
@@ -185,7 +195,7 @@
               <div class="card-header">
                 <div class="card-title">设备信息</div>
               </div>
-              <div class="table-wrap">
+              <div class="table-wrap table-scroll-y">
                 <table class="data-table table-nowrap">
                   <thead>
                     <tr>
@@ -194,7 +204,8 @@
                       <th>绑定设备ID</th>
                       <th>本地接口地址</th>
                       <th>浏览器 API</th>
-                      <th>状态</th>
+                      <th>在线状态</th>
+                      <th>最后心跳</th>
                     </tr>
                   </thead>
                   <tbody id="device-info-table-body"></tbody>
@@ -243,6 +254,6 @@
         </div>
       </div>
     </div>
-    <script src="/app.js?v=20260319b"></script>
+    <script src="/app.js?v=20260321i"></script>
   </body>
 </html>

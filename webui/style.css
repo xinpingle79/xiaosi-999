@@ -14,6 +14,9 @@
   --muted-text: #6c7b91;
   --primary: #667eea;
   --primary-dark: #5467d5;
+  --table-head-height: 44px;
+  --table-row-height: 52px;
+  --table-visible-rows: 12;
 }
 
 body {
@@ -49,8 +52,13 @@ select {
 }
 
 .brand {
-  padding: 24px 20px;
+  padding: 24px 12px;
   background: rgba(0, 0, 0, 0.08);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
 }
 
 .brand-title {
@@ -71,21 +79,81 @@ select {
   padding: 12px 0;
 }
 
+.sidebar-footer {
+  margin-top: auto;
+  padding: 16px 14px 18px;
+}
+
+.account-card {
+  padding: 8px 0 0;
+}
+
+.account-name {
+  font-size: 24px;
+  line-height: 1.2;
+  font-weight: 700;
+  color: var(--sidebar-text);
+  text-align: center;
+  word-break: break-word;
+}
+
+.account-role {
+  margin-top: 4px;
+  font-size: 13px;
+  line-height: 1.4;
+  color: rgba(255, 250, 243, 0.82);
+  text-align: center;
+}
+
+.logout-btn {
+  width: 100%;
+  margin-top: 12px;
+  height: 42px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 250, 243, 0.35);
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--sidebar-text);
+  font-size: 16px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 0.2s ease, border-color 0.2s ease, transform 0.2s ease;
+}
+
+.logout-btn:hover {
+  background: rgba(255, 255, 255, 0.16);
+  border-color: rgba(255, 250, 243, 0.5);
+}
+
+.logout-btn:active {
+  transform: translateY(1px);
+}
+
 .nav-item {
   height: 52px;
   display: flex;
   align-items: center;
-  padding: 0 20px;
+  justify-content: center;
+  padding: 0;
   font-size: 16px;
   font-weight: 600;
   color: var(--sidebar-text);
-  border-left: 4px solid transparent;
   cursor: pointer;
+  text-align: center;
+  position: relative;
 }
 
 .nav-item.active {
   background: var(--sidebar-active);
-  border-left-color: rgba(255, 255, 255, 0.7);
+}
+
+.nav-item.active::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 4px;
+  background: rgba(255, 255, 255, 0.7);
 }
 
 .main {
@@ -435,6 +503,54 @@ button.ghost {
   overflow-y: hidden;
 }
 
+.table-wrap.table-scroll-y {
+  height: calc(
+    var(--table-head-height) +
+      (var(--table-row-height) * var(--table-visible-rows)) +
+      2px
+  );
+  max-height: calc(
+    var(--table-head-height) +
+      (var(--table-row-height) * var(--table-visible-rows)) +
+      2px
+  );
+  overflow-y: auto;
+  overflow-x: auto;
+  padding-right: 4px;
+}
+
+.table-wrap.table-scroll-y .data-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  height: var(--table-head-height);
+  padding-top: 0;
+  padding-bottom: 0;
+  vertical-align: middle;
+}
+
+.table-wrap.table-scroll-y .data-table tbody td {
+  height: var(--table-row-height);
+  padding-top: 0;
+  padding-bottom: 0;
+  vertical-align: middle;
+}
+
+.table-wrap.table-scroll-y::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+.table-wrap.table-scroll-y::-webkit-scrollbar-thumb {
+  background: rgba(108, 123, 145, 0.45);
+  border-radius: 999px;
+}
+
+.table-wrap.table-scroll-y::-webkit-scrollbar-track {
+  background: rgba(226, 232, 242, 0.7);
+  border-radius: 999px;
+}
+
 .data-table {
   width: 100%;
   border-collapse: collapse;
@@ -670,13 +786,13 @@ button.ghost {
 .card[data-page="device-info"] .data-table th:nth-child(2),
 .card[data-page="device-info"] .data-table td:nth-child(2) {
   width: auto;
-  min-width: 160px;
+  min-width: 112px;
 }
 
 .card[data-page="device-info"] .data-table th:nth-child(3),
 .card[data-page="device-info"] .data-table td:nth-child(3) {
   width: auto;
-  min-width: 280px;
+  min-width: 232px;
 }
 
 .card[data-page="device-info"] .data-table th:nth-child(4),
@@ -688,13 +804,13 @@ button.ghost {
 .card[data-page="device-info"] .data-table th:nth-child(5),
 .card[data-page="device-info"] .data-table td:nth-child(5) {
   width: auto;
-  min-width: 240px;
+  min-width: 192px;
 }
 
 .card[data-page="device-info"] .data-table th:nth-child(6),
 .card[data-page="device-info"] .data-table td:nth-child(6) {
   width: auto;
-  min-width: 240px;
+  min-width: 384px;
 }
 
 .card[data-page="device-info"] .data-table th:nth-child(7),
@@ -723,7 +839,7 @@ button.ghost {
 
 .sub-device-info-card .data-table th:nth-child(2),
 .sub-device-info-card .data-table td:nth-child(2) {
-  min-width: 130px;
+  min-width: 112px;
 }
 
 .sub-device-info-card .data-table th:nth-child(3),
@@ -733,17 +849,22 @@ button.ghost {
 
 .sub-device-info-card .data-table th:nth-child(4),
 .sub-device-info-card .data-table td:nth-child(4) {
-  min-width: 230px;
+  min-width: 192px;
 }
 
 .sub-device-info-card .data-table th:nth-child(5),
 .sub-device-info-card .data-table td:nth-child(5) {
-  min-width: 360px;
+  min-width: 456px;
 }
 
 .sub-device-info-card .data-table th:nth-child(6),
 .sub-device-info-card .data-table td:nth-child(6) {
   min-width: 90px;
+}
+
+.sub-device-info-card .data-table th:nth-child(7),
+.sub-device-info-card .data-table td:nth-child(7) {
+  min-width: 170px;
 }
 
 .data-table .col-actions .action-btn {
@@ -777,10 +898,6 @@ button.ghost {
   margin-bottom: 6px;
 }
 
-.user-card .table-wrap {
-  overflow-x: hidden;
-}
-
 .user-card .data-table {
   min-width: 0;
   table-layout: fixed;
@@ -788,7 +905,7 @@ button.ghost {
 
 .user-card .data-table thead th,
 .user-card .data-table tbody td {
-  padding: 8px 6px;
+  padding: 0 6px;
 }
 
 .user-card .data-table th,
@@ -1127,6 +1244,19 @@ body {
 @media (max-width: 1100px) {
   .content {
     padding: 20px;
+  }
+
+  .table-wrap.table-scroll-y {
+    height: calc(
+      var(--table-head-height) +
+        (var(--table-row-height) * var(--table-visible-rows)) +
+        2px
+    );
+    max-height: calc(
+      var(--table-head-height) +
+        (var(--table-row-height) * var(--table-visible-rows)) +
+        2px
+    );
   }
 
   .inline-config-row {

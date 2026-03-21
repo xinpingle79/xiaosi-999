@@ -76,6 +76,8 @@ class Database:
 
     def _migrate_sent_history(self):
         columns = self._fetch_table_columns("sent_history")
+        pk_rows = self.conn.execute("PRAGMA table_info(sent_history)").fetchall() if columns else []
+        pk_map = {row["name"]: row["pk"] for row in pk_rows}
         if not columns:
             self._create_sent_history_table("sent_history")
             self._ensure_sent_history_indexes()
@@ -89,7 +91,12 @@ class Database:
             "status",
             "created_at",
         }
-        if expected_columns.issubset(columns):
+        if (
+            expected_columns.issubset(columns)
+            and pk_map.get("account_id") == 1
+            and pk_map.get("group_id") == 2
+            and pk_map.get("profile_url") == 3
+        ):
             self._ensure_sent_history_indexes()
             return
 
@@ -126,14 +133,14 @@ class Database:
             self.conn.execute(
                 """
                 INSERT OR REPLACE INTO sent_history_new
-                (group_id, profile_url, user_id, account_id, status, created_at)
+                (account_id, group_id, profile_url, user_id, status, created_at)
                 VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
+                    row["account_id"],
                     row["group_id"],
                     row["profile_url"],
                     row["user_id"],
-                    row["account_id"],
                     row["status"],
                     row["created_at"],
                 ),
@@ -147,13 +154,13 @@ class Database:
         self.conn.execute(
             f"""
             CREATE TABLE IF NOT EXISTS {table_name} (
+                account_id TEXT NOT NULL,
                 group_id TEXT NOT NULL,
                 profile_url TEXT NOT NULL,
                 user_id TEXT,
-                account_id TEXT,
                 status INTEGER,
                 created_at DATETIME,
-                PRIMARY KEY (group_id, profile_url)
+                PRIMARY KEY (account_id, group_id, profile_url)
             )
             """
         )
@@ -169,18 +176,19 @@ class Database:
                 continue
 
             user_id = row["user_id"] or self.extract_user_id(profile_url)
+            account_id = self.normalize_account_scope(row["account_id"])
             candidate = {
+                "account_id": account_id,
                 "group_id": group_id,
                 "profile_url": profile_url,
                 "user_id": user_id,
-                "account_id": row["account_id"],
                 "status": 1 if row["status"] is None else row["status"],
                 "created_at": row["created_at"] or "1970-01-01 00:00:00",
             }
             key = (
-                f"{group_id}|user:{user_id}"
+                f"{account_id}|{group_id}|user:{user_id}"
                 if user_id
-                else f"{group_id}|url:{profile_url}"
+                else f"{account_id}|{group_id}|url:{profile_url}"
             )
             current = normalized_rows.get(key)
             if not current or candidate["created_at"] >= current["created_at"]:
@@ -192,32 +200,68 @@ class Database:
         self.conn.execute(
             """
             CREATE UNIQUE INDEX IF NOT EXISTS idx_sent_history_group_user_id
-            ON sent_history(group_id, user_id)
+            ON sent_history(account_id, group_id, user_id)
             """
         )
 
     def _migrate_send_claims(self):
         columns = self._fetch_table_columns("send_claims")
+        pk_rows = self.conn.execute("PRAGMA table_info(send_claims)").fetchall() if columns else []
+        pk_map = {row["name"]: row["pk"] for row in pk_rows}
         expected_columns = {"group_id", "profile_url", "user_id", "account_id", "claimed_at"}
-        if columns and expected_columns.issubset(columns):
+        if (
+            columns
+            and expected_columns.issubset(columns)
+            and pk_map.get("account_id") == 1
+            and pk_map.get("group_id") == 2
+            and pk_map.get("profile_url") == 3
+        ):
             self._ensure_send_claim_indexes()
             return
 
+        rows = []
         if columns:
+            rows = self.conn.execute(
+                """
+                SELECT group_id, profile_url, user_id, account_id, claimed_at
+                FROM send_claims
+                """
+            ).fetchall()
             self.conn.execute("DROP TABLE send_claims")
         self._create_send_claims_table("send_claims")
+        for row in rows:
+            normalized_group_id = self.normalize_group_id(row["group_id"], allow_legacy=True)
+            normalized_profile_url = self.normalize_profile_url(row["profile_url"])
+            if not normalized_group_id or not normalized_profile_url:
+                continue
+            normalized_user_id = row["user_id"] or self.extract_user_id(normalized_profile_url)
+            normalized_account_id = self.normalize_account_scope(row["account_id"])
+            self.conn.execute(
+                """
+                INSERT OR REPLACE INTO send_claims
+                (account_id, group_id, profile_url, user_id, claimed_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    normalized_account_id,
+                    normalized_group_id,
+                    normalized_profile_url,
+                    normalized_user_id,
+                    row["claimed_at"],
+                ),
+            )
         self._ensure_send_claim_indexes()
 
     def _create_send_claims_table(self, table_name):
         self.conn.execute(
             f"""
             CREATE TABLE IF NOT EXISTS {table_name} (
+                account_id TEXT NOT NULL,
                 group_id TEXT NOT NULL,
                 profile_url TEXT NOT NULL,
                 user_id TEXT,
-                account_id TEXT NOT NULL,
                 claimed_at DATETIME NOT NULL,
-                PRIMARY KEY (group_id, profile_url)
+                PRIMARY KEY (account_id, group_id, profile_url)
             )
             """
         )
@@ -227,7 +271,7 @@ class Database:
         self.conn.execute(
             """
             CREATE UNIQUE INDEX IF NOT EXISTS idx_send_claims_group_user_id
-            ON send_claims(group_id, user_id)
+            ON send_claims(account_id, group_id, user_id)
             """
         )
 
@@ -306,7 +350,11 @@ class Database:
             "account_id",
             "updated_at",
         }
-        if expected_columns.issubset(columns) and pk_map.get("group_id") == 1:
+        if (
+            expected_columns.issubset(columns)
+            and pk_map.get("account_id") == 1
+            and pk_map.get("group_id") == 2
+        ):
             return
 
         account_column = "account_id" if "account_id" in columns else "NULL AS account_id"
@@ -1325,13 +1373,14 @@ class Database:
         self.conn.execute(
             f"""
             CREATE TABLE IF NOT EXISTS {table_name} (
-                group_id TEXT NOT NULL PRIMARY KEY,
+                account_id TEXT NOT NULL,
+                group_id TEXT NOT NULL,
                 profile_url TEXT NOT NULL,
                 user_id TEXT,
                 name TEXT,
                 group_user_url TEXT,
-                account_id TEXT,
-                updated_at DATETIME
+                updated_at DATETIME,
+                PRIMARY KEY (account_id, group_id)
             )
             """
         )
@@ -1344,18 +1393,19 @@ class Database:
             if not group_id or not profile_url:
                 continue
 
+            account_id = self.normalize_account_scope(row["account_id"])
             candidate = {
+                "account_id": account_id,
                 "group_id": group_id,
                 "profile_url": profile_url,
                 "user_id": row["user_id"] or self.extract_user_id(profile_url),
                 "name": row["name"],
                 "group_user_url": row["group_user_url"],
-                "account_id": row["account_id"],
                 "updated_at": row["updated_at"] or "1970-01-01 00:00:00",
             }
-            current = deduped_rows.get(group_id)
+            current = deduped_rows.get((account_id, group_id))
             if not current or candidate["updated_at"] >= current["updated_at"]:
-                deduped_rows[group_id] = candidate
+                deduped_rows[(account_id, group_id)] = candidate
         return list(deduped_rows.values())
 
     def _fetch_table_columns(self, table_name):
@@ -1364,20 +1414,43 @@ class Database:
 
     def _migrate_group_status(self):
         columns = self._fetch_table_columns("group_status")
+        pk_rows = self.conn.execute("PRAGMA table_info(group_status)").fetchall() if columns else []
+        pk_map = {row["name"]: row["pk"] for row in pk_rows}
+        rows = []
         if columns:
             expected = {"group_id", "done_at", "account_id"}
-            if expected.issubset(columns):
+            if (
+                expected.issubset(columns)
+                and pk_map.get("account_id") == 1
+                and pk_map.get("group_id") == 2
+            ):
                 return
+            rows = self.conn.execute(
+                "SELECT group_id, done_at, account_id FROM group_status"
+            ).fetchall()
             self.conn.execute("DROP TABLE IF EXISTS group_status")
         self.conn.execute(
             """
             CREATE TABLE IF NOT EXISTS group_status (
-                group_id TEXT NOT NULL PRIMARY KEY,
+                account_id TEXT NOT NULL,
+                group_id TEXT NOT NULL,
                 done_at DATETIME,
-                account_id TEXT
+                PRIMARY KEY (account_id, group_id)
             )
             """
         )
+        for row in rows:
+            normalized_group_id = self.normalize_group_id(row["group_id"], allow_legacy=True)
+            if not normalized_group_id:
+                continue
+            normalized_account_id = self.normalize_account_scope(row["account_id"])
+            self.conn.execute(
+                """
+                INSERT OR REPLACE INTO group_status (account_id, group_id, done_at)
+                VALUES (?, ?, ?)
+                """,
+                (normalized_account_id, normalized_group_id, row["done_at"]),
+            )
 
     def _migrate_runtime_flags(self):
         columns = self._fetch_table_columns("runtime_flags")
@@ -1436,24 +1509,26 @@ class Database:
         normalized_group_id = self.normalize_group_id(group_id)
         if not normalized_group_id:
             return
+        normalized_account_id = self.normalize_account_scope(account_id)
         done_at = done_at or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.conn.execute(
             """
             INSERT OR REPLACE INTO group_status
-            (group_id, done_at, account_id)
+            (account_id, group_id, done_at)
             VALUES (?, ?, ?)
             """,
-            (normalized_group_id, done_at, account_id),
+            (normalized_account_id, normalized_group_id, done_at),
         )
         self.conn.commit()
 
-    def is_group_done(self, group_id, ttl_hours=0):
+    def is_group_done(self, group_id, account_id=None, ttl_hours=0):
         normalized_group_id = self.normalize_group_id(group_id)
         if not normalized_group_id:
             return False
+        normalized_account_id = self.normalize_account_scope(account_id)
         row = self.conn.execute(
-            "SELECT done_at FROM group_status WHERE group_id = ?",
-            (normalized_group_id,),
+            "SELECT done_at FROM group_status WHERE account_id = ? AND group_id = ?",
+            (normalized_account_id, normalized_group_id),
         ).fetchone()
         if not row:
             return False
@@ -1470,7 +1545,10 @@ class Database:
         except Exception:
             return True
         if done_at + timedelta(hours=ttl_hours) <= datetime.now():
-            self.conn.execute("DELETE FROM group_status WHERE group_id = ?", (normalized_group_id,))
+            self.conn.execute(
+                "DELETE FROM group_status WHERE account_id = ? AND group_id = ?",
+                (normalized_account_id, normalized_group_id),
+            )
             self.conn.commit()
             return False
         return True
@@ -1480,6 +1558,9 @@ class Database:
         if raw:
             return raw
         return self.LEGACY_GROUP_SCOPE if allow_legacy else None
+
+    def normalize_account_scope(self, account_id):
+        return str(account_id or "").strip()
 
     def normalize_profile_url(self, url):
         raw = (url or "").strip()
@@ -1521,28 +1602,25 @@ class Database:
             return segments[1]
         return None
 
-    def is_sent(self, group_id, profile_url=None, user_id=None):
+    def is_sent(self, group_id, account_id=None, profile_url=None, user_id=None):
         normalized_group_id = self.normalize_group_id(group_id)
+        normalized_account_id = self.normalize_account_scope(account_id)
         normalized_url = self.normalize_profile_url(profile_url) if profile_url else None
         normalized_user_id = user_id or self.extract_user_id(normalized_url)
         if not normalized_group_id or (not normalized_url and not normalized_user_id):
             return False
 
         conditions, params = self._build_target_conditions(normalized_url, normalized_user_id)
-        scope_group_ids = [normalized_group_id]
-        if normalized_group_id != self.LEGACY_GROUP_SCOPE:
-            scope_group_ids.append(self.LEGACY_GROUP_SCOPE)
-        scope_placeholders = ",".join("?" for _ in scope_group_ids)
-
         query = (
-            f"SELECT 1 FROM sent_history "
-            f"WHERE group_id IN ({scope_placeholders}) AND ({' OR '.join(conditions)}) LIMIT 1"
+            "SELECT 1 FROM sent_history "
+            f"WHERE account_id = ? AND group_id = ? AND ({' OR '.join(conditions)}) LIMIT 1"
         )
-        row = self.conn.execute(query, tuple(scope_group_ids + params)).fetchone()
+        row = self.conn.execute(query, tuple([normalized_account_id, normalized_group_id] + params)).fetchone()
         return row is not None
 
     def try_claim_target(self, group_id, profile_url, account_id, user_id=None, ttl_hours=6):
         normalized_group_id = self.normalize_group_id(group_id)
+        normalized_account_id = self.normalize_account_scope(account_id)
         normalized_url = self.normalize_profile_url(profile_url)
         normalized_user_id = user_id or self.extract_user_id(normalized_url)
         if not normalized_group_id or (not normalized_url and not normalized_user_id):
@@ -1564,19 +1642,9 @@ class Database:
                 "DELETE FROM send_claims WHERE claimed_at < ?",
                 (expire_before,),
             )
-            sent_scope_ids = [normalized_group_id]
-            if normalized_group_id != self.LEGACY_GROUP_SCOPE:
-                sent_scope_ids.append(self.LEGACY_GROUP_SCOPE)
-            scope_placeholders = ",".join("?" for _ in sent_scope_ids)
             already_sent = self.conn.execute(
-                f"""
-                SELECT 1
-                FROM sent_history
-                WHERE group_id IN ({scope_placeholders})
-                  AND ({' OR '.join(conditions)})
-                LIMIT 1
-                """,
-                tuple(sent_scope_ids + params),
+                f"SELECT 1 FROM sent_history WHERE account_id = ? AND group_id = ? AND ({' OR '.join(conditions)}) LIMIT 1",
+                tuple([normalized_account_id, normalized_group_id] + params),
             ).fetchone()
             if already_sent:
                 self.conn.commit()
@@ -1584,14 +1652,14 @@ class Database:
 
             self.conn.execute(
                 """
-                INSERT INTO send_claims (group_id, profile_url, user_id, account_id, claimed_at)
+                INSERT INTO send_claims (account_id, group_id, profile_url, user_id, claimed_at)
                 VALUES (?, ?, ?, ?, ?)
                 """,
                 (
+                    normalized_account_id,
                     normalized_group_id,
                     normalized_url,
                     normalized_user_id,
-                    account_id,
                     now_text,
                 ),
             )
@@ -1605,8 +1673,9 @@ class Database:
             log.error(f"抢占发送目标失败: {exc}")
             return False
 
-    def release_claim(self, group_id, profile_url=None, user_id=None):
+    def release_claim(self, group_id, account_id=None, profile_url=None, user_id=None):
         normalized_group_id = self.normalize_group_id(group_id)
+        normalized_account_id = self.normalize_account_scope(account_id)
         normalized_url = self.normalize_profile_url(profile_url) if profile_url else None
         normalized_user_id = user_id or self.extract_user_id(normalized_url)
         conditions, params = self._build_target_conditions(normalized_url, normalized_user_id)
@@ -1615,8 +1684,8 @@ class Database:
 
         try:
             self.conn.execute(
-                f"DELETE FROM send_claims WHERE group_id = ? AND ({' OR '.join(conditions)})",
-                tuple([normalized_group_id] + params),
+                f"DELETE FROM send_claims WHERE account_id = ? AND group_id = ? AND ({' OR '.join(conditions)})",
+                tuple([normalized_account_id, normalized_group_id] + params),
             )
             self.conn.commit()
         except Exception as exc:
@@ -1627,28 +1696,34 @@ class Database:
             normalized_group_id = self.normalize_group_id(group_id)
             normalized_url = self.normalize_profile_url(profile_url)
             normalized_user_id = user_id or self.extract_user_id(normalized_url)
+            normalized_account_id = self.normalize_account_scope(account_id)
             if not normalized_group_id or not normalized_url:
                 raise ValueError("invalid_profile_url")
 
             status = 1 if success else 0
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            self.release_claim(group_id=normalized_group_id, profile_url=normalized_url, user_id=normalized_user_id)
+            self.release_claim(
+                group_id=normalized_group_id,
+                account_id=normalized_account_id,
+                profile_url=normalized_url,
+                user_id=normalized_user_id,
+            )
             conditions, params = self._build_target_conditions(normalized_url, normalized_user_id)
             self.conn.execute(
-                f"DELETE FROM sent_history WHERE group_id = ? AND ({' OR '.join(conditions)})",
-                tuple([normalized_group_id] + params),
+                f"DELETE FROM sent_history WHERE account_id = ? AND group_id = ? AND ({' OR '.join(conditions)})",
+                tuple([normalized_account_id, normalized_group_id] + params),
             )
             self.conn.execute(
                 """
                 INSERT OR REPLACE INTO sent_history
-                (group_id, profile_url, user_id, account_id, status, created_at)
+                (account_id, group_id, profile_url, user_id, status, created_at)
                 VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
+                    normalized_account_id,
                     normalized_group_id,
                     normalized_url,
                     normalized_user_id,
-                    account_id,
                     status,
                     now,
                 ),
@@ -1658,18 +1733,19 @@ class Database:
         except Exception as exc:
             log.error(f"数据库写入失败: {exc}")
 
-    def get_cursor(self, group_id):
+    def get_cursor(self, group_id, account_id=None):
         try:
             normalized_group_id = self.normalize_group_id(group_id)
+            normalized_account_id = self.normalize_account_scope(account_id)
             if not normalized_group_id:
                 return None
             row = self.conn.execute(
                 """
-                SELECT group_id, profile_url, user_id, name, group_user_url, account_id, updated_at
+                SELECT account_id, group_id, profile_url, user_id, name, group_user_url, updated_at
                 FROM run_cursor
-                WHERE group_id=?
+                WHERE account_id = ? AND group_id=?
                 """,
-                (normalized_group_id,),
+                (normalized_account_id, normalized_group_id),
             ).fetchone()
             return dict(row) if row else None
         except Exception as exc:
@@ -1680,6 +1756,7 @@ class Database:
         try:
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             normalized_group_id = self.normalize_group_id(group_id)
+            normalized_account_id = self.normalize_account_scope(account_id)
             profile_url = self.normalize_profile_url(target.get("profile_url"))
             user_id = target.get("user_id") or self.extract_user_id(profile_url)
             if not normalized_group_id or not profile_url:
@@ -1688,16 +1765,16 @@ class Database:
             self.conn.execute(
                 """
                 INSERT OR REPLACE INTO run_cursor
-                (group_id, profile_url, user_id, name, group_user_url, account_id, updated_at)
+                (account_id, group_id, profile_url, user_id, name, group_user_url, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
+                    normalized_account_id,
                     normalized_group_id,
                     profile_url,
                     user_id,
                     target.get("name"),
                     target.get("group_user_url"),
-                    account_id,
                     now,
                 ),
             )

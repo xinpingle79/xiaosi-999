@@ -8,6 +8,8 @@ on:
 
 env:
   PYINSTALLER_VERSION: "6.10.0"
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: "utf-8"
 
 jobs:
   build-windows:
@@ -16,6 +18,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Clean Build Directories
+        shell: pwsh
+        run: |
+          Remove-Item build, dist, Output -Recurse -Force -ErrorAction SilentlyContinue
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -34,15 +41,26 @@ jobs:
           python --version
           python -m PyInstaller --version
 
+      - name: Preflight Source Tree
+        shell: pwsh
+        run: |
+          python tools/release_preflight.py
+
+      - name: Windows Console Smoke
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist/windows-console-audit | Out-Null
+          python tools/windows_console_smoke.py *>&1 | Tee-Object -FilePath dist/windows-console-audit/windows_console_smoke.txt
+
       - name: Build Main
         shell: pwsh
         run: |
-          python -m PyInstaller --noconfirm --clean --onefile --name FB_RPA_Main main.py --collect-all playwright --collect-submodules core --collect-submodules utils --hidden-import playwright.sync_api --hidden-import playwright.async_api
+          python -m PyInstaller --noconfirm --clean --onefile --hide-console hide-early --name FB_RPA_Main main.py --collect-all playwright --collect-submodules core --collect-submodules utils --hidden-import playwright.sync_api --hidden-import playwright.async_api
 
       - name: Build Worker
         shell: pwsh
         run: |
-          python -m PyInstaller --noconfirm --clean --onefile --name FB_RPA_Worker agent/worker.py --collect-all playwright --collect-submodules core --collect-submodules utils --hidden-import playwright.sync_api --hidden-import playwright.async_api
+          python -m PyInstaller --noconfirm --clean --onefile --hide-console hide-early --name FB_RPA_Worker agent/worker.py --collect-all playwright --collect-submodules core --collect-submodules utils --hidden-import playwright.sync_api --hidden-import playwright.async_api
 
       - name: Build Client
         shell: pwsh
@@ -65,10 +83,25 @@ jobs:
           Copy-Item config/messages.yaml dist/FB_RPA_Client/config/
           Copy-Item config/client.example.yaml dist/FB_RPA_Client/config/
 
+      - name: Preflight Staged Package
+        shell: pwsh
+        run: |
+          python tools/release_preflight.py
+
+      - name: Windows Visual Audit
+        shell: pwsh
+        run: |
+          powershell -ExecutionPolicy Bypass -File tools/windows_visual_audit.ps1 -PackageRoot dist/FB_RPA_Client -OutputDir dist/windows-visual-audit
+
       - name: Build Installer
         uses: Minionguyjpro/Inno-Setup-Action@v1.2.5
         with:
           path: installer.iss
+
+      - name: Preflight Final Outputs
+        shell: pwsh
+        run: |
+          python tools/release_preflight.py
 
       - name: Upload Client Folder
         uses: actions/upload-artifact@v4
@@ -81,3 +114,15 @@ jobs:
         with:
           name: FB_RPA_Client_Installer
           path: Output/*
+
+      - name: Upload Windows Visual Audit
+        uses: actions/upload-artifact@v4
+        with:
+          name: FB_RPA_Client_Windows_Visual_Audit
+          path: dist/windows-visual-audit/*
+
+      - name: Upload Windows Console Audit
+        uses: actions/upload-artifact@v4
+        with:
+          name: FB_RPA_Client_Windows_Console_Audit
+          path: dist/windows-console-audit/*

@@ -264,185 +264,212 @@ def run_single_session(config, msgs, browser_settings, profile=None, startup_loc
     probe_templates = msgs.get("probe_templates") or ["你好"]
     formal_templates = msgs.get("templates") or []
     account_templates_used = False
+    template_source = "local_messages_yaml"
     if owner_username:
         account_messages = db.get_message_templates(owner_username)
         if account_messages is not None:
             probe_templates = account_messages.get("probe_templates") or []
             formal_templates = account_messages.get("templates") or []
             account_templates_used = True
+            template_source = "db_owner_templates"
 
     try:
         with sync_playwright() as p:
-            browser_id = profile.get("id") if profile else None
-            if startup_lock is not None:
-                with startup_lock:
-                    if label:
-                        log.info(f"[{label}] 正在排队启动浏览器连接...")
+            try:
+                browser_id = profile.get("id") if profile else None
+                if startup_lock is not None:
+                    with startup_lock:
+                        if label:
+                            log.info(f"[{label}] 正在排队启动浏览器连接...")
+                        session = bm.open_for_browser(p, browser_id=browser_id)
+                else:
                     session = bm.open_for_browser(p, browser_id=browser_id)
-            else:
-                session = bm.open_for_browser(p, browser_id=browser_id)
-            if not session:
-                log.error(f"[{label or '默认窗口'}] 连接浏览器失败，跳过当前窗口。")
-                return {
-                    "account_id": label or "unknown",
-                    "messages_sent": 0,
-                    "finished_groups": 0,
-                    "reason": "session_open_failed",
-                }
+                if not session:
+                    log.error(f"[{label or '默认窗口'}] 连接浏览器失败，跳过当前窗口。")
+                    return {
+                        "account_id": label or "unknown",
+                        "messages_sent": 0,
+                        "finished_groups": 0,
+                        "reason": "session_open_failed",
+                    }
 
-            page = session["page"]
-            profile_account_id = session["account_id"]
-            stats_account_id = owner_username or profile_account_id
-            account_id = stats_account_id
-            alert_account_id = label or profile_account_id
-            scraper = Scraper(page, window_label=alert_account_id)
-            sender = Messager(page, task_cfg, window_label=alert_account_id)
-            max_messages = normalize_message_limit(task_cfg.get("max_messages_per_account", 0))
-            if account_templates_used:
-                log.info(f"[{alert_account_id}] 使用账号专属文案 ({len(formal_templates)} 条)")
+                page = session["page"]
+                profile_account_id = session["account_id"]
+                stats_account_id = owner_username or profile_account_id
+                account_id = stats_account_id
+                alert_account_id = label or profile_account_id
+                scraper = Scraper(page, window_label=alert_account_id)
+                sender = Messager(page, task_cfg, window_label=alert_account_id)
+                max_messages = normalize_message_limit(task_cfg.get("max_messages_per_account", 0))
+                if account_templates_used:
+                    log.info(f"[{alert_account_id}] 使用账号专属文案 ({len(formal_templates)} 条)")
+                else:
+                    log.info(f"[{alert_account_id}] 使用本地文案文件 ({len(formal_templates)} 条)")
+                log.info(
+                    f"[{alert_account_id}] 文案装载完成：source={template_source}，"
+                    f"formal={len(formal_templates)}，probe={len(probe_templates)}"
+                )
+                log.info(
+                    f"[{alert_account_id}] 发送频率来源：source=client_yaml.task_settings.send_interval_seconds"
+                )
 
-            if owner_username and db.is_account_disabled(owner_username):
-                log.warning(f"[{alert_account_id}] 当前账号已禁用，停止任务。")
-                return {
-                    "account_id": alert_account_id,
-                    "messages_sent": 0,
-                    "finished_groups": 0,
-                    "reason": "account_disabled",
-                }
-
-            if not formal_templates and probe_templates:
-                formal_templates = probe_templates
-                log.warning(f"[{alert_account_id}] 正式文案为空，改用探针文案发送。")
-            if not formal_templates:
-                log.error(f"[{alert_account_id}] 正式发送文案为空，当前窗口无法启动。")
-                return {
-                    "account_id": alert_account_id,
-                    "messages_sent": 0,
-                    "finished_groups": 0,
-                    "reason": "missing_templates",
-                }
-
-            log.info(
-                f"[{alert_account_id}] 已成功接入 BitBrowser 会话，开始按小组顺序执行成员私聊..."
-            )
-
-            group_urls = collect_target_groups(scraper, task_cfg)
-            if not group_urls:
-                log.error(f"[{alert_account_id}] 未能收集到任何已加入小组，流程结束。")
-                return {
-                    "account_id": alert_account_id,
-                    "messages_sent": 0,
-                    "finished_groups": 0,
-                    "reason": "no_groups",
-                }
-
-            total_sent = 0
-            finished_groups = 0
-            final_reason = "completed"
-            for idx, group_url in enumerate(group_urls, start=1):
-                cont, _ = wait_if_paused(task_cfg)
-                if not cont:
-                    log.warning(f"[{alert_account_id}] 检测到停止标记，任务提前结束。")
-                    final_reason = "stopped"
-                    break
-                if should_stop(task_cfg):
-                    log.warning(f"[{alert_account_id}] 检测到停止标记，任务提前结束。")
-                    final_reason = "stopped"
-                    break
                 if owner_username and db.is_account_disabled(owner_username):
                     log.warning(f"[{alert_account_id}] 当前账号已禁用，停止任务。")
-                    final_reason = "account_disabled"
-                    break
-                if max_messages is not None and total_sent >= max_messages:
-                    log.info(f"[{alert_account_id}] 当前窗口已达到发送上限。")
-                    final_reason = "message_limit"
-                    break
+                    return {
+                        "account_id": alert_account_id,
+                        "messages_sent": 0,
+                        "finished_groups": 0,
+                        "reason": "account_disabled",
+                    }
 
-                if not scraper.open_group_members_page(group_url):
-                    log.warning(f"[{alert_account_id}] 进入小组成员页失败，跳过当前小组。")
-                    continue
-                group_id = scraper.get_current_group_id()
-                if group_id and db.is_group_done(group_id):
-                    log.info(f"[{alert_account_id}] 当前小组已标记完成，跳过: {group_url}")
-                    continue
-                log.info(f"[{alert_account_id}] 开始处理第 {idx}/{len(group_urls)} 个小组: {group_url}")
+                if not formal_templates and probe_templates:
+                    formal_templates = probe_templates
+                    log.warning(f"[{alert_account_id}] 正式文案为空，改用探针文案发送。")
+                if not formal_templates:
+                    log.error(f"[{alert_account_id}] 正式发送文案为空，当前窗口无法启动。")
+                    return {
+                        "account_id": alert_account_id,
+                        "messages_sent": 0,
+                        "finished_groups": 0,
+                        "reason": "missing_templates",
+                    }
 
-                remaining_budget = None
-                if max_messages is not None:
-                    remaining_budget = max_messages - total_sent
-
-                result = process_current_group(
-                    scraper=scraper,
-                    sender=sender,
-                    db=db,
-                    account_id=account_id,
-                    owner_username=owner_username,
-                    probe_templates=probe_templates,
-                    templates=formal_templates,
-                    task_cfg=task_cfg,
-                    message_budget=remaining_budget,
+                log.info(
+                    f"[{alert_account_id}] 已成功接入 BitBrowser 会话，开始按小组顺序执行成员私聊..."
                 )
-                total_sent += result["messages_sent"]
-                if result["reason"] != "group_id_not_found":
-                    finished_groups += 1
 
-                if result["reason"] == "stopped":
-                    log.warning(f"[{alert_account_id}] 收到停止信号，结束当前窗口。")
-                    final_reason = "stopped"
-                    break
-                if result["reason"] == "account_restricted":
-                    blocked_targets = result.get("blocked_targets") or []
-                    silent_targets = result.get("silent_targets") or []
-                    show_account_restricted_alert(alert_account_id, blocked_targets, silent_targets)
-                    final_reason = "account_restricted"
-                    break
-                if result["reason"] == "stranger_message_limit_reached":
-                    show_window_limit_alert(
-                        window_token_label,
-                        "stranger_message_limit_reached",
-                        result.get("alert_text")
-                        or "你的陌生消息已达数量上限\n24 小时内可发送的陌生消息数量有上限。",
-                    )
-                    final_reason = "stranger_message_limit_reached"
-                    break
-                if result["reason"] in {
-                    "message_request_limit_reached",
-                    "account_cannot_message",
-                    "send_restricted_ui",
-                    "account_restricted_by_dialog",
-                    "send_blocked_popup",
-                }:
-                    show_window_limit_alert(
-                        window_token_label,
-                        result["reason"],
-                        result.get("alert_text"),
-                    )
-                    final_reason = result["reason"]
-                    break
-                if result["reason"] == "message_limit":
-                    log.info(f"[{alert_account_id}] 当前窗口达到发送上限，停止继续处理后续小组。")
-                    final_reason = "message_limit"
-                    break
-                if result["reason"] == "account_disabled":
-                    log.warning(f"[{alert_account_id}] 当前账号已禁用，停止任务。")
-                    final_reason = "account_disabled"
-                    break
-                if result["reason"] == "group_exhausted":
-                    log.info(f"[{alert_account_id}] 当前小组已扫描到底部且没有新用户，继续下一个小组。")
-                    db.mark_group_done(group_id, account_id=alert_account_id)
+                group_urls = collect_target_groups(scraper, task_cfg)
+                if not group_urls:
+                    log.error(f"[{alert_account_id}] 未能收集到任何已加入小组，流程结束。")
+                    return {
+                        "account_id": alert_account_id,
+                        "messages_sent": 0,
+                        "finished_groups": 0,
+                        "reason": "no_groups",
+                    }
 
-            log.info(
-                f"[{alert_account_id}] 当前窗口处理结束，共完成 {finished_groups} 个小组，"
-                f"成功发送 {total_sent} 条消息。"
-            )
-            return {
-                "account_id": alert_account_id,
-                "messages_sent": total_sent,
-                "finished_groups": finished_groups,
-                "reason": final_reason,
-            }
+                total_sent = 0
+                finished_groups = 0
+                final_reason = "completed"
+                for idx, group_url in enumerate(group_urls, start=1):
+                    cont, _ = wait_if_paused(task_cfg)
+                    if not cont:
+                        log.warning(f"[{alert_account_id}] 检测到停止标记，任务提前结束。")
+                        final_reason = "stopped"
+                        break
+                    if should_stop(task_cfg):
+                        log.warning(f"[{alert_account_id}] 检测到停止标记，任务提前结束。")
+                        final_reason = "stopped"
+                        break
+                    if owner_username and db.is_account_disabled(owner_username):
+                        log.warning(f"[{alert_account_id}] 当前账号已禁用，停止任务。")
+                        final_reason = "account_disabled"
+                        break
+                    if max_messages is not None and total_sent >= max_messages:
+                        log.info(f"[{alert_account_id}] 当前窗口已达到发送上限。")
+                        final_reason = "message_limit"
+                        break
+
+                    if not scraper.open_group_members_page(group_url):
+                        log.warning(f"[{alert_account_id}] 进入小组成员页失败，跳过当前小组。")
+                        continue
+                    group_id = scraper.get_current_group_id()
+                    if group_id and db.is_group_done(group_id, account_id=account_id):
+                        log.info(f"[{alert_account_id}] 当前小组已标记完成，跳过: {group_url}")
+                        continue
+                    log.info(f"[{alert_account_id}] 开始处理第 {idx}/{len(group_urls)} 个小组: {group_url}")
+
+                    remaining_budget = None
+                    if max_messages is not None:
+                        remaining_budget = max_messages - total_sent
+
+                    result = process_current_group(
+                        scraper=scraper,
+                        sender=sender,
+                        db=db,
+                        account_id=account_id,
+                        owner_username=owner_username,
+                        probe_templates=probe_templates,
+                        templates=formal_templates,
+                        template_source=template_source,
+                        task_cfg=task_cfg,
+                        message_budget=remaining_budget,
+                    )
+                    total_sent += result["messages_sent"]
+                    if result["reason"] not in {
+                        "group_id_not_found",
+                        "newcomers_section_not_found",
+                        "newcomers_scope_unconfirmed",
+                        "cursor_not_found_required",
+                    }:
+                        finished_groups += 1
+
+                    if result["reason"] == "stopped":
+                        log.warning(f"[{alert_account_id}] 收到停止信号，结束当前窗口。")
+                        final_reason = "stopped"
+                        break
+                    if result["reason"] == "account_restricted":
+                        blocked_targets = result.get("blocked_targets") or []
+                        silent_targets = result.get("silent_targets") or []
+                        show_account_restricted_alert(alert_account_id, blocked_targets, silent_targets)
+                        final_reason = "account_restricted"
+                        break
+                    if result["reason"] == "stranger_message_limit_reached":
+                        show_window_limit_alert(
+                            window_token_label,
+                            "stranger_message_limit_reached",
+                            result.get("alert_text")
+                            or "你的陌生消息已达数量上限\n24 小时内可发送的陌生消息数量有上限。",
+                        )
+                        final_reason = "stranger_message_limit_reached"
+                        break
+                    if result["reason"] in {
+                        "message_request_limit_reached",
+                        "account_cannot_message",
+                        "send_restricted_ui",
+                        "account_restricted_by_dialog",
+                        "send_blocked_popup",
+                    }:
+                        show_window_limit_alert(
+                            window_token_label,
+                            result["reason"],
+                            result.get("alert_text"),
+                        )
+                        final_reason = result["reason"]
+                        break
+                    if result["reason"] == "message_limit":
+                        log.info(f"[{alert_account_id}] 当前窗口达到发送上限，停止继续处理后续小组。")
+                        final_reason = "message_limit"
+                        break
+                    if result["reason"] == "cursor_not_found_required":
+                        log.error(
+                            f"[{alert_account_id}] 当前小组断点未找到且配置要求必须命中断点，保留原断点并继续下一个小组。"
+                        )
+                        continue
+                    if result["reason"] == "newcomers_scope_unconfirmed":
+                        log.error(f"[{alert_account_id}] 当前小组新人区目标来源无法确认，跳过当前小组。")
+                        continue
+                    if result["reason"] == "account_disabled":
+                        log.warning(f"[{alert_account_id}] 当前账号已禁用，停止任务。")
+                        final_reason = "account_disabled"
+                        break
+                    if result["reason"] == "group_exhausted":
+                        log.info(f"[{alert_account_id}] 当前小组已扫描到底部且没有新用户，继续下一个小组。")
+                        db.mark_group_done(group_id, account_id=alert_account_id)
+
+                log.info(
+                    f"[{alert_account_id}] 当前窗口处理结束，共完成 {finished_groups} 个小组，"
+                    f"成功发送 {total_sent} 条消息。"
+                )
+                return {
+                    "account_id": alert_account_id,
+                    "messages_sent": total_sent,
+                    "finished_groups": finished_groups,
+                    "reason": final_reason,
+                }
+            finally:
+                bm.close(session)
     finally:
-        bm.close(session)
         db.close()
 
 
@@ -563,6 +590,29 @@ def collect_target_groups(scraper, task_cfg):
     return ordered
 
 
+def describe_cursor_target(cursor):
+    if not cursor:
+        return "未知断点"
+    return (
+        cursor.get("name")
+        or cursor.get("profile_url")
+        or cursor.get("group_user_url")
+        or cursor.get("user_id")
+        or "未知断点"
+    )
+
+
+def build_cursor_search_result(reason, found_cursor, messages_sent, cursor, **extra):
+    result = {
+        "found_cursor": found_cursor,
+        "messages_sent": messages_sent,
+        "reason": reason,
+        "cursor_target": describe_cursor_target(cursor),
+    }
+    result.update(extra)
+    return result
+
+
 def process_current_group(
     scraper,
     sender,
@@ -573,6 +623,7 @@ def process_current_group(
     templates,
     task_cfg,
     message_budget,
+    template_source="local_messages_yaml",
 ):
     group_id = scraper.get_current_group_id()
     if not group_id:
@@ -585,14 +636,15 @@ def process_current_group(
     )
     if not newcomers_found:
         return {"messages_sent": 0, "reason": "newcomers_section_not_found"}
-    cursor = db.get_cursor(group_id)
+    cursor = db.get_cursor(group_id, account_id=account_id)
     max_scroll_rounds = task_cfg.get("scroll_times", 60)
     idle_scroll_limit = task_cfg.get("idle_scroll_limit", 3)
     cursor_search_rounds = task_cfg.get("resume_search_times", 20)
 
     if cursor:
+        cursor_target = describe_cursor_target(cursor)
         log.info(
-            f"🧠 检测到小组断点: {cursor.get('name') or cursor.get('profile_url')}，优先从旧位置继续..."
+            f"🧠 检测到小组断点: {cursor_target}，优先从旧位置继续..."
         )
         result = process_member_targets(
             scraper=scraper,
@@ -603,6 +655,7 @@ def process_current_group(
             owner_username=owner_username,
             probe_templates=probe_templates,
             templates=templates,
+            template_source=template_source,
             task_cfg=task_cfg,
             max_scroll_rounds=max_scroll_rounds,
             idle_scroll_limit=idle_scroll_limit,
@@ -611,9 +664,45 @@ def process_current_group(
             cursor=cursor,
             skip_until_cursor=True,
         )
-
+        if result["reason"] == "cursor_not_found_fallback":
+            log.warning(
+                f"🪃 未找到断点用户 {cursor_target}，配置允许回退，重置到新人区域顶部后重新全量扫描。"
+            )
+            scraper.scroll_to_top()
+            newcomers_found = scraper.focus_newcomers_section(
+                max_scroll_rounds=newcomers_search_rounds
+            )
+            if not newcomers_found:
+                log.error("断点回退时未能重新定位到小组新人区块，终止当前小组。")
+                return {
+                    "messages_sent": result["messages_sent"],
+                    "reason": "newcomers_section_not_found",
+                }
+            return process_member_targets(
+                scraper=scraper,
+                sender=sender,
+                db=db,
+                account_id=account_id,
+                group_id=group_id,
+                owner_username=owner_username,
+                probe_templates=probe_templates,
+                templates=templates,
+                template_source=template_source,
+                task_cfg=task_cfg,
+                max_scroll_rounds=max_scroll_rounds,
+                idle_scroll_limit=idle_scroll_limit,
+                cursor_search_rounds=cursor_search_rounds,
+                message_budget=message_budget,
+                cursor=None,
+                skip_until_cursor=False,
+            )
+        if result["reason"] == "cursor_not_found_required":
+            log.error(
+                f"⛔ 断点用户 {cursor_target} 未找到，配置要求必须命中断点，终止当前小组。"
+            )
         return result
 
+    log.info("🆕 当前账号在当前小组没有历史断点，将从“小组新人”列表第一位开始。")
     return process_member_targets(
         scraper=scraper,
         sender=sender,
@@ -623,6 +712,7 @@ def process_current_group(
         owner_username=owner_username,
         probe_templates=probe_templates,
         templates=templates,
+        template_source=template_source,
         task_cfg=task_cfg,
         max_scroll_rounds=max_scroll_rounds,
         idle_scroll_limit=idle_scroll_limit,
@@ -649,6 +739,7 @@ def process_member_targets(
     message_budget,
     cursor=None,
     skip_until_cursor=False,
+    template_source="local_messages_yaml",
 ):
     seen_profiles = set()
     found_cursor = not skip_until_cursor
@@ -661,6 +752,8 @@ def process_member_targets(
     list_unchanged_rounds = 0
     last_list_fingerprint = None
     confirm_exhausted = False
+    last_anchor_was_tail = False
+    allow_anchor_reseed = False
     blocked_targets = []
     blocked_target_keys = set()
     silent_targets = []
@@ -676,7 +769,7 @@ def process_member_targets(
     unlimited_scroll = not max_scroll_rounds or int(max_scroll_rounds) <= 0
     last_anchor = None
     anchor_attempts = 0
-    while unlimited_scroll or round_idx < int(max_scroll_rounds):
+    while unlimited_scroll or round_idx <= int(max_scroll_rounds):
         if should_stop(task_cfg):
             return {
                 "found_cursor": found_cursor,
@@ -708,7 +801,40 @@ def process_member_targets(
             anchor=last_anchor if anchor_required else None,
             require_after_anchor=anchor_required,
         )
+        scope_status = scraper.get_last_scope_status()
+        member_list_snapshot = scraper.get_last_member_list_snapshot()
+        if not scope_status.get("confirmed"):
+            reason = str(scope_status.get("reason") or "newcomers_scope_unconfirmed").strip()
+            label = str(scope_status.get("label") or "小组新人").strip()
+            log.error(
+                f"⛔ 当前视图无法确认目标仍来自 {label} 区块，停止当前小组发送: {reason}"
+            )
+            return {
+                "found_cursor": found_cursor,
+                "messages_sent": messages_sent,
+                "reason": "newcomers_scope_unconfirmed",
+            }
 
+        if anchor_required and not anchor_found and allow_anchor_reseed:
+            log.info("尾部锚点已离开当前视图，改为从新视图顶部继续顺序采集。")
+            targets, anchor_found = scraper.collect_visible_new_member_targets(
+                anchor=None,
+                require_after_anchor=False,
+            )
+            allow_anchor_reseed = False
+            member_list_snapshot = scraper.get_last_member_list_snapshot()
+        if (
+            anchor_required
+            and not anchor_found
+            and not skip_until_cursor
+            and int(member_list_snapshot.get("visible_count") or 0) > 0
+        ):
+            log.info("锚点因列表刷新离开当前视图，改为从当前视图顶部重新衔接顺序采集。")
+            targets, anchor_found = scraper.collect_visible_new_member_targets(
+                anchor=None,
+                require_after_anchor=False,
+            )
+            member_list_snapshot = scraper.get_last_member_list_snapshot()
         if anchor_required and not anchor_found:
             anchor_attempts += 1
             if anchor_attempts == 1:
@@ -730,7 +856,12 @@ def process_member_targets(
 
         if not target:
             idle_rounds += 1
-            current_fingerprint = fingerprint_targets(targets)
+            current_fingerprint = (
+                member_list_snapshot.get("fingerprint")
+                or fingerprint_targets(targets)
+            )
+            anchor_at_tail = bool(member_list_snapshot.get("anchor_at_tail"))
+            anchor_exhausted_hint = bool(anchor_at_tail or last_anchor_was_tail)
             if current_fingerprint and current_fingerprint == last_list_fingerprint:
                 list_unchanged_rounds += 1
             else:
@@ -745,21 +876,85 @@ def process_member_targets(
                 no_scroll_rounds += 1
             else:
                 no_scroll_rounds = 0
+            allow_anchor_reseed = bool(moved and last_anchor_was_tail)
+
+            immediate_exhausted = (
+                anchor_required
+                and anchor_exhausted_hint
+                and not moved
+                and list_unchanged_rounds >= 1
+                and int(member_list_snapshot.get("visible_count") or 0) > 0
+            )
+            if immediate_exhausted:
+                if skip_until_cursor and not found_cursor:
+                    cursor_target = describe_cursor_target(cursor)
+                    if cursor_require_found:
+                        log.error(
+                            f"⛔ 断点搜索结束，未找到断点用户 {cursor_target}，且 cursor_require_found=true。"
+                        )
+                        return build_cursor_search_result(
+                            "cursor_not_found_required",
+                            found_cursor,
+                            messages_sent,
+                            cursor,
+                        )
+                    log.warning(
+                        f"🪃 断点搜索结束，未找到断点用户 {cursor_target}，允许回退为当前小组全量重扫。"
+                    )
+                    return build_cursor_search_result(
+                        "cursor_not_found_fallback",
+                        found_cursor,
+                        messages_sent,
+                        cursor,
+                    )
+                return {
+                    "found_cursor": found_cursor,
+                    "messages_sent": messages_sent,
+                    "reason": "group_exhausted",
+                }
 
             should_confirm_exhausted = (
                 idle_rounds >= max(idle_scroll_limit, 4)
                 and no_scroll_rounds >= 2
                 and list_unchanged_rounds >= 2
             )
+            if (
+                anchor_required
+                and anchor_exhausted_hint
+                and not moved
+                and list_unchanged_rounds >= 1
+            ):
+                should_confirm_exhausted = True
 
             if should_confirm_exhausted and not confirm_exhausted:
                 confirm_exhausted = True
                 log.info("疑似已到达列表底部，执行一次确认滚动...")
-                scraper.scroll_member_list()
-                time.sleep(0.4)
+                confirm_moved = scraper.scroll_member_list()
+                allow_anchor_reseed = bool(confirm_moved and last_anchor_was_tail)
                 continue
 
             if should_confirm_exhausted and confirm_exhausted:
+                if skip_until_cursor and not found_cursor:
+                    cursor_target = describe_cursor_target(cursor)
+                    if cursor_require_found:
+                        log.error(
+                            f"⛔ 断点搜索结束，未找到断点用户 {cursor_target}，且 cursor_require_found=true。"
+                        )
+                        return build_cursor_search_result(
+                            "cursor_not_found_required",
+                            found_cursor,
+                            messages_sent,
+                            cursor,
+                        )
+                    log.warning(
+                        f"🪃 断点搜索结束，未找到断点用户 {cursor_target}，允许回退为当前小组全量重扫。"
+                    )
+                    return build_cursor_search_result(
+                        "cursor_not_found_fallback",
+                        found_cursor,
+                        messages_sent,
+                        cursor,
+                    )
                 return {
                     "found_cursor": found_cursor,
                     "messages_sent": messages_sent,
@@ -769,8 +964,27 @@ def process_member_targets(
             if skip_until_cursor and not found_cursor:
                 cursor_rounds += 1
                 if cursor_rounds >= cursor_search_rounds and cursor_rounds % cursor_search_rounds == 0:
-                    log.info(
-                        f"未找到断点用户，已连续滚动 {cursor_rounds} 轮，继续搜索断点..."
+                    cursor_target = describe_cursor_target(cursor)
+                    if cursor_require_found:
+                        log.error(
+                            f"⛔ 未找到断点用户 {cursor_target}，已连续滚动 {cursor_rounds} 轮，配置要求必须命中断点。"
+                        )
+                        return build_cursor_search_result(
+                            "cursor_not_found_required",
+                            found_cursor,
+                            messages_sent,
+                            cursor,
+                            searched_rounds=cursor_rounds,
+                        )
+                    log.warning(
+                        f"🪃 未找到断点用户 {cursor_target}，已连续滚动 {cursor_rounds} 轮，回退为当前小组全量重扫。"
+                    )
+                    return build_cursor_search_result(
+                        "cursor_not_found_fallback",
+                        found_cursor,
+                        messages_sent,
+                        cursor,
+                        searched_rounds=cursor_rounds,
                     )
             else:
                 cursor_rounds = 0
@@ -781,9 +995,18 @@ def process_member_targets(
         list_unchanged_rounds = 0
         confirm_exhausted = False
         cursor_rounds = 0
+        allow_anchor_reseed = False
         profile_url = target["profile_url"]
+        if target.get("source_scope") != "newcomers":
+            log.error(f"⛔ 目标来源不属于小组新人区块，拒绝发送: {target.get('name')}")
+            return {
+                "found_cursor": found_cursor,
+                "messages_sent": messages_sent,
+                "reason": "newcomers_scope_unconfirmed",
+            }
         seen_profiles.add(profile_url)
         last_anchor = target
+        last_anchor_was_tail = bool(target.get("is_tail"))
         log.info(f"➡️ 正在处理成员卡片: {target.get('name')}")
         cont, _ = wait_if_paused(
             task_cfg,
@@ -812,7 +1035,12 @@ def process_member_targets(
                 )
             continue
 
-        if db.is_sent(group_id=group_id, profile_url=profile_url, user_id=target.get("user_id")):
+        if db.is_sent(
+            group_id=group_id,
+            account_id=account_id,
+            profile_url=profile_url,
+            user_id=target.get("user_id"),
+        ):
             log.info(f"已发过，跳过: {target['name']} ({profile_url})")
             db.save_cursor(group_id, target, account_id=account_id)
             ui_settle_sleep(task_cfg)
@@ -829,7 +1057,13 @@ def process_member_targets(
             ui_settle_sleep(task_cfg)
             continue
 
-        greeting_text = render_message(random.choice(templates), target["name"])
+        template_index = random.randrange(len(templates))
+        selected_template = templates[template_index]
+        greeting_text = render_message(selected_template, target["name"])
+        log.info(
+            f"📝 文案选取: source={template_source} "
+            f"index={template_index + 1}/{len(templates)} preview={_template_log_preview(selected_template)}"
+        )
         probe_text = ""
         result = None
         typing_delay = task_cfg.get("typing_delay") or [100, 300]
@@ -844,6 +1078,7 @@ def process_member_targets(
             if not result or result.get("status") != "sent":
                 db.release_claim(
                     group_id=group_id,
+                    account_id=account_id,
                     profile_url=profile_url,
                     user_id=target.get("user_id"),
                 )
@@ -863,8 +1098,12 @@ def process_member_targets(
                     "messages_sent": messages_sent,
                     "reason": "message_limit",
                 }
-            min_wait, max_wait = get_send_interval_seconds(task_cfg)
+            min_wait, max_wait, interval_meta = get_send_interval_detail(task_cfg)
             wait_seconds = random.randint(min_wait, max_wait)
+            log.info(
+                f"⏱ 发送频率读取: source={interval_meta.get('source')} "
+                f"value=[{min_wait}, {max_wait}] next_wait={wait_seconds}"
+            )
             log.info(f"任务间歇休息 {wait_seconds} 秒后继续下一位...")
             if not interruptible_sleep(task_cfg, wait_seconds):
                 return {
@@ -878,7 +1117,11 @@ def process_member_targets(
             silent_target_keys.clear()
         elif result["status"] == "skip":
             log.info(f"跳过成员 {target['name']}: {result['reason']}")
-            db.save_cursor(group_id, target, account_id=account_id)
+            if should_advance_cursor_for_skip(result.get("reason")):
+                db.save_cursor(group_id, target, account_id=account_id)
+                log.info(f"断点推进：成员 {target['name']} 属于永久跳过，已更新 cursor。")
+            else:
+                log.warning(f"断点保留：成员 {target['name']} 属于暂时性失败，当前不推进 cursor。")
             ui_settle_sleep(task_cfg)
         elif result["status"] == "blocked":
             reason = result.get("reason") or "account_restricted"
@@ -931,6 +1174,7 @@ def process_member_targets(
             log.warning(
                 f"处理成员失败，保留原断点等待下次重试: {target['name']} - {result['reason']}"
             )
+            log.info(f"断点保留：成员 {target['name']} 失败类型为 {result['reason']}，当前不推进 cursor。")
             ui_settle_sleep(task_cfg)
             if result["reason"] == "delivery_not_confirmed":
                 silent_key = target.get("user_id") or profile_url
@@ -956,10 +1200,34 @@ def process_member_targets(
                         "silent_targets": silent_targets,
                     }
 
+    if skip_until_cursor and not found_cursor:
+        cursor_target = describe_cursor_target(cursor)
+        if cursor_require_found:
+            log.error(
+                f"⛔ 扫描达到滚动上限后仍未找到断点用户 {cursor_target}，配置要求必须命中断点。"
+            )
+            return build_cursor_search_result(
+                "cursor_not_found_required",
+                found_cursor,
+                messages_sent,
+                cursor,
+                searched_rounds=round_idx,
+            )
+        log.warning(
+            f"🪃 扫描达到滚动上限后仍未找到断点用户 {cursor_target}，回退为当前小组全量重扫。"
+        )
+        return build_cursor_search_result(
+            "cursor_not_found_fallback",
+            found_cursor,
+            messages_sent,
+            cursor,
+            searched_rounds=round_idx,
+        )
+
     return {
         "found_cursor": found_cursor,
         "messages_sent": messages_sent,
-        "reason": "round_limit",
+        "reason": "group_exhausted" if confirm_exhausted or (last_anchor_was_tail and no_scroll_rounds >= 1) else "round_limit",
     }
 
 
@@ -1016,7 +1284,7 @@ def remaining_budget(message_budget, sent_now):
     return max(message_budget - sent_now, 0)
 
 
-def get_send_interval_seconds(task_cfg):
+def get_send_interval_detail(task_cfg):
     raw = None
     settings_path = _client_config_path()
     try:
@@ -1050,7 +1318,35 @@ def get_send_interval_seconds(task_cfg):
 
     if min_seconds > max_seconds:
         min_seconds, max_seconds = max_seconds, min_seconds
+    return min_seconds, max_seconds, {
+        "source": "client_yaml.task_settings.send_interval_seconds",
+        "path": str(settings_path),
+        "raw": list(raw) if isinstance(raw, (list, tuple)) else [min_seconds, max_seconds],
+    }
+
+
+def get_send_interval_seconds(task_cfg):
+    min_seconds, max_seconds, _ = get_send_interval_detail(task_cfg)
     return min_seconds, max_seconds
+
+
+def _template_log_preview(template, limit=60):
+    text = str(template or "").replace("\n", " ").strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "..."
+
+
+def should_advance_cursor_for_skip(reason):
+    permanent_reasons = {
+        "add_friend_required",
+        "follow_only",
+        "friend_required",
+        "invite_only",
+        "profile_message_unavailable",
+        "message_button_not_found",
+    }
+    return str(reason or "").strip() in permanent_reasons
 
 
 def should_stop(task_cfg):
@@ -1147,9 +1443,11 @@ def show_desktop_alert(title, message, critical=False):
     try:
         if sys.platform == "darwin":
             if _try_macos_dialog_alert(title, message, critical):
+                log.info("桌面提醒弹窗已显示成功（macOS 系统弹窗），等待用户确认。")
                 return True
         if sys.platform.startswith("win"):
             if _try_windows_dialog_alert(title, message, critical):
+                log.info("桌面提醒弹窗已显示成功（Windows 系统弹窗），等待用户确认。")
                 return True
         if ALERT_HELPER_PATH.lower().endswith(".exe"):
             command = [
@@ -1185,6 +1483,7 @@ def show_desktop_alert(title, message, critical=False):
             error_text = (stderr or "").strip() or "提醒脚本已提前退出"
             log.warning(f"桌面弹窗未能显示: {error_text}")
             return False
+        log.info("桌面提醒弹窗已显示成功（顶层提醒窗口），等待用户确认。")
         return True
     except Exception as exc:
         log.warning(f"启动桌面弹窗失败: {exc}")
@@ -1220,11 +1519,16 @@ def _try_macos_dialog_alert(title, message, critical):
         )
         time.sleep(0.6)
         if process.poll() is not None:
-            _, stderr = process.communicate(timeout=1)
+            stdout, stderr = process.communicate(timeout=1)
             error_text = (stderr or "").strip()
             if error_text:
                 log.warning(f"AppleScript 弹窗失败: {error_text}")
                 return False
+            result_text = (stdout or "").strip().lower()
+            if "button returned" in result_text:
+                return True
+            log.warning("AppleScript 弹窗提前退出，未检测到用户确认，回退到顶层提醒窗口。")
+            return False
         return True
     except Exception as exc:
         log.warning(f"AppleScript 弹窗失败: {exc}")
@@ -1313,17 +1617,6 @@ def show_account_restricted_alert(account_id, blocked_targets=None, silent_targe
     message = f"温馨提示：{window_label}Facebook账号疑似风控，请更换新的账户。"
     log.error(message.replace("\n", " | "))
     show_desktop_alert("温馨提示", message, critical=True)
-
-
-def show_stranger_message_limit_alert(account_id, message):
-    window_label = format_window_notice_label(account_id)
-    base = f"温馨提示：{window_label}Facebook账号陌生消息发送已达到上限，请更换账户。"
-    extra = (message or "").strip()
-    final_message = base
-    if extra and extra not in base:
-        final_message = f"{base}\n{extra}"
-    log.error(final_message.replace("\n", " | "))
-    show_desktop_alert("温馨提示", final_message, critical=True)
 
 
 def format_window_notice_label(account_id):

@@ -58,17 +58,27 @@ def show_tk_alert(title, message, critical):
         dialog,
         text="确定",
         width=12,
-        command=dialog.destroy,
+        command=lambda: _close_dialog(dialog),
     )
     button.grid(row=2, column=0, pady=(16, 0))
 
     dialog.transient(root)
+    dialog.grab_set()
+    dialog.lift()
     dialog.focus_force()
     button.focus_set()
-    dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+    dialog.protocol("WM_DELETE_WINDOW", lambda: _close_dialog(dialog))
     root.wait_window(dialog)
     root.destroy()
     return True
+
+
+def _close_dialog(dialog):
+    try:
+        dialog.grab_release()
+    except Exception:
+        pass
+    dialog.destroy()
 
 
 def main():

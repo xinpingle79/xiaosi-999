@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -497,11 +498,30 @@ class Worker:
         for line in process.stdout:
             self._send_log(owner, line.rstrip())
         exit_code = process.poll()
+        with self.lock:
+            if self.main_process is process:
+                self.main_process = None
+            stale_tokens = [
+                token
+                for token, current in self.single_processes.items()
+                if current is process or current.poll() is not None
+            ]
+            for token in stale_tokens:
+                self.single_processes.pop(token, None)
         _post_agent_json(
             self.cfg,
             f"{self.cfg['server_url']}/api/agent/report",
             {"task_id": task_id, "status": "done", "exit_code": exit_code},
         )
+
+    def _cleanup_finished_processes_locked(self):
+        if self.main_process and self.main_process.poll() is not None:
+            self.main_process = None
+        dead_tokens = [
+            token for token, process in self.single_processes.items() if process.poll() is not None
+        ]
+        for token in dead_tokens:
+            self.single_processes.pop(token, None)
 
     def _build_env(self, owner, payload):
         env = os.environ.copy()
@@ -543,6 +563,14 @@ class Worker:
             pause_flag = _pause_flag_path(owner)
             if pause_flag.exists():
                 pause_flag.unlink()
+        creationflags = 0
+        startupinfo = None
+        if sys.platform.startswith("win"):
+            creationflags = (
+                getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+            )
+            startupinfo = self._build_hidden_startupinfo()
         process = subprocess.Popen(
             command,
             cwd=str(ROOT_DIR),
@@ -551,6 +579,8 @@ class Worker:
             text=True,
             bufsize=1,
             env=env,
+            creationflags=creationflags,
+            startupinfo=startupinfo,
         )
         threading.Thread(
             target=self._stream_output,
@@ -558,6 +588,12 @@ class Worker:
             daemon=True,
         ).start()
         return process
+
+    def _build_hidden_startupinfo(self):
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = 0
+        return startupinfo
 
     def _stop_process(self, owner):
         stop_flag = _stop_flag_path(owner)
@@ -567,6 +603,7 @@ class Worker:
         if pause_flag.exists():
             pause_flag.unlink()
         with self.lock:
+            self._cleanup_finished_processes_locked()
             targets = []
             if self.main_process and self.main_process.poll() is None:
                 targets.append(self.main_process)
@@ -580,6 +617,25 @@ class Worker:
                     process.terminate()
             except Exception:
                 pass
+        deadline = time.time() + 8
+        for process in targets:
+            while time.time() < deadline:
+                if process.poll() is not None:
+                    break
+                time.sleep(0.2)
+            if process.poll() is None:
+                try:
+                    process.kill()
+                except Exception:
+                    pass
+        with self.lock:
+            self._cleanup_finished_processes_locked()
+
+    def shutdown(self, owner):
+        try:
+            self._stop_process(owner)
+        except Exception:
+            pass
 
     def _pause(self, owner):
         pause_flag = _pause_flag_path(owner)
@@ -605,6 +661,7 @@ class Worker:
 
         if action == "start":
             with self.lock:
+                self._cleanup_finished_processes_locked()
                 if self.main_process and self.main_process.poll() is None:
                     _post_agent_json(
                         self.cfg,
@@ -628,6 +685,7 @@ class Worker:
                 )
                 return
             with self.lock:
+                self._cleanup_finished_processes_locked()
                 existing = self.single_processes.get(token)
                 if existing and existing.poll() is None:
                     _post_agent_json(
@@ -707,50 +765,65 @@ def main():
 
     stop_event = threading.Event()
     worker = Worker(cfg)
+
+    def _request_shutdown(*_args):
+        stop_event.set()
+        worker.shutdown(cfg.get("owner"))
+
+    for sig_name in ("SIGTERM", "SIGINT"):
+        sig = getattr(signal, sig_name, None)
+        if sig is None:
+            continue
+        try:
+            signal.signal(sig, _request_shutdown)
+        except Exception:
+            continue
+
     threading.Thread(
         target=_heartbeat_loop,
         args=(cfg, stop_event, worker, args.config),
         daemon=True,
     ).start()
-
-    while not stop_event.is_set():
-        _refresh_runtime_config(cfg, args.config)
-        if not _ensure_runtime_token(cfg, config_path=args.config):
-            break
-        _, result = _post_agent_json(
-            cfg,
-            f"{cfg['server_url']}/api/agent/task",
-            {"machine_id": cfg["machine_id"], "client_version": cfg.get("client_version") or ""},
-            timeout=15,
-        )
-        if isinstance(result, dict):
-            if result.get("error") in ("token_expired", "invalid_token"):
-                _handle_runtime_auth_failure(
-                    worker,
-                    cfg,
-                    stop_event,
-                    result.get("error"),
-                    config_path=args.config,
-                )
+    try:
+        while not stop_event.is_set():
+            _refresh_runtime_config(cfg, args.config)
+            if not _ensure_runtime_token(cfg, config_path=args.config):
                 break
-            if result.get("error") in ("account_expired", "account_disabled"):
-                _handle_runtime_auth_failure(
-                    worker,
-                    cfg,
-                    stop_event,
-                    result.get("error"),
-                    config_path=args.config,
-                )
-                break
-            if result.get("error") == "agent_disabled":
-                time.sleep(max(5.0, cfg["poll_interval"]))
-                continue
-        task = result.get("task") if isinstance(result, dict) else None
-        if task:
-            worker.handle_task(task)
-        time.sleep(cfg["poll_interval"])
-
-    stop_event.set()
+            _, result = _post_agent_json(
+                cfg,
+                f"{cfg['server_url']}/api/agent/task",
+                {"machine_id": cfg["machine_id"], "client_version": cfg.get("client_version") or ""},
+                timeout=15,
+            )
+            if isinstance(result, dict):
+                if result.get("error") in ("token_expired", "invalid_token"):
+                    _handle_runtime_auth_failure(
+                        worker,
+                        cfg,
+                        stop_event,
+                        result.get("error"),
+                        config_path=args.config,
+                    )
+                    break
+                if result.get("error") in ("account_expired", "account_disabled"):
+                    _handle_runtime_auth_failure(
+                        worker,
+                        cfg,
+                        stop_event,
+                        result.get("error"),
+                        config_path=args.config,
+                    )
+                    break
+                if result.get("error") == "agent_disabled":
+                    time.sleep(max(5.0, cfg["poll_interval"]))
+                    continue
+            task = result.get("task") if isinstance(result, dict) else None
+            if task:
+                worker.handle_task(task)
+            time.sleep(cfg["poll_interval"])
+    finally:
+        stop_event.set()
+        worker.shutdown(cfg.get("owner"))
 
 
 if __name__ == "__main__":

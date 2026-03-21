@@ -4,8 +4,14 @@ const pageTitle = document.getElementById("page-title");
 const navItems = Array.from(document.querySelectorAll(".nav-item"));
 const pageCards = Array.from(document.querySelectorAll(".card[data-page]"));
 const saveBtn = document.getElementById("save-btn");
+const startBtn = document.getElementById("start-btn");
+const stopBtn = document.getElementById("stop-btn");
 const pauseBtn = document.getElementById("pause-btn");
 const resumeBtn = document.getElementById("resume-btn");
+const restartWindowBtn = document.getElementById("restart-window-btn");
+const currentAccountName = document.getElementById("current-account-name");
+const currentAccountRole = document.getElementById("current-account-role");
+const logoutBtn = document.getElementById("logout-btn");
 
 const dashSendToday = document.getElementById("dash-send-today");
 const dashSendTotal = document.getElementById("dash-send-total");
@@ -45,6 +51,13 @@ let lastUserPayload = null;
 let logUserInteracting = false;
 let tableUserInteracting = false;
 let dashboardLabelsReady = false;
+let currentAccountInfo = {
+  username: "",
+  role_label: "",
+};
+let latestStatusPayload = null;
+let latestAgentRows = [];
+let latestDeviceInfoRows = [];
 
 function isLogSelectionActive() {
   if (!logOutput) return false;
@@ -129,14 +142,26 @@ const fields = {
 };
 
 document.getElementById("save-btn").addEventListener("click", saveConfig);
-document.getElementById("start-btn").addEventListener("click", startTask);
-document.getElementById("stop-btn").addEventListener("click", stopTask);
-document.getElementById("restart-window-btn").addEventListener("click", restartWindow);
+if (startBtn) {
+  startBtn.addEventListener("click", startTask);
+}
+if (stopBtn) {
+  stopBtn.addEventListener("click", stopTask);
+}
+if (restartWindowBtn) {
+  restartWindowBtn.addEventListener("click", restartWindow);
+}
 if (pauseBtn) {
   pauseBtn.addEventListener("click", pauseTask);
 }
 if (resumeBtn) {
   resumeBtn.addEventListener("click", resumeTask);
+}
+if (restartWindowToken) {
+  restartWindowToken.addEventListener("input", () => applyTaskButtonState());
+}
+if (logoutBtn) {
+  logoutBtn.addEventListener("click", handleLogout);
 }
 navItems.forEach((item) => {
   item.addEventListener("click", () => {
@@ -211,6 +236,7 @@ tableSelectionRoots.forEach((root) => {
   });
 });
 async function initializeApp() {
+  await loadCurrentAccount();
   await loadConfig();
   await refreshStatus();
   if (window.statusTimer) clearInterval(window.statusTimer);
@@ -228,6 +254,53 @@ async function initializeApp() {
     }
     setActivePage("task", "任务管理", false);
   }
+}
+
+async function loadCurrentAccount() {
+  if (!currentAccountName || !currentAccountRole) return;
+  const response = await api("/me");
+  if (!response.ok) {
+    if (response.status === 401) {
+      redirectToLogin();
+      return;
+    }
+    currentAccountInfo = {
+      username: IS_SUB ? "-" : "admin",
+      role_label: IS_SUB ? "子账户" : "管理员",
+    };
+    currentAccountName.textContent = currentAccountInfo.username;
+    currentAccountRole.textContent = currentAccountInfo.role_label;
+    applyTaskButtonState();
+    return;
+  }
+  const account = response.data?.account || {};
+  currentAccountInfo = {
+    username: account.username || (IS_SUB ? "-" : "admin"),
+    role_label: account.role_label || (IS_SUB ? "子账户" : "管理员"),
+  };
+  currentAccountName.textContent = currentAccountInfo.username;
+  currentAccountRole.textContent = currentAccountInfo.role_label;
+  applyTaskButtonState();
+}
+
+async function handleLogout() {
+  const confirmed = await showConfirm("确定退出当前账号吗？", "退出登录");
+  if (!confirmed) return;
+  const response = await api("/logout", { method: "POST" });
+  if (!response.ok) {
+    await showAlert(translateErrorMessage(response.data?.error) || "退出失败，请稍后重试");
+    return;
+  }
+  try {
+    localStorage.removeItem("adminActivePage");
+  } catch (error) {
+    // ignore storage failures
+  }
+  redirectToLogin();
+}
+
+function redirectToLogin() {
+  window.location.href = IS_SUB ? "/sub/login" : "/admin/login";
 }
 
 async function loadConfig() {
@@ -557,9 +630,14 @@ function ensureDashboardLabels() {
 
 async function refreshStatus() {
   const response = await api("/status");
-  if (!response.ok) return;
+  if (!response.ok) {
+    latestStatusPayload = null;
+    applyTaskButtonState();
+    return;
+  }
 
   const status = response.data;
+  latestStatusPayload = status;
   const dbStats = status.stats?.db || {};
   const runtimeStats = status.stats?.runtime || {};
   ensureDashboardLabels();
@@ -618,6 +696,8 @@ async function refreshStatus() {
 
   await refreshUsers();
   await refreshDevices();
+  await refreshDeviceInfo();
+  applyTaskButtonState();
 }
 
 async function saveConfigSilently() {
@@ -847,7 +927,9 @@ async function refreshDevices() {
   const response = await api("/agent/list");
   if (!response.ok) return;
   const payload = response.data || {};
-  renderDeviceTable(payload.agents || []);
+  latestAgentRows = Array.isArray(payload.agents) ? payload.agents : [];
+  renderDeviceTable(latestAgentRows);
+  applyTaskButtonState();
 }
 
 async function refreshDeviceInfo() {
@@ -858,7 +940,106 @@ async function refreshDeviceInfo() {
   const response = await api("/device-info");
   if (!response.ok) return;
   const payload = response.data || {};
-  renderDeviceInfoTable(payload.configs || []);
+  latestDeviceInfoRows = Array.isArray(payload.configs) ? payload.configs : [];
+  renderDeviceInfoTable(latestDeviceInfoRows);
+  applyTaskButtonState();
+}
+
+function setButtonDisabled(button, disabled, reason = "") {
+  if (!button) return;
+  button.disabled = !!disabled;
+  if (reason) {
+    button.title = reason;
+  } else {
+    button.removeAttribute("title");
+  }
+}
+
+function getControlOwnerName() {
+  if (IS_SUB) {
+    return String(currentAccountInfo.username || "").trim();
+  }
+  return String(currentAccountInfo.username || "admin").trim() || "admin";
+}
+
+function inferTaskPending(status) {
+  const logs = Array.isArray(status?.logs) ? status.logs.slice(-20) : [];
+  const pendingTokens = [
+    "=== 已下发 start 指令到执行端",
+    "=== 已下发 resume 指令到执行端",
+    "=== 已下发 restart_window 指令到执行端",
+    "任务排队中",
+  ];
+  const settledTokens = [
+    "当前窗口处理结束",
+    "单独窗口任务结束",
+    "未绑定执行端",
+    "执行端离线",
+    "设备配置缺少接口参数",
+    "账号不存在",
+    "=== 已下发 stop 指令到执行端",
+  ];
+  const pendingHit = logs.some((line) => pendingTokens.some((token) => String(line).includes(token)));
+  const settledHit = logs.some((line) => settledTokens.some((token) => String(line).includes(token)));
+  return pendingHit && !status?.running && !settledHit;
+}
+
+function applyTaskButtonState() {
+  const status = latestStatusPayload;
+  if (!status) {
+    setButtonDisabled(startBtn, true, "状态同步中");
+    setButtonDisabled(stopBtn, true, "状态同步中");
+    setButtonDisabled(pauseBtn, true, "状态同步中");
+    setButtonDisabled(resumeBtn, true, "状态同步中");
+    setButtonDisabled(restartWindowBtn, true, "状态同步中");
+    return;
+  }
+
+  const ownerName = getControlOwnerName();
+  const relevantAgents = IS_SUB
+    ? latestAgentRows
+    : latestAgentRows.filter((item) => String(item.owner || "").trim() === ownerName);
+  const relevantConfigs = IS_SUB
+    ? latestDeviceInfoRows
+    : latestDeviceInfoRows.filter((item) => String(item.owner || "").trim() === ownerName);
+  const enabledConfigs = relevantConfigs.filter((item) => Number(item.status ?? 1) !== 0);
+  const hasBoundDevice = enabledConfigs.some((item) => String(item.machine_id || "").trim());
+  const hasConnectionFields = enabledConfigs.some(
+    (item) => String(item.bit_api || "").trim() && String(item.api_token || "").trim()
+  );
+  const agentOnline = relevantAgents.some(
+    (item) => Number(item.status ?? 1) !== 0 && Boolean(item.online)
+  );
+  const taskRunning = Boolean(status.task_running ?? status.running);
+  const taskPending = Boolean(status.task_pending) || inferTaskPending(status);
+  const taskPaused = Boolean(status.task_paused) || Boolean(status.pause_global) || Boolean(status.pause_owner);
+  const startReady = agentOnline && hasBoundDevice && hasConnectionFields;
+  let startBlockReason = "";
+  if (!hasBoundDevice) {
+    startBlockReason = "未绑定执行端";
+  } else if (!hasConnectionFields) {
+    startBlockReason = "设备配置缺少接口参数";
+  } else if (!agentOnline) {
+    startBlockReason = "执行端离线";
+  }
+
+  const isBusy = taskRunning || taskPending || taskPaused;
+  const startReason = startBlockReason || (taskPaused ? "任务暂停中" : taskRunning ? "任务运行中" : taskPending ? "任务排队中" : "");
+  setButtonDisabled(startBtn, !startReady || isBusy, startReason);
+  setButtonDisabled(stopBtn, !isBusy, isBusy ? "" : "当前没有运行中的任务");
+  setButtonDisabled(
+    pauseBtn,
+    !taskRunning || taskPaused,
+    taskPaused ? "任务已暂停" : (taskRunning ? "" : "当前没有运行中的任务")
+  );
+  setButtonDisabled(
+    resumeBtn,
+    !taskPaused,
+    taskPaused ? "" : (taskRunning ? "任务未暂停" : "当前没有运行中的任务")
+  );
+  const windowToken = String(restartWindowToken?.value || "").trim();
+  const restartReason = !windowToken ? "请输入窗口编号" : (startBlockReason || "");
+  setButtonDisabled(restartWindowBtn, !windowToken || !startReady, restartReason);
 }
 
 function renderDeviceInfoTable(configs) {
@@ -875,7 +1056,7 @@ function renderDeviceInfoTable(configs) {
   if (!rows.length) {
     deviceInfoTableBody.innerHTML = `
       <tr class="empty-row">
-        <td colspan="${isAdminView ? 8 : 6}">暂无数据</td>
+        <td colspan="${isAdminView ? 8 : 7}">暂无数据</td>
       </tr>
     `;
     return;
@@ -884,11 +1065,11 @@ function renderDeviceInfoTable(configs) {
     .map((item, index) => {
       const status = Number(item.status ?? 1);
       const isDisabled = status === 0;
-      const statusText = isDisabled ? "禁用" : "启用";
       const displayName = item.name || item.machine_id || "-";
       const onlineText = item.online ? "在线" : "离线";
       const lastSeenText = item.last_seen ? formatTimestamp(item.last_seen) : "-";
       if (isAdminView) {
+        const apiTokenText = item.api_token || "-";
         return `
           <tr class="${isDisabled ? "is-disabled" : ""}">
             <td class="col-index">${index + 1}</td>
@@ -896,20 +1077,22 @@ function renderDeviceInfoTable(configs) {
             <td class="copy-cell">${renderCopyCell(displayName, { mono: false })}</td>
             <td class="copy-cell">${renderCopyCell(item.machine_id || "-")}</td>
             <td class="copy-cell">${renderCopyCell(item.bit_api || "-")}</td>
-            <td class="copy-cell">${renderCopyCell(item.api_token || "-")}</td>
+            <td class="copy-cell">${renderCopyCell(apiTokenText)}</td>
             <td>${onlineText}</td>
             <td>${escapeHtml(lastSeenText)}</td>
           </tr>
         `;
       }
+      const apiTokenText = item.api_token || "-";
       return `
         <tr class="${isDisabled ? "is-disabled" : ""}">
           <td class="col-index">${index + 1}</td>
           <td class="copy-cell">${renderCopyCell(displayName, { mono: false })}</td>
           <td class="copy-cell">${renderCopyCell(item.machine_id || "-")}</td>
           <td class="copy-cell">${renderCopyCell(item.bit_api || "-")}</td>
-          <td class="copy-cell">${renderCopyCell(item.api_token || "-")}</td>
-          <td>${statusText}</td>
+          <td class="copy-cell">${renderCopyCell(apiTokenText)}</td>
+          <td>${onlineText || "离线"}</td>
+          <td>${escapeHtml(lastSeenText || "-")}</td>
         </tr>
       `;
     })
@@ -1005,7 +1188,10 @@ function renderUserTable(users, defaults) {
       const status = Number(user.status ?? 1);
       const isDisabled = status === 0;
       const rowClass = isDisabled ? "is-disabled" : "";
-      const activationCode = user.activation_code || "-";
+      const activationCode = maskSensitiveValue(user.activation_code || "-", {
+        visibleStart: 6,
+        visibleEnd: 4,
+      });
       return `
         <tr class="${rowClass}">
           <td class="col-index">${index + 1}</td>
@@ -1229,6 +1415,16 @@ function renderCopyCell(value, options = {}) {
       <span class="copyable-text${monoClass}">${safeText}</span>
     </div>
   `;
+}
+
+function maskSensitiveValue(value, options = {}) {
+  const text = value === null || value === undefined || value === "" ? "-" : String(value);
+  if (text === "-" || text.length <= 8) return text;
+  const visibleStart = Number(options.visibleStart ?? 4);
+  const visibleEnd = Number(options.visibleEnd ?? 4);
+  const start = text.slice(0, visibleStart);
+  const end = text.slice(-visibleEnd);
+  return `${start}***${end}`;
 }
 
 window.addEventListener("resize", () => {
