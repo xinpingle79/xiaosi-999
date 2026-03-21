@@ -418,6 +418,7 @@ class ClientApp:
         self._normal_geometry = self.root.geometry()
         self._button_texts = {}
         self._button_restore_modes = {}
+        self._window_button_styles = {}
         self._button_state_snapshot = {
             "agent_online": False,
             "task_running": False,
@@ -660,12 +661,22 @@ class ClientApp:
         button_frame = tk.Frame(title_bar, bg=self.TITLE_BG)
         button_frame.pack(side="right", padx=8, pady=8)
 
-        self.minimize_btn = self._create_window_button(button_frame, "—", self._minimize_window)
+        self.minimize_btn = self._create_window_button(
+            button_frame,
+            "—",
+            self._minimize_window,
+            bg="#5f86b8",
+            activebg="#4f74a5",
+            pressbg="#3f6594",
+        )
         self.minimize_btn.pack(side="left", padx=(0, 6))
         self.maximize_btn = self._create_window_button(
             button_frame,
             self.maximize_button_text,
             self._toggle_maximize,
+            bg="#5f86b8",
+            activebg="#4f74a5",
+            pressbg="#3f6594",
         )
         self.maximize_btn.pack(side="left", padx=(0, 6))
         self.close_btn = self._create_window_button(
@@ -674,6 +685,7 @@ class ClientApp:
             self._on_close,
             bg="#e56b6f",
             activebg="#d9485f",
+            pressbg="#bf344d",
         )
         self.close_btn.pack(side="left")
 
@@ -682,7 +694,7 @@ class ClientApp:
             widget.bind("<B1-Motion>", self._drag_window)
             widget.bind("<Double-Button-1>", lambda _event: self._toggle_maximize())
 
-    def _create_window_button(self, parent, text, command, bg="#5f86b8", activebg="#4f74a5"):
+    def _create_window_button(self, parent, text, command, bg="#5f86b8", activebg="#4f74a5", pressbg=None):
         textvariable = text if isinstance(text, tk.StringVar) else None
         btn = tk.Button(
             parent,
@@ -702,7 +714,34 @@ class ClientApp:
             pady=0,
             cursor="hand2",
         )
+        self._window_button_styles[btn] = {
+            "bg": bg,
+            "hoverbg": activebg,
+            "pressbg": pressbg or activebg,
+        }
+        btn.bind("<Enter>", lambda _event, target=btn: self._set_window_button_visual(target, "hover"))
+        btn.bind("<Leave>", lambda _event, target=btn: self._set_window_button_visual(target, "normal"))
+        btn.bind("<ButtonPress-1>", lambda _event, target=btn: self._set_window_button_visual(target, "press"))
+        btn.bind("<ButtonRelease-1>", lambda event, target=btn: self._restore_window_button_visual(target, event))
         return btn
+
+    def _set_window_button_visual(self, button, state):
+        styles = self._window_button_styles.get(button)
+        if not styles:
+            return
+        bg = styles["bg"]
+        if state == "hover":
+            bg = styles["hoverbg"]
+        elif state == "press":
+            bg = styles["pressbg"]
+        button.configure(bg=bg, activebackground=bg)
+
+    def _restore_window_button_visual(self, button, event):
+        inside = (
+            0 <= event.x <= button.winfo_width()
+            and 0 <= event.y <= button.winfo_height()
+        )
+        self._set_window_button_visual(button, "hover" if inside else "normal")
 
     def _start_window_drag(self, event):
         if self._is_maximized:
@@ -1135,7 +1174,7 @@ class ClientApp:
             relief="flat",
             bd=0,
             highlightthickness=0,
-            wrap="none",
+            wrap="word",
             spacing1=1,
             spacing3=1,
             padx=10,
@@ -1143,10 +1182,8 @@ class ClientApp:
         )
         self.log_text.pack(side="left", fill="both", expand=True, padx=(8, 0), pady=8)
         y_scroll = tk.Scrollbar(log_body, orient="vertical", command=self.log_text.yview)
-        y_scroll.pack(side="right", fill="y", padx=(0, 8), pady=(8, 28))
-        x_scroll = tk.Scrollbar(log_body, orient="horizontal", command=self.log_text.xview)
-        x_scroll.pack(side="bottom", fill="x", padx=8, pady=(0, 8))
-        self.log_text.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
+        y_scroll.pack(side="right", fill="y", padx=(0, 8), pady=8)
+        self.log_text.configure(yscrollcommand=y_scroll.set)
         self.log_text.bind("<Key>", self._block_log_edit)
         self.log_text.bind("<<Paste>>", lambda _event: "break")
         self.log_text.bind("<MouseWheel>", self._update_log_follow_state)
