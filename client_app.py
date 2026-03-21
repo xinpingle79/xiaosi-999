@@ -844,7 +844,6 @@ class ClientApp:
             relief="flat",
         )
         canvas.place(x=0, y=0, relwidth=1, relheight=1)
-        canvas.lower()
         canvas.bind(
             "<Configure>",
             lambda _event, target=canvas, canvas_mode=mode: self._paint_activation_backdrop(target, canvas_mode),
