@@ -50,6 +50,8 @@ CLEANUP_HISTORY_DAYS = 15
 CLEANUP_LOG_DAYS = 7
 AGENT_LOCK = threading.Lock()
 DEFAULT_WEB_PORT = 43090
+STALE_PENDING_SECONDS = 60.0
+STALE_RUNNING_SECONDS = 120.0
 
 
 def _runtime_dir():
@@ -195,7 +197,40 @@ class TaskManager:
             "status": row["status"],
         }
 
-    def _cleanup_stale_machine_action_tasks(self, db, owner_name, machine_id, heartbeat_ttl):
+    def _find_later_terminal_machine_action(self, db, machine_id, task_id, action="", window_token=None):
+        clauses = [
+            "assigned_machine_id = ?",
+            "id > ?",
+            "status IN ('done', 'failed')",
+        ]
+        params = [machine_id, task_id]
+        action = str(action or "").strip()
+        if action:
+            clauses.append("action = ?")
+            params.append(action)
+        if window_token is not None:
+            clauses.append("ifnull(window_token, '') = ?")
+            params.append(str(window_token or "").strip())
+        row = db.conn.execute(
+            f"""
+            SELECT id, action, status, error
+            FROM agent_tasks
+            WHERE {' AND '.join(clauses)}
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            tuple(params),
+        ).fetchone()
+        if not row:
+            return None
+        return {
+            "id": int(row["id"]),
+            "action": str(row["action"] or "").strip(),
+            "status": str(row["status"] or "").strip(),
+            "error": str(row["error"] or "").strip(),
+        }
+
+    def _cleanup_stale_machine_action_tasks(self, db, owner_name, machine_id, heartbeat_ttl, trigger=""):
         machine_id = str(machine_id or "").strip()
         if not machine_id:
             return []
@@ -210,6 +245,13 @@ class TaskManager:
                 last_seen = 0.0
         ttl = max(float(heartbeat_ttl or 180), 60.0)
         agent_online = bool(last_seen) and (now - last_seen <= ttl)
+        trigger_label = {
+            "client_status": "客户端状态刷新",
+            "enqueue_machine_action": "下发客户端任务前",
+            "enqueue_owner_action": "下发管理端任务前",
+            "agent_heartbeat": "执行端心跳",
+            "agent_task_poll": "执行端取任务",
+        }.get(str(trigger or "").strip(), "任务状态治理")
         rows = db.conn.execute(
             """
             SELECT id, action, window_token, status, updated_at
@@ -224,56 +266,87 @@ class TaskManager:
             task_id = int(row["id"])
             action = str(row["action"] or "").strip()
             window_token = str(row["window_token"] or "").strip()
+            status = str(row["status"] or "").strip()
             updated_at = float(row["updated_at"] or 0.0)
+            age_seconds = max(now - updated_at, 0.0) if updated_at else 0.0
             stale_error = None
-            if action == "start":
-                later_stop = db.conn.execute(
-                    """
-                    SELECT 1
-                    FROM agent_tasks
-                    WHERE assigned_machine_id = ?
-                      AND id > ?
-                      AND action = 'stop'
-                      AND status IN ('done', 'failed')
-                    LIMIT 1
-                    """,
-                    (machine_id, task_id),
-                ).fetchone()
-                if later_stop:
-                    stale_error = "stale_running_cleanup"
-                elif not agent_online and updated_at and (now - updated_at) > ttl:
-                    stale_error = "stale_running_cleanup"
-            elif action in {"stop", "pause", "resume"}:
-                later_same = db.conn.execute(
-                    """
-                    SELECT 1
-                    FROM agent_tasks
-                    WHERE assigned_machine_id = ?
-                      AND id > ?
-                      AND action = ?
-                      AND status IN ('done', 'failed')
-                    LIMIT 1
-                    """,
-                    (machine_id, task_id, action),
-                ).fetchone()
-                if later_same:
+            cleanup_message = ""
+            if status == "pending":
+                if age_seconds >= STALE_PENDING_SECONDS:
                     stale_error = "stale_queue_cleanup"
-            elif action == "restart_window" and window_token:
-                later_same_window = db.conn.execute(
-                    """
-                    SELECT 1
-                    FROM agent_tasks
-                    WHERE assigned_machine_id = ?
-                      AND id > ?
-                      AND action = 'restart_window'
-                      AND ifnull(window_token, '') = ?
-                      AND status IN ('done', 'failed')
-                    LIMIT 1
-                    """,
-                    (machine_id, task_id, window_token),
-                ).fetchone()
-                if later_same_window:
-                    stale_error = "stale_queue_cleanup"
+                    cleanup_message = (
+                        f"=== 检测到陈旧排队任务#{task_id}，已自动清理：执行端 {machine_id} "
+                        f"排队 {age_seconds:.0f} 秒仍未被真正接手（{trigger_label}） ==="
+                    )
+            elif status == "running":
+                if age_seconds < STALE_RUNNING_SECONDS:
+                    continue
+                if action == "start":
+                    later_stop = self._find_later_terminal_machine_action(
+                        db,
+                        machine_id,
+                        task_id,
+                        action="stop",
+                        window_token=None,
+                    )
+                    if later_stop:
+                        stale_error = "stale_running_cleanup"
+                        cleanup_message = (
+                            f"=== 检测到陈旧运行任务#{task_id}，已自动清理：执行端 {machine_id} "
+                            f"后续 stop 任务#{later_stop['id']} 已结束（{trigger_label}） ==="
+                        )
+                    elif not agent_online:
+                        stale_error = "stale_running_cleanup"
+                        cleanup_message = (
+                            f"=== 检测到陈旧运行任务#{task_id}，已自动清理：执行端 {machine_id} "
+                            f"持续 {age_seconds:.0f} 秒无状态更新且执行端无心跳（{trigger_label}） ==="
+                        )
+                elif action in {"stop", "pause", "resume"}:
+                    later_same = self._find_later_terminal_machine_action(
+                        db,
+                        machine_id,
+                        task_id,
+                        action=action,
+                        window_token=None,
+                    )
+                    if later_same:
+                        stale_error = "stale_running_cleanup"
+                        cleanup_message = (
+                            f"=== 检测到陈旧运行任务#{task_id}，已自动清理：执行端 {machine_id} "
+                            f"后续 {action} 任务#{later_same['id']} 已结束（{trigger_label}） ==="
+                        )
+                    elif not agent_online:
+                        stale_error = "stale_running_cleanup"
+                        cleanup_message = (
+                            f"=== 检测到陈旧运行任务#{task_id}，已自动清理：执行端 {machine_id} "
+                            f"持续 {age_seconds:.0f} 秒无状态更新且执行端无心跳（{trigger_label}） ==="
+                        )
+                elif action == "restart_window":
+                    later_same_window = self._find_later_terminal_machine_action(
+                        db,
+                        machine_id,
+                        task_id,
+                        action="restart_window",
+                        window_token=window_token,
+                    )
+                    if later_same_window:
+                        stale_error = "stale_running_cleanup"
+                        cleanup_message = (
+                            f"=== 检测到陈旧运行任务#{task_id}，已自动清理：执行端 {machine_id} "
+                            f"窗口 {window_token or '-'} 的后续任务#{later_same_window['id']} 已结束（{trigger_label}） ==="
+                        )
+                    elif not agent_online:
+                        stale_error = "stale_running_cleanup"
+                        cleanup_message = (
+                            f"=== 检测到陈旧运行任务#{task_id}，已自动清理：执行端 {machine_id} "
+                            f"持续 {age_seconds:.0f} 秒无状态更新且执行端无心跳（{trigger_label}） ==="
+                        )
+                elif not agent_online:
+                    stale_error = "stale_running_cleanup"
+                    cleanup_message = (
+                        f"=== 检测到陈旧运行任务#{task_id}，已自动清理：执行端 {machine_id} "
+                        f"持续 {age_seconds:.0f} 秒无状态更新且执行端无心跳（{trigger_label}） ==="
+                    )
             if not stale_error:
                 continue
             db.conn.execute(
@@ -288,15 +361,27 @@ class TaskManager:
                 {
                     "id": task_id,
                     "action": action,
-                    "status": row["status"],
+                    "status": status,
                     "error": stale_error,
+                    "message": cleanup_message,
                 }
             )
         if stale_rows:
             db.conn.commit()
             for row in stale_rows:
+                self._logs.append(row["message"])
+            active_row = db.conn.execute(
+                """
+                SELECT COUNT(1) AS total
+                FROM agent_tasks
+                WHERE assigned_machine_id = ?
+                  AND status IN ('pending', 'running')
+                """,
+                (machine_id,),
+            ).fetchone()
+            if int(active_row["total"] or 0) == 0:
                 self._logs.append(
-                    f"=== 已清理陈旧 {row['action']} 任务#{row['id']}：执行端 {machine_id} ({row['error']}) ==="
+                    f"=== 当前状态已恢复，可重新启动：执行端 {machine_id}（{trigger_label}） ==="
                 )
         return stale_rows
 
@@ -351,6 +436,13 @@ class TaskManager:
                         )
                         continue
                     has_online = True
+                    self._cleanup_stale_machine_action_tasks(
+                        db,
+                        owner_name,
+                        machine_id,
+                        heartbeat_ttl,
+                        trigger="enqueue_owner_action",
+                    )
                     existing_task = self._find_existing_machine_action_task(
                         db,
                         owner_name,
@@ -430,6 +522,13 @@ class TaskManager:
             if not agent:
                 return False, agent_error or "执行端离线"
             machine_id = (agent.get("machine_id") or "").strip()
+            self._cleanup_stale_machine_action_tasks(
+                db,
+                owner_name,
+                machine_id,
+                heartbeat_ttl,
+                trigger="enqueue_owner_action",
+            )
             existing_task = self._find_existing_machine_action_task(
                 db,
                 owner_name,
@@ -535,6 +634,7 @@ class TaskManager:
                     owner_name,
                     machine_id,
                     heartbeat_ttl,
+                    trigger="enqueue_machine_action",
                 )
                 existing_task = self._find_existing_machine_action_task(
                     db,
@@ -2504,6 +2604,7 @@ def handle_client_status(payload):
             owner,
             machine_id,
             heartbeat_ttl,
+            trigger="client_status",
         )
         running_row = db.conn.execute(
             """
@@ -2695,11 +2796,20 @@ def handle_agent_heartbeat(payload):
     bit_api = str(payload.get("bit_api") or "").strip()
     api_token = str(payload.get("api_token") or "").strip()
     now = time.time()
+    settings = _load_agent_settings()
+    heartbeat_ttl = float(settings.get("heartbeat_ttl", 180) or 180)
     db = Database()
     try:
         if not db.get_agent(machine_id):
             return {"ok": False, "error": "agent_not_registered"}
         db.mark_agent_seen(machine_id, now, client_version=client_version)
+        TASK_MANAGER._cleanup_stale_machine_action_tasks(
+            db,
+            str((_agent or {}).get("owner") or "").strip(),
+            machine_id,
+            heartbeat_ttl,
+            trigger="agent_heartbeat",
+        )
     finally:
         db.close()
     owner = str((_agent or {}).get("owner") or "").strip()
@@ -2790,9 +2900,18 @@ def handle_agent_task(payload):
     if not machine_id:
         return {"ok": False, "error": "missing_machine_id"}
     client_version = str(payload.get("client_version") or "").strip() or None
+    settings = _load_agent_settings()
+    heartbeat_ttl = float(settings.get("heartbeat_ttl", 180) or 180)
     db = Database()
     try:
         db.mark_agent_seen(machine_id, time.time(), client_version=client_version)
+        TASK_MANAGER._cleanup_stale_machine_action_tasks(
+            db,
+            str((_agent or {}).get("owner") or "").strip(),
+            machine_id,
+            heartbeat_ttl,
+            trigger="agent_task_poll",
+        )
         pause_global = False
         pause_owner = None
         try:

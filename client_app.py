@@ -370,11 +370,11 @@ class ClientApp:
     CONTENT_PAD_TOP = 8
     CONTENT_PAD_BOTTOM = 10
     PANEL_SPACING = 3
-    LOCAL_FIELD_WIDTH = 206
-    API_FIELD_WIDTH = 276
+    LOCAL_FIELD_WIDTH = 190
+    API_FIELD_WIDTH = 250
     INTERVAL_STACK_WIDTH = 150
-    COUNT_FIELD_WIDTH = 50
-    WINDOW_NO_FIELD_WIDTH = 74
+    COUNT_FIELD_WIDTH = 46
+    WINDOW_NO_FIELD_WIDTH = 64
     PARAM_LEFT_GROUP_WIDTH = 280
     PARAM_RIGHT_GROUP_WIDTH = 360
     ACTION_LOCK_SECONDS = {
@@ -437,6 +437,7 @@ class ClientApp:
         self._button_texts = {}
         self._button_restore_modes = {}
         self._window_button_styles = {}
+        self._action_button_styles = {}
         self._action_lock_until = {}
         self._button_state_snapshot = {
             "agent_online": False,
@@ -838,34 +839,37 @@ class ClientApp:
         )
         card.pack(fill="both", expand=True, padx=6, pady=6)
 
-        hero = tk.Frame(card, bg=self.ACTIVATION_BG, height=112)
-        hero.pack(fill="x", padx=10, pady=(10, 8))
-        hero.pack_propagate(False)
-        self._build_activation_backdrop(hero, mode="hero")
+        stage = tk.Frame(card, bg=self.ACTIVATION_BG)
+        stage.pack(fill="both", expand=True, padx=24, pady=(20, 28))
+        self._build_activation_backdrop(stage, mode="body")
+
+        content = tk.Frame(stage, bg=self.ACTIVATION_BG)
+        content.pack(expand=True)
+
         tk.Label(
-            hero,
+            content,
             text="FB私聊助手",
             font=("Microsoft YaHei", 28, "bold"),
             bg=self.ACTIVATION_BG,
-            fg="#7ba6d8",
-        ).pack(expand=True)
+            fg="#f2483d",
+        ).pack(pady=(24, 30))
 
-        body = tk.Frame(card, bg=self.ACTIVATION_BG)
-        body.pack(fill="both", expand=True, padx=26, pady=(0, 24))
-        body.grid_columnconfigure(0, weight=1)
-        body.grid_columnconfigure(1, weight=0)
-        self._build_activation_backdrop(body, mode="body")
+        form_block = tk.Frame(content, bg=self.ACTIVATION_BG)
+        form_block.pack()
 
         tk.Label(
-            body,
+            form_block,
             text="激活码",
-            font=("Microsoft YaHei", 20, "bold"),
+            font=("Microsoft YaHei", 15, "bold"),
             bg=self.ACTIVATION_BG,
             fg="#24416e",
-        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(6, 10))
+        ).pack(fill="x", pady=(0, 10))
+
+        entry_row = tk.Frame(form_block, bg=self.ACTIVATION_BG)
+        entry_row.pack(anchor="w")
 
         self.code_entry = tk.Entry(
-            body,
+            entry_row,
             textvariable=self.activation_code,
             font=("Microsoft YaHei", 15),
             relief="solid",
@@ -875,44 +879,41 @@ class ClientApp:
             highlightcolor="#5a8fe3",
             bg="#ffffff",
             fg="#24416e",
+            width=24,
         )
-        self.code_entry.grid(row=1, column=0, sticky="ew", ipady=8)
+        self.code_entry.pack(side="left", ipady=8)
         self.code_entry.bind("<Return>", lambda _event: self._trigger_verify())
 
         self.verify_btn = tk.Button(
-            body,
+            entry_row,
             text="验证激活",
-            font=("Microsoft YaHei", 18, "bold"),
+            font=("Microsoft YaHei", 16, "bold"),
             bg="#4f7df0",
             fg="#ffffff",
             activebackground="#3f6de0",
             activeforeground="#ffffff",
-            relief="flat",
+            relief="raised",
+            bd=1,
             width=8,
             cursor="hand2",
             command=self._trigger_verify,
+            padx=0,
+            pady=3,
         )
-        self.verify_btn.grid(row=1, column=1, padx=(12, 0), ipady=4)
+        self.verify_btn.pack(side="left", padx=(16, 0), ipady=3)
         self._register_feedback_button("verify", self.verify_btn, "验证激活", managed=False)
 
-        tip_frame = tk.Frame(body, bg=self.ACTIVATION_BG, height=40)
-        tip_frame.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(12, 0))
-        tip_frame.grid_propagate(False)
-        tip_frame.grid_columnconfigure(0, weight=1)
-        tip_frame.grid_columnconfigure(1, weight=1)
-
         self.activation_notice_label = tk.Label(
-            tip_frame,
+            content,
             textvariable=self.activation_notice_text,
             font=("Microsoft YaHei", 11),
             bg=self.ACTIVATION_BG,
             fg="#6b7280",
-            justify="left",
-            anchor="w",
-            wraplength=380,
+            justify="center",
+            anchor="n",
+            wraplength=420,
         )
-        self.activation_notice_label.grid(row=0, column=0, sticky="nw")
-
+        self.activation_notice_label.pack(pady=(20, 0))
     def _build_activation_backdrop(self, host, mode):
         canvas = tk.Canvas(
             host,
@@ -1208,7 +1209,7 @@ class ClientApp:
             wrap="word",
             height=5,
             padx=4,
-            pady=4,
+            pady=0.5,
         )
         self.message_text.pack(side="left", fill="both", expand=True, padx=0, pady=0)
         message_scroll = tk.Scrollbar(message_body, orient="vertical", command=self.message_text.yview)
@@ -1285,7 +1286,7 @@ class ClientApp:
         )
 
     def _create_action_button(self, parent, text, bg, command, fg="#ffffff", width=9):
-        return tk.Button(
+        button = tk.Button(
             parent,
             text=text,
             font=self.TOOLBAR_FONT,
@@ -1293,8 +1294,8 @@ class ClientApp:
             fg=fg,
             activebackground=bg,
             activeforeground=fg,
-            relief="flat",
-            bd=0,
+            relief="raised",
+            bd=1,
             width=width,
             cursor="hand2",
             command=command,
@@ -1302,6 +1303,16 @@ class ClientApp:
             pady=3,
             disabledforeground=fg,
         )
+        self._action_button_styles[button] = self._build_action_button_style(bg, fg)
+        button.bind("<Enter>", lambda _event, target=button: self._set_action_button_visual(target, "hover"))
+        button.bind("<Leave>", lambda _event, target=button: self._sync_action_button_visual(target))
+        button.bind("<ButtonPress-1>", lambda _event, target=button: self._set_action_button_visual(target, "press"))
+        button.bind(
+            "<ButtonRelease-1>",
+            lambda event, target=button: self._restore_action_button_visual(target, event),
+        )
+        self._set_action_button_visual(button, "normal")
+        return button
 
     def _register_feedback_button(self, key, button, default_text, managed):
         self._button_texts[key] = default_text
@@ -1322,6 +1333,101 @@ class ClientApp:
         green = max(0, min(255, int(green * factor)))
         blue = max(0, min(255, int(blue * factor)))
         return f"#{red:02x}{green:02x}{blue:02x}"
+
+    def _tint_hex(self, color, strength):
+        value = str(color or "").strip()
+        if len(value) != 7 or not value.startswith("#"):
+            return value
+        try:
+            red = int(value[1:3], 16)
+            green = int(value[3:5], 16)
+            blue = int(value[5:7], 16)
+        except ValueError:
+            return value
+        strength = max(0.0, min(1.0, float(strength)))
+        red = int(red + (255 - red) * strength)
+        green = int(green + (255 - green) * strength)
+        blue = int(blue + (255 - blue) * strength)
+        return f"#{red:02x}{green:02x}{blue:02x}"
+
+    def _build_action_button_style(self, bg, fg):
+        base_bg = str(bg or "").strip().lower()
+        base_fg = str(fg or "").strip() or "#ffffff"
+        is_light = base_bg in {"#fff", "#ffffff"}
+        if is_light:
+            normal_bg = "#f7faff"
+            hover_bg = "#ffffff"
+            press_bg = "#dce6f4"
+            disabled_bg = "#edf1f6"
+            normal_fg = "#24416e"
+            disabled_fg = "#94a3b8"
+        else:
+            normal_bg = self._tint_hex(bg, 0.04)
+            hover_bg = self._tint_hex(bg, 0.16)
+            press_bg = self._shade_hex(bg, 0.76)
+            disabled_bg = self._tint_hex(bg, 0.54)
+            normal_fg = base_fg
+            disabled_fg = "#e6edf9"
+        return {
+            "normal_bg": normal_bg,
+            "hover_bg": hover_bg,
+            "press_bg": press_bg,
+            "disabled_bg": disabled_bg,
+            "normal_fg": normal_fg,
+            "disabled_fg": disabled_fg,
+        }
+
+    def _set_action_button_visual(self, button, state="normal", force=False):
+        styles = self._action_button_styles.get(button)
+        if not styles or not button.winfo_exists():
+            return
+        actual_state = str(button.cget("state") or "").strip()
+        visual_state = state
+        if actual_state == "disabled" and not force:
+            visual_state = "disabled"
+        if visual_state == "hover":
+            bg = styles["hover_bg"]
+            fg = styles["normal_fg"]
+            relief = "raised"
+        elif visual_state == "press":
+            bg = styles["press_bg"]
+            fg = styles["normal_fg"]
+            relief = "sunken"
+        elif visual_state == "disabled":
+            bg = styles["disabled_bg"]
+            fg = styles["disabled_fg"]
+            relief = "raised"
+        else:
+            bg = styles["normal_bg"]
+            fg = styles["normal_fg"]
+            relief = "raised"
+        button.configure(
+            bg=bg,
+            fg=fg,
+            activebackground=styles["press_bg"] if visual_state == "press" else styles["hover_bg"],
+            activeforeground=styles["normal_fg"],
+            disabledforeground=styles["disabled_fg"],
+            relief=relief,
+            bd=1,
+            overrelief="raised",
+        )
+
+    def _restore_action_button_visual(self, button, event):
+        if not button.winfo_exists():
+            return
+        if str(button.cget("state") or "").strip() == "disabled":
+            self._set_action_button_visual(button, "disabled")
+            return
+        inside = 0 <= event.x <= button.winfo_width() and 0 <= event.y <= button.winfo_height()
+        self._set_action_button_visual(button, "hover" if inside else "normal")
+
+    def _sync_action_button_visual(self, button):
+        if button is None or not button.winfo_exists():
+            return
+        self._set_action_button_visual(
+            button,
+            "disabled" if str(button.cget("state") or "").strip() == "disabled" else "normal",
+        )
 
     def _set_activation_notice(self, message="", error=False):
         self.activation_notice_text.set(str(message or "").strip())
@@ -1811,19 +1917,24 @@ class ClientApp:
         self.run_btn.config(
             state="normal" if actions_enabled and not self._is_action_locked("run") else "disabled"
         )
+        self._sync_action_button_visual(self.run_btn)
         self.stop_btn.config(
             state="normal" if actions_enabled and not self._is_action_locked("stop") else "disabled"
         )
+        self._sync_action_button_visual(self.stop_btn)
         self.pause_btn.config(
             state="normal" if actions_enabled and not self._is_action_locked("pause") else "disabled"
         )
+        self._sync_action_button_visual(self.pause_btn)
         self.resume_btn.config(
             state="normal" if actions_enabled and not self._is_action_locked("resume") else "disabled"
         )
+        self._sync_action_button_visual(self.resume_btn)
         if self.single_run_btn is not None:
             self.single_run_btn.config(
                 state="normal" if actions_enabled and not self._is_action_locked("single") else "disabled"
             )
+            self._sync_action_button_visual(self.single_run_btn)
 
     def refresh_remote_status(self, silent=False):
         if not self.verified:
@@ -1988,6 +2099,7 @@ class ClientApp:
             bg=pressed_bg,
             activebackground=pressed_bg,
         )
+        self._set_action_button_visual(button, "press", force=True)
         self.root.configure(cursor="watch")
         self.root.update_idletasks()
         try:
@@ -1996,7 +2108,6 @@ class ClientApp:
             if button.winfo_exists():
                 button.config(
                     text=default_text,
-                    relief="flat",
                     bg=original_bg,
                     activebackground=original_active_bg,
                 )
@@ -2004,6 +2115,7 @@ class ClientApp:
                     self._apply_button_state(**self._button_state_snapshot)
                 else:
                     button.config(state=previous_state if previous_state in {"normal", "disabled"} else "normal")
+                    self._sync_action_button_visual(button)
             self.root.configure(cursor="")
             self.root.update_idletasks()
 
