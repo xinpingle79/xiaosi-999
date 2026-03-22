@@ -853,9 +853,9 @@ button.ghost {
 
 .sub-device-info-card .data-table th:nth-child(3),
 .sub-device-info-card .data-table td:nth-child(3) {
-  width: 260px;
-  min-width: 260px;
-  max-width: 260px;
+  width: 315px;
+  min-width: 315px;
+  max-width: 315px;
 }
 
 .sub-device-info-card .data-table th:nth-child(4),
@@ -874,9 +874,9 @@ button.ghost {
 
 .sub-device-info-card .data-table th:nth-child(6),
 .sub-device-info-card .data-table td:nth-child(6) {
-  width: 110px;
-  min-width: 110px;
-  max-width: 110px;
+  width: 55px;
+  min-width: 55px;
+  max-width: 55px;
 }
 
 .sub-device-info-card .data-table th:nth-child(7),
