@@ -837,40 +837,6 @@ button.ghost {
   min-width: 100px;
 }
 
-.sub-device-info-card .data-table th:nth-child(2),
-.sub-device-info-card .data-table td:nth-child(2) {
-  min-width: 112px;
-}
-
-.sub-device-info-card .data-table.table-nowrap {
-  width: 1360px;
-  min-width: 1360px;
-  table-layout: fixed;
-}
-
-.sub-device-info-card .data-table th,
-.sub-device-info-card .data-table td {
-  white-space: nowrap;
-}
-
-.sub-device-info-card .data-table td.copy-cell {
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.sub-device-info-card .copyable-cell {
-  display: block;
-  width: 100%;
-}
-
-.sub-device-info-card .copyable-text {
-  display: block;
-  width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .sub-device-info-card .data-table th:nth-child(1),
 .sub-device-info-card .data-table td:nth-child(1) {
   width: 72px;
@@ -878,39 +844,46 @@ button.ghost {
   max-width: 72px;
 }
 
+.sub-device-info-card .data-table th:nth-child(2),
+.sub-device-info-card .data-table td:nth-child(2) {
+  width: 232px;
+  min-width: 232px;
+  max-width: 232px;
+}
+
 .sub-device-info-card .data-table th:nth-child(3),
 .sub-device-info-card .data-table td:nth-child(3) {
-  width: 300px;
-  min-width: 300px;
-  max-width: 300px;
+  width: 260px;
+  min-width: 260px;
+  max-width: 260px;
 }
 
 .sub-device-info-card .data-table th:nth-child(4),
 .sub-device-info-card .data-table td:nth-child(4) {
-  width: 210px;
-  min-width: 210px;
-  max-width: 210px;
+  width: 192px;
+  min-width: 192px;
+  max-width: 192px;
 }
 
 .sub-device-info-card .data-table th:nth-child(5),
 .sub-device-info-card .data-table td:nth-child(5) {
-  width: 360px;
-  min-width: 360px;
-  max-width: 360px;
+  width: 384px;
+  min-width: 384px;
+  max-width: 384px;
 }
 
 .sub-device-info-card .data-table th:nth-child(6),
 .sub-device-info-card .data-table td:nth-child(6) {
-  width: 96px;
-  min-width: 96px;
-  max-width: 96px;
+  width: 110px;
+  min-width: 110px;
+  max-width: 110px;
 }
 
 .sub-device-info-card .data-table th:nth-child(7),
 .sub-device-info-card .data-table td:nth-child(7) {
-  width: 178px;
-  min-width: 178px;
-  max-width: 178px;
+  width: 170px;
+  min-width: 170px;
+  max-width: 170px;
 }
 
 .data-table .col-actions .action-btn {
