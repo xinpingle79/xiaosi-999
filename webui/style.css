@@ -853,9 +853,9 @@ button.ghost {
 
 .card.sub-device-info-card[data-page="device-info"] .data-table th:nth-child(3),
 .card.sub-device-info-card[data-page="device-info"] .data-table td:nth-child(3) {
-  width: 315px;
-  min-width: 315px;
-  max-width: 315px;
+  width: 260px;
+  min-width: 260px;
+  max-width: 260px;
 }
 
 .card.sub-device-info-card[data-page="device-info"] .data-table th:nth-child(4),
@@ -874,17 +874,9 @@ button.ghost {
 
 .card.sub-device-info-card[data-page="device-info"] .data-table th:nth-child(6),
 .card.sub-device-info-card[data-page="device-info"] .data-table td:nth-child(6) {
-  width: 55px;
-  min-width: 55px;
-  max-width: 55px;
-}
-
-.card.sub-device-info-card[data-page="device-info"] .data-table th:nth-child(6) {
-  white-space: normal;
-  line-height: 1.15;
-  word-break: break-all;
-  padding-left: 4px;
-  padding-right: 4px;
+  width: 110px;
+  min-width: 110px;
+  max-width: 110px;
 }
 
 .card.sub-device-info-card[data-page="device-info"] .data-table th:nth-child(7),
