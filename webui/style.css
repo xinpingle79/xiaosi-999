@@ -842,29 +842,75 @@ button.ghost {
   min-width: 112px;
 }
 
+.sub-device-info-card .data-table.table-nowrap {
+  width: 1360px;
+  min-width: 1360px;
+  table-layout: fixed;
+}
+
+.sub-device-info-card .data-table th,
+.sub-device-info-card .data-table td {
+  white-space: nowrap;
+}
+
+.sub-device-info-card .data-table td.copy-cell {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sub-device-info-card .copyable-cell {
+  display: block;
+  width: 100%;
+}
+
+.sub-device-info-card .copyable-text {
+  display: block;
+  width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sub-device-info-card .data-table th:nth-child(1),
+.sub-device-info-card .data-table td:nth-child(1) {
+  width: 72px;
+  min-width: 72px;
+  max-width: 72px;
+}
+
 .sub-device-info-card .data-table th:nth-child(3),
 .sub-device-info-card .data-table td:nth-child(3) {
-  min-width: 250px;
+  width: 300px;
+  min-width: 300px;
+  max-width: 300px;
 }
 
 .sub-device-info-card .data-table th:nth-child(4),
 .sub-device-info-card .data-table td:nth-child(4) {
-  min-width: 192px;
+  width: 210px;
+  min-width: 210px;
+  max-width: 210px;
 }
 
 .sub-device-info-card .data-table th:nth-child(5),
 .sub-device-info-card .data-table td:nth-child(5) {
-  min-width: 456px;
+  width: 360px;
+  min-width: 360px;
+  max-width: 360px;
 }
 
 .sub-device-info-card .data-table th:nth-child(6),
 .sub-device-info-card .data-table td:nth-child(6) {
-  min-width: 90px;
+  width: 96px;
+  min-width: 96px;
+  max-width: 96px;
 }
 
 .sub-device-info-card .data-table th:nth-child(7),
 .sub-device-info-card .data-table td:nth-child(7) {
-  min-width: 170px;
+  width: 178px;
+  min-width: 178px;
+  max-width: 178px;
 }
 
 .data-table .col-actions .action-btn {
