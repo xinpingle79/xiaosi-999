@@ -363,20 +363,27 @@ def _client_can_use_token(client_config, license_data):
 
 
 class ClientApp:
-    WINDOW_WIDTH = 640
+    WINDOW_WIDTH = 680
     WINDOW_HEIGHT = 560
     TITLE_BAR_HEIGHT = 38
     CONTENT_PAD_X = 8
     CONTENT_PAD_TOP = 8
     CONTENT_PAD_BOTTOM = 10
     PANEL_SPACING = 3
-    LOCAL_FIELD_WIDTH = 190
-    API_FIELD_WIDTH = 250
+    LOCAL_FIELD_WIDTH = 206
+    API_FIELD_WIDTH = 276
     INTERVAL_STACK_WIDTH = 150
-    COUNT_FIELD_WIDTH = 46
-    WINDOW_NO_FIELD_WIDTH = 64
-    PARAM_LEFT_GROUP_WIDTH = 250
-    PARAM_RIGHT_GROUP_WIDTH = 332
+    COUNT_FIELD_WIDTH = 50
+    WINDOW_NO_FIELD_WIDTH = 74
+    PARAM_LEFT_GROUP_WIDTH = 280
+    PARAM_RIGHT_GROUP_WIDTH = 360
+    ACTION_LOCK_SECONDS = {
+        "run": 4.0,
+        "stop": 3.0,
+        "pause": 3.0,
+        "resume": 3.0,
+        "single": 4.0,
+    }
     SHELL_BG = "#edf4ff"
     WINDOW_BG = "#dbe7f6"
     PANEL_BG = "#eef5ff"
@@ -430,6 +437,7 @@ class ClientApp:
         self._button_texts = {}
         self._button_restore_modes = {}
         self._window_button_styles = {}
+        self._action_lock_until = {}
         self._button_state_snapshot = {
             "agent_online": False,
             "task_running": False,
@@ -441,7 +449,7 @@ class ClientApp:
             "start_block_reason": "",
         }
         self._log_path = _runtime_path("logs", "worker.log")
-        self._log_offset = 0
+        self._log_offsets = {}
         self._log_follow_tail = True
 
         self.activation_code = tk.StringVar(value="")
@@ -796,6 +804,27 @@ class ClientApp:
         self._is_maximized = False
         self.maximize_button_text.set("□")
 
+    def _lock_action(self, key, seconds=None):
+        if not key:
+            return
+        duration = float(seconds if seconds is not None else self.ACTION_LOCK_SECONDS.get(key, 2.5))
+        self._action_lock_until[key] = time.monotonic() + max(duration, 0.5)
+
+    def _unlock_action(self, key):
+        if not key:
+            return
+        self._action_lock_until.pop(key, None)
+
+    def _prune_action_locks(self):
+        now = time.monotonic()
+        expired = [key for key, deadline in self._action_lock_until.items() if now >= float(deadline or 0.0)]
+        for key in expired:
+            self._action_lock_until.pop(key, None)
+
+    def _is_action_locked(self, key):
+        self._prune_action_locks()
+        return time.monotonic() < float(self._action_lock_until.get(key) or 0.0)
+
     def _build_activation_screen(self, parent):
         self.activation_screen = tk.Frame(parent, bg=self.SHELL_BG)
         self.activation_screen.place(x=0, y=0, relwidth=1, relheight=1)
@@ -1030,14 +1059,15 @@ class ClientApp:
         param_panel.pack(fill="x", padx=0, pady=(0, self.PANEL_SPACING))
         param_panel.pack_propagate(False)
         params_grid = tk.Frame(param_panel, bg=self.PANEL_BG)
-        params_grid.pack(fill="both", expand=True, padx=10, pady=(8, 8))
+        params_grid.pack(fill="both", expand=True, padx=8, pady=(8, 8))
         params_grid.grid_columnconfigure(0, minsize=self.PARAM_LEFT_GROUP_WIDTH, weight=1)
         params_grid.grid_columnconfigure(1, minsize=self.PARAM_RIGHT_GROUP_WIDTH, weight=1)
         params_grid.grid_rowconfigure(0, weight=1)
         params_grid.grid_rowconfigure(1, weight=1)
 
-        local_group = tk.Frame(params_grid, bg=self.PANEL_BG)
+        local_group = tk.Frame(params_grid, bg=self.PANEL_BG, width=self.PARAM_LEFT_GROUP_WIDTH, height=32)
         local_group.grid(row=0, column=0, sticky="w")
+        local_group.grid_propagate(False)
         tk.Label(
             local_group,
             text="本地地址",
@@ -1051,8 +1081,9 @@ class ClientApp:
         self.bit_api_entry = self._create_entry(local_field, self.bit_api, font=("Microsoft YaHei", 11))
         self.bit_api_entry.pack(fill="both", expand=True, ipady=4)
 
-        api_group = tk.Frame(params_grid, bg=self.PANEL_BG)
+        api_group = tk.Frame(params_grid, bg=self.PANEL_BG, width=self.PARAM_RIGHT_GROUP_WIDTH, height=32)
         api_group.grid(row=0, column=1, sticky="e")
+        api_group.grid_propagate(False)
         tk.Label(
             api_group,
             text="浏览器 API",
@@ -1066,8 +1097,9 @@ class ClientApp:
         self.api_token_entry = self._create_entry(api_field, self.api_token, font=("Microsoft YaHei", 11))
         self.api_token_entry.pack(fill="both", expand=True, ipady=4)
 
-        freq_group = tk.Frame(params_grid, bg=self.PANEL_BG)
+        freq_group = tk.Frame(params_grid, bg=self.PANEL_BG, width=self.PARAM_LEFT_GROUP_WIDTH, height=32)
         freq_group.grid(row=1, column=0, sticky="w", pady=(9, 0))
+        freq_group.grid_propagate(False)
         tk.Label(
             freq_group,
             text="发送频率",
@@ -1095,8 +1127,9 @@ class ClientApp:
         )
         self.max_interval.place(x=98, y=0, width=52, height=32)
 
-        window_group = tk.Frame(params_grid, bg=self.PANEL_BG)
+        window_group = tk.Frame(params_grid, bg=self.PANEL_BG, width=self.PARAM_RIGHT_GROUP_WIDTH, height=32)
         window_group.grid(row=1, column=1, sticky="e", pady=(9, 0))
+        window_group.grid_propagate(False)
         tk.Label(
             window_group,
             text="窗口数量",
@@ -1121,7 +1154,7 @@ class ClientApp:
             font=self.SECTION_LABEL_FONT,
             bg=self.PANEL_BG,
             fg="#24416e",
-        ).grid(row=0, column=2, padx=(12, 8), sticky="w")
+        ).grid(row=0, column=2, padx=(8, 6), sticky="w")
         no_field = tk.Frame(window_group, bg=self.PANEL_BG, width=self.WINDOW_NO_FIELD_WIDTH, height=32)
         no_field.grid(row=0, column=3, sticky="w")
         no_field.grid_propagate(False)
@@ -1137,8 +1170,8 @@ class ClientApp:
             window_group, "单独启动", "#4f7df0", self._trigger_single_run, width=8
         )
         self.single_run_btn.configure(font=("Microsoft YaHei", 11, "bold"), padx=0, pady=2)
-        self.single_run_btn.grid(row=0, column=4, padx=(12, 0), sticky="w", ipady=2)
-        self._register_feedback_button("single", self.single_run_btn, "单独启动", managed=False)
+        self.single_run_btn.grid(row=0, column=4, padx=(8, 0), sticky="w", ipady=2)
+        self._register_feedback_button("single", self.single_run_btn, "单独启动", managed=True)
 
         message_panel = tk.Frame(
             shell,
@@ -1158,9 +1191,9 @@ class ClientApp:
         ).pack(anchor="w", padx=10, pady=(3, 3))
         message_body = tk.Frame(
             message_panel,
-            bg="#ffffff",
-            highlightthickness=1,
-            highlightbackground="#7ba6d8",
+            bg=self.PANEL_BG,
+            highlightthickness=0,
+            highlightbackground=self.PANEL_BG,
             bd=0,
         )
         message_body.pack(fill="both", expand=True, padx=10, pady=(0, 10))
@@ -1174,12 +1207,12 @@ class ClientApp:
             highlightthickness=0,
             wrap="word",
             height=5,
-            padx=10,
-            pady=12,
+            padx=4,
+            pady=4,
         )
-        self.message_text.pack(side="left", fill="both", expand=True, padx=(8, 0), pady=8)
+        self.message_text.pack(side="left", fill="both", expand=True, padx=0, pady=0)
         message_scroll = tk.Scrollbar(message_body, orient="vertical", command=self.message_text.yview)
-        message_scroll.pack(side="right", fill="y", padx=(0, 8), pady=8)
+        message_scroll.pack(side="right", fill="y", padx=(0, 0), pady=0)
         self.message_text.configure(yscrollcommand=message_scroll.set)
 
         log_panel = tk.Frame(
@@ -1334,7 +1367,7 @@ class ClientApp:
                 self.message_text.insert("1.0", templates_text)
 
     def _reset_log_session(self):
-        self._log_offset = 0
+        self._log_offsets = {}
         self._log_follow_tail = True
         self._set_runtime_counters(0, 0)
         try:
@@ -1342,6 +1375,11 @@ class ClientApp:
             self._log_path.write_text("", encoding="utf-8")
         except Exception:
             pass
+        for path in self._iter_local_log_paths():
+            try:
+                self._log_offsets[str(path.resolve())] = path.stat().st_size
+            except Exception:
+                self._log_offsets[str(path.resolve())] = 0
         if self.log_text is not None:
             self.log_text.delete("1.0", tk.END)
 
@@ -1358,18 +1396,44 @@ class ClientApp:
         finally:
             self._schedule_log_refresh()
 
+    def _iter_local_log_paths(self):
+        log_dir = _runtime_path("logs")
+        paths = []
+        worker_log = log_dir / "worker.log"
+        if worker_log.exists() or worker_log == self._log_path:
+            paths.append(worker_log)
+        try:
+            runtime_logs = sorted(
+                log_dir.glob("runtime_*.log"),
+                key=lambda item: item.stat().st_mtime,
+            )
+        except Exception:
+            runtime_logs = []
+        for path in runtime_logs[-4:]:
+            if path not in paths:
+                paths.append(path)
+        return paths
+
     def _append_local_worker_log(self):
         if self.log_text is None:
             return
-        if not self._log_path.exists():
-            return
-        try:
-            with self._log_path.open("r", encoding="utf-8", errors="ignore") as handle:
-                handle.seek(self._log_offset)
-                chunk = handle.read()
-                self._log_offset = handle.tell()
-        except Exception:
-            return
+        chunks = []
+        for path in self._iter_local_log_paths():
+            try:
+                resolved = str(path.resolve())
+                previous_offset = int(self._log_offsets.get(resolved, 0) or 0)
+                current_size = path.stat().st_size
+                if current_size < previous_offset:
+                    previous_offset = 0
+                with path.open("r", encoding="utf-8", errors="ignore") as handle:
+                    handle.seek(previous_offset)
+                    chunk = handle.read()
+                    self._log_offsets[resolved] = handle.tell()
+                if chunk:
+                    chunks.append(chunk)
+            except Exception:
+                continue
+        chunk = "".join(chunks)
         if not chunk:
             return
         sent_patterns = ("✅ 成员页消息已发送",)
@@ -1738,14 +1802,28 @@ class ClientApp:
             "start_ready": bool(start_ready),
             "start_block_reason": str(start_block_reason or "").strip(),
         }
+        self._prune_action_locks()
         is_running = bool(task_running)
         is_pending = bool(task_pending)
         is_paused = bool(task_paused)
         is_busy = bool(is_running or is_pending or is_paused)
-        self.run_btn.config(state="normal" if self.verified and start_ready and not is_busy else "disabled")
-        self.stop_btn.config(state="normal" if agent_online and is_busy else "disabled")
-        self.pause_btn.config(state="normal" if agent_online and is_running and not is_paused else "disabled")
-        self.resume_btn.config(state="normal" if agent_online and is_paused else "disabled")
+        actions_enabled = bool(self.verified)
+        self.run_btn.config(
+            state="normal" if actions_enabled and not self._is_action_locked("run") else "disabled"
+        )
+        self.stop_btn.config(
+            state="normal" if actions_enabled and not self._is_action_locked("stop") else "disabled"
+        )
+        self.pause_btn.config(
+            state="normal" if actions_enabled and not self._is_action_locked("pause") else "disabled"
+        )
+        self.resume_btn.config(
+            state="normal" if actions_enabled and not self._is_action_locked("resume") else "disabled"
+        )
+        if self.single_run_btn is not None:
+            self.single_run_btn.config(
+                state="normal" if actions_enabled and not self._is_action_locked("single") else "disabled"
+            )
 
     def refresh_remote_status(self, silent=False):
         if not self.verified:
@@ -1791,6 +1869,82 @@ class ClientApp:
             "agent_offline": "执行端尚未在线",
         }
         return mapping.get(str(reason or "").strip(), "执行端尚未就绪")
+
+    def _show_control_feedback(self, level, message):
+        text = str(message or "").strip()
+        if not text:
+            return
+        if level == "error":
+            messagebox.showerror("提示", text)
+            return
+        if level == "warning":
+            messagebox.showwarning("提示", text)
+            return
+        messagebox.showinfo("提示", text)
+
+    def _control_action_key(self, action):
+        mapping = {
+            "start": "run",
+            "stop": "stop",
+            "pause": "pause",
+            "resume": "resume",
+            "restart_window": "single",
+        }
+        return mapping.get(str(action or "").strip(), "")
+
+    def _precheck_control_action(self, action):
+        action = str(action or "").strip()
+        button_key = self._control_action_key(action)
+        if button_key and self._is_action_locked(button_key):
+            duplicate_message = {
+                "start": "启动指令处理中，请勿重复点击",
+                "stop": "停止指令已在处理中，请勿重复点击",
+                "pause": "暂停指令已在处理中，请勿重复点击",
+                "resume": "继续指令已在处理中，请勿重复点击",
+                "restart_window": "单独启动任务已在处理中，请勿重复下发",
+            }
+            return False, "warning", duplicate_message.get(action, "当前操作正在处理中，请勿重复点击")
+        snapshot = dict(self._button_state_snapshot or {})
+        task_running = bool(snapshot.get("task_running"))
+        task_pending = bool(snapshot.get("task_pending"))
+        task_paused = bool(snapshot.get("task_paused"))
+        if action == "start":
+            if task_running:
+                return False, "warning", "当前任务已在运行，无需重复启动"
+            if task_pending:
+                return False, "warning", "启动任务已在排队，请勿重复启动"
+            if task_paused:
+                return False, "warning", "当前任务处于暂停中，请先点击继续或停止"
+        elif action == "stop":
+            if not (task_running or task_pending or task_paused):
+                return False, "warning", "当前没有可停止的运行任务"
+        elif action == "pause":
+            if task_paused:
+                return False, "warning", "当前任务已处于暂停状态"
+            if not task_running:
+                return False, "warning", "当前没有可暂停的运行任务"
+        elif action == "resume":
+            if not task_paused:
+                return False, "warning", "当前没有可继续的暂停任务"
+        return True, "info", ""
+
+    def _present_control_result(self, action, response):
+        response = response or {}
+        result = str(response.get("result") or "accepted").strip() or "accepted"
+        message = str(response.get("message") or "").strip()
+        if not message:
+            defaults = {
+                "start": "启动指令已下发，正在等待执行端响应",
+                "stop": "停止指令已下发，正在等待执行端响应",
+                "pause": "暂停指令已下发",
+                "resume": "继续指令已下发",
+                "restart_window": "单独启动指令已下发，正在等待执行端响应",
+            }
+            message = defaults.get(action, "操作已完成")
+        if result == "accepted":
+            self._show_control_feedback("info", message)
+            return
+        self._show_control_feedback("warning", message)
 
     def _wait_for_remote_start_ready(self, timeout=8.0):
         deadline = time.time() + max(timeout, 0.5)
@@ -1857,22 +2011,22 @@ class ClientApp:
         self._with_button_feedback("verify", "验证中...", self.on_verify)
 
     def _trigger_run(self):
-        self._with_button_feedback("run", None, self.on_run)
+        self._with_button_feedback("run", "启动中...", self.on_run)
 
     def _trigger_pause(self):
-        self._with_button_feedback("pause", None, self.on_pause)
+        self._with_button_feedback("pause", "暂停中...", self.on_pause)
 
     def _trigger_resume(self):
-        self._with_button_feedback("resume", None, self.on_resume)
+        self._with_button_feedback("resume", "继续中...", self.on_resume)
 
     def _trigger_stop(self):
-        self._with_button_feedback("stop", None, self.on_stop)
+        self._with_button_feedback("stop", "停止中...", self.on_stop)
 
     def _trigger_save(self):
-        self._with_button_feedback("save", None, self.on_save_settings)
+        self._with_button_feedback("save", "保存中...", self.on_save_settings)
 
     def _trigger_single_run(self):
-        self._with_button_feedback("single", None, self.on_single_run)
+        self._with_button_feedback("single", "启动中...", self.on_single_run)
 
     def on_verify(self):
         code = str(self.activation_code.get() or "").strip()
@@ -1931,30 +2085,43 @@ class ClientApp:
     def _send_control(self, action):
         if not self.verified:
             messagebox.showwarning("提示", "请先完成激活验证")
-            return
+            return False
+        allowed, level, message = self._precheck_control_action(action)
+        if not allowed:
+            self._show_control_feedback(level, message)
+            return False
         if not self._save_local_config(require_connection_fields=True):
-            return
+            return False
         if action == "start":
             if not self._sync_config_to_server(show_error=True):
-                return
+                return False
             if not self._ensure_worker_running(wait_online=True):
-                return
+                return False
             ready_info = self._wait_for_remote_start_ready(timeout=8.0)
             if not ready_info or not ready_info.get("start_ready"):
                 reason_text = self._translate_start_block_reason(
                     (ready_info or {}).get("start_block_reason")
                 )
-                messagebox.showerror("提示", f"start 失败：{reason_text}")
-                return
+                self._show_control_feedback("warning", f"当前状态不允许启动：{reason_text}")
+                return False
         payload = {
             "agent_token": self._current_agent_token(),
             "machine_id": self.machine_id,
         }
+        action_key = self._control_action_key(action)
         ok, data = self._post_client_api(f"/api/client/{action}", payload, timeout=15)
         if not ok:
-            messagebox.showerror("提示", f"{action} 失败：{data.get('error')}")
-            return
+            self._unlock_action(action_key)
+            self._show_control_feedback("error", f"{action} 失败：{data.get('error')}")
+            return False
+        result = str(data.get("result") or "accepted").strip() or "accepted"
+        if result in {"accepted", "duplicate"} and action_key:
+            self._lock_action(action_key)
+        else:
+            self._unlock_action(action_key)
         self.refresh_remote_status(silent=True)
+        self._present_control_result(action, data)
+        return result == "accepted"
 
     def on_run(self):
         self._send_control("start")
@@ -1962,6 +2129,9 @@ class ClientApp:
     def on_single_run(self):
         if not self.verified:
             messagebox.showwarning("提示", "请先完成激活验证")
+            return
+        if self._is_action_locked("single"):
+            self._show_control_feedback("warning", "单独启动任务已在处理中，请勿重复下发")
             return
         window_token = str(self.window_no_text.get() or "").strip()
         if not window_token:
@@ -1978,7 +2148,7 @@ class ClientApp:
             reason_text = self._translate_start_block_reason(
                 (ready_info or {}).get("start_block_reason")
             )
-            messagebox.showerror("提示", f"单独启动失败：{reason_text}")
+            self._show_control_feedback("warning", f"当前状态不允许单独启动：{reason_text}")
             return
         payload = {
             "agent_token": self._current_agent_token(),
@@ -1987,9 +2157,16 @@ class ClientApp:
         }
         ok, data = self._post_client_api("/api/client/restart-window", payload, timeout=15)
         if not ok:
-            messagebox.showerror("提示", f"单独启动失败：{data.get('error')}")
+            self._unlock_action("single")
+            self._show_control_feedback("error", f"单独启动失败：{data.get('error')}")
             return
+        result = str(data.get("result") or "accepted").strip() or "accepted"
+        if result in {"accepted", "duplicate"}:
+            self._lock_action("single")
+        else:
+            self._unlock_action("single")
         self.refresh_remote_status(silent=True)
+        self._present_control_result("restart_window", data)
 
     def on_stop(self):
         self._send_control("stop")

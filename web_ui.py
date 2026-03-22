@@ -195,6 +195,111 @@ class TaskManager:
             "status": row["status"],
         }
 
+    def _cleanup_stale_machine_action_tasks(self, db, owner_name, machine_id, heartbeat_ttl):
+        machine_id = str(machine_id or "").strip()
+        if not machine_id:
+            return []
+        now = time.time()
+        stale_rows = []
+        agent = db.get_agent(machine_id)
+        last_seen = 0.0
+        if agent:
+            try:
+                last_seen = float(agent.get("last_seen") or 0)
+            except Exception:
+                last_seen = 0.0
+        ttl = max(float(heartbeat_ttl or 180), 60.0)
+        agent_online = bool(last_seen) and (now - last_seen <= ttl)
+        rows = db.conn.execute(
+            """
+            SELECT id, action, window_token, status, updated_at
+            FROM agent_tasks
+            WHERE assigned_machine_id = ?
+              AND status IN ('pending', 'running')
+            ORDER BY id ASC
+            """,
+            (machine_id,),
+        ).fetchall()
+        for row in rows:
+            task_id = int(row["id"])
+            action = str(row["action"] or "").strip()
+            window_token = str(row["window_token"] or "").strip()
+            updated_at = float(row["updated_at"] or 0.0)
+            stale_error = None
+            if action == "start":
+                later_stop = db.conn.execute(
+                    """
+                    SELECT 1
+                    FROM agent_tasks
+                    WHERE assigned_machine_id = ?
+                      AND id > ?
+                      AND action = 'stop'
+                      AND status IN ('done', 'failed')
+                    LIMIT 1
+                    """,
+                    (machine_id, task_id),
+                ).fetchone()
+                if later_stop:
+                    stale_error = "stale_running_cleanup"
+                elif not agent_online and updated_at and (now - updated_at) > ttl:
+                    stale_error = "stale_running_cleanup"
+            elif action in {"stop", "pause", "resume"}:
+                later_same = db.conn.execute(
+                    """
+                    SELECT 1
+                    FROM agent_tasks
+                    WHERE assigned_machine_id = ?
+                      AND id > ?
+                      AND action = ?
+                      AND status IN ('done', 'failed')
+                    LIMIT 1
+                    """,
+                    (machine_id, task_id, action),
+                ).fetchone()
+                if later_same:
+                    stale_error = "stale_queue_cleanup"
+            elif action == "restart_window" and window_token:
+                later_same_window = db.conn.execute(
+                    """
+                    SELECT 1
+                    FROM agent_tasks
+                    WHERE assigned_machine_id = ?
+                      AND id > ?
+                      AND action = 'restart_window'
+                      AND ifnull(window_token, '') = ?
+                      AND status IN ('done', 'failed')
+                    LIMIT 1
+                    """,
+                    (machine_id, task_id, window_token),
+                ).fetchone()
+                if later_same_window:
+                    stale_error = "stale_queue_cleanup"
+            if not stale_error:
+                continue
+            db.conn.execute(
+                """
+                UPDATE agent_tasks
+                SET status = 'failed', error = ?, updated_at = ?
+                WHERE id = ? AND status IN ('pending', 'running')
+                """,
+                (stale_error, now, task_id),
+            )
+            stale_rows.append(
+                {
+                    "id": task_id,
+                    "action": action,
+                    "status": row["status"],
+                    "error": stale_error,
+                }
+            )
+        if stale_rows:
+            db.conn.commit()
+            for row in stale_rows:
+                self._logs.append(
+                    f"=== 已清理陈旧 {row['action']} 任务#{row['id']}：执行端 {machine_id} ({row['error']}) ==="
+                )
+        return stale_rows
+
     def _enqueue_owner_device_actions(
         self,
         action,
@@ -380,14 +485,14 @@ class TaskManager:
         machine_id = str(machine_id or "").strip()
         api_token = str(api_token or "").strip()
         if not owner_name:
-            return False, "账号不存在"
+            return False, "账号不存在", None
         if not machine_id:
-            return False, "未绑定设备"
+            return False, "未绑定设备", None
         owner_account = self._load_owner_account(owner_name)
         if not owner_account:
-            return False, "账号不存在"
+            return False, "账号不存在", None
         if not allow_disabled and int(owner_account.get("status", 0) or 0) == 0:
-            return False, "账号已禁用"
+            return False, "账号已禁用", None
 
         settings = _load_agent_settings()
         heartbeat_ttl = settings.get("heartbeat_ttl", 180)
@@ -408,7 +513,7 @@ class TaskManager:
                             break
                 if not target_cfg:
                     if time.time() >= deadline:
-                        return False, "未配置设备"
+                        return False, "未配置设备", None
                     time.sleep(0.5)
                     continue
 
@@ -421,10 +526,16 @@ class TaskManager:
                 )
                 if not agent:
                     if time.time() >= deadline:
-                        return False, agent_error or "执行端离线"
+                        return False, agent_error or "执行端离线", None
                     time.sleep(0.5)
                     continue
 
+                self._cleanup_stale_machine_action_tasks(
+                    db,
+                    owner_name,
+                    machine_id,
+                    heartbeat_ttl,
+                )
                 existing_task = self._find_existing_machine_action_task(
                     db,
                     owner_name,
@@ -435,11 +546,15 @@ class TaskManager:
                     self._logs.append(
                         f"=== 跳过重复 {action} 指令：执行端 {machine_id} 已存在任务#{existing_task['id']} ({existing_task['status']}) ==="
                     )
-                    return True, None
+                    return True, None, {
+                        "result": "duplicate",
+                        "task_id": existing_task["id"],
+                        "existing_status": existing_task["status"],
+                    }
                 bit_api = str(target_cfg.get("bit_api") or "").strip()
                 target_api_token = str(target_cfg.get("api_token") or "").strip()
                 if not bit_api or not target_api_token:
-                    return False, "设备配置缺少接口参数"
+                    return False, "设备配置缺少接口参数", None
                 payload = {
                     "owner": owner_name,
                     "bit_api": bit_api,
@@ -456,7 +571,10 @@ class TaskManager:
                 self._logs.append(
                     f"=== 已下发 {action} 指令到执行端 {machine_id} (任务#{task_id}) ==="
                 )
-                return True, None
+                return True, None, {
+                    "result": "accepted",
+                    "task_id": task_id,
+                }
         finally:
             db.close()
 
@@ -1640,6 +1758,41 @@ def infer_task_pending(logs):
     return bool(pending_hit and not settled_hit)
 
 
+def _translate_client_start_block_reason(reason):
+    mapping = {
+        "config_not_synced": "设备配置尚未同步完成",
+        "device_not_bound": "设备绑定尚未完成",
+        "missing_connection_fields": "设备配置缺少接口参数",
+        "agent_offline": "执行端尚未在线",
+    }
+    return mapping.get(str(reason or "").strip(), "执行端尚未就绪")
+
+
+def _client_action_message(action, result, existing_status=""):
+    action = str(action or "").strip()
+    result = str(result or "").strip()
+    existing_status = str(existing_status or "").strip()
+    if result == "duplicate":
+        if action == "start":
+            return "当前任务已在运行，无需重复启动" if existing_status == "running" else "启动任务已在排队，请勿重复启动"
+        if action == "stop":
+            return "停止指令已在处理中，请勿重复点击"
+        if action == "pause":
+            return "暂停指令已在处理中，请勿重复点击"
+        if action == "resume":
+            return "继续指令已在处理中，请勿重复点击"
+        if action == "restart_window":
+            return "单独启动任务已在处理中，请勿重复下发"
+    accepted = {
+        "start": "启动指令已下发，正在等待执行端响应",
+        "stop": "停止指令已下发，正在等待执行端响应",
+        "pause": "暂停指令已下发",
+        "resume": "继续指令已下发",
+        "restart_window": "单独启动指令已下发，正在等待执行端响应",
+    }
+    return accepted.get(action, "操作已完成")
+
+
 def _extract_detected_window_count(logs):
     if not logs:
         return 0
@@ -2346,6 +2499,12 @@ def handle_client_status(payload):
                     target_cfg = cfg
                     break
 
+        stale_rows = TASK_MANAGER._cleanup_stale_machine_action_tasks(
+            db,
+            owner,
+            machine_id,
+            heartbeat_ttl,
+        )
         running_row = db.conn.execute(
             """
             SELECT COUNT(1) AS total
@@ -2431,6 +2590,7 @@ def handle_client_status(payload):
             "client_version": client_version,
             "bit_api": str((target_cfg or {}).get("bit_api") or "").strip(),
             "api_token": str((target_cfg or {}).get("api_token") or "").strip(),
+            "stale_cleanup_ids": [row["id"] for row in stale_rows],
         },
     }
 
@@ -2457,7 +2617,51 @@ def handle_client_action(payload, action):
     if action == "restart_window" and not window_token:
         return {"ok": False, "error": "请输入窗口号"}
 
-    ok, error = TASK_MANAGER.enqueue_machine_action(
+    status_result = handle_client_status(
+        {
+            "agent_token": payload.get("agent_token"),
+            "machine_id": verified.get("machine_id"),
+            "api_token": api_token,
+        }
+    )
+    if not status_result.get("ok"):
+        return status_result
+    status_info = status_result.get("data") or {}
+    task_running = bool(status_info.get("task_running"))
+    task_pending = bool(status_info.get("task_pending"))
+    task_paused = bool(status_info.get("task_paused"))
+    if action == "start":
+        if task_running:
+            return {"ok": True, "result": "duplicate", "message": "当前任务已在运行，无需重复启动"}
+        if task_pending:
+            return {"ok": True, "result": "duplicate", "message": "启动任务已在排队，请勿重复启动"}
+        if task_paused:
+            return {"ok": True, "result": "blocked", "message": "当前任务处于暂停中，请先点击继续或停止"}
+        if not status_info.get("start_ready"):
+            return {
+                "ok": True,
+                "result": "blocked",
+                "message": f"当前状态不允许启动：{_translate_client_start_block_reason(status_info.get('start_block_reason'))}",
+            }
+    elif action == "stop":
+        if not (task_running or task_pending or task_paused):
+            return {"ok": True, "result": "blocked", "message": "当前没有可停止的运行任务"}
+    elif action == "pause":
+        if task_paused:
+            return {"ok": True, "result": "blocked", "message": "当前任务已处于暂停状态"}
+        if not task_running:
+            return {"ok": True, "result": "blocked", "message": "当前没有可暂停的运行任务"}
+    elif action == "resume":
+        if not task_paused:
+            return {"ok": True, "result": "blocked", "message": "当前没有可继续的暂停任务"}
+    elif action == "restart_window" and not status_info.get("start_ready"):
+        return {
+            "ok": True,
+            "result": "blocked",
+            "message": f"当前状态不允许单独启动：{_translate_client_start_block_reason(status_info.get('start_block_reason'))}",
+        }
+
+    ok, error, detail = TASK_MANAGER.enqueue_machine_action(
         action,
         owner_name=verified.get("owner"),
         machine_id=verified.get("machine_id"),
@@ -2468,7 +2672,18 @@ def handle_client_action(payload, action):
     )
     if not ok:
         return {"ok": False, "error": error or "执行失败"}
-    return {"ok": True}
+    detail = detail or {}
+    result = str(detail.get("result") or "accepted").strip() or "accepted"
+    return {
+        "ok": True,
+        "result": result,
+        "message": _client_action_message(
+            action,
+            result,
+            existing_status=detail.get("existing_status") or "",
+        ),
+        "task_id": detail.get("task_id"),
+    }
 
 
 def handle_agent_heartbeat(payload):
