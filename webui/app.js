@@ -1188,10 +1188,7 @@ function renderUserTable(users, defaults) {
       const status = Number(user.status ?? 1);
       const isDisabled = status === 0;
       const rowClass = isDisabled ? "is-disabled" : "";
-      const activationCode = maskSensitiveValue(user.activation_code || "-", {
-        visibleStart: 6,
-        visibleEnd: 4,
-      });
+      const activationCode = user.activation_code || "-";
       return `
         <tr class="${rowClass}">
           <td class="col-index">${index + 1}</td>
