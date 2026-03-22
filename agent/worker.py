@@ -492,27 +492,53 @@ class Worker:
             timeout=5,
         )
 
+    def _decode_output_line(self, payload):
+        if isinstance(payload, str):
+            return payload
+        if not isinstance(payload, (bytes, bytearray)):
+            return str(payload)
+        raw = bytes(payload)
+        for encoding in ("utf-8", "gbk"):
+            try:
+                return raw.decode(encoding)
+            except UnicodeDecodeError:
+                continue
+        for encoding in ("utf-8", "gbk"):
+            try:
+                return raw.decode(encoding, errors="replace")
+            except Exception:
+                continue
+        return raw.decode("utf-8", errors="replace")
+
     def _stream_output(self, process, owner, task_id):
         if not process.stdout:
             return
-        for line in process.stdout:
-            self._send_log(owner, line.rstrip())
-        exit_code = process.poll()
-        with self.lock:
-            if self.main_process is process:
-                self.main_process = None
-            stale_tokens = [
-                token
-                for token, current in self.single_processes.items()
-                if current is process or current.poll() is not None
-            ]
-            for token in stale_tokens:
-                self.single_processes.pop(token, None)
-        _post_agent_json(
-            self.cfg,
-            f"{self.cfg['server_url']}/api/agent/report",
-            {"task_id": task_id, "status": "done", "exit_code": exit_code},
-        )
+        try:
+            while True:
+                line = process.stdout.readline()
+                if not line:
+                    break
+                decoded = self._decode_output_line(line).rstrip("\r\n")
+                self._send_log(owner, decoded)
+        except Exception as exc:
+            self._send_log(owner, f"[worker] 输出流读取异常: {exc}")
+        finally:
+            exit_code = process.wait()
+            with self.lock:
+                if self.main_process is process:
+                    self.main_process = None
+                stale_tokens = [
+                    token
+                    for token, current in self.single_processes.items()
+                    if current is process or current.poll() is not None
+                ]
+                for token in stale_tokens:
+                    self.single_processes.pop(token, None)
+            _post_agent_json(
+                self.cfg,
+                f"{self.cfg['server_url']}/api/agent/report",
+                {"task_id": task_id, "status": "done", "exit_code": exit_code},
+            )
 
     def _cleanup_finished_processes_locked(self):
         if self.main_process and self.main_process.poll() is not None:
@@ -576,8 +602,8 @@ class Worker:
             cwd=str(ROOT_DIR),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
+            text=False,
+            bufsize=0,
             env=env,
             creationflags=creationflags,
             startupinfo=startupinfo,

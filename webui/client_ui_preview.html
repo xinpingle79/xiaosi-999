@@ -70,6 +70,7 @@
 
     .preview-shell {
       width: 640px;
+      min-height: 560px;
       margin: 0 auto;
       border: 1px solid var(--border);
       background: var(--shell-bg);
@@ -99,13 +100,75 @@
     .win-btn {
       width: 20px;
       height: 20px;
+      border: 0;
       border-radius: 4px;
-      background: rgba(255,255,255,0.22);
-      position: relative;
+      background: #5f86b8;
+      color: #fff;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 11px;
+      font-weight: 700;
+      line-height: 1;
+      cursor: pointer;
+      transition: background 0.12s ease, transform 0.05s ease, opacity 0.12s ease;
+      padding: 0;
+    }
+
+    .win-btn:hover,
+    .win-btn.is-hover {
+      background: #4f74a5;
+    }
+
+    .win-btn:active,
+    .win-btn.is-press {
+      background: #3f6594;
+      transform: translateY(1px);
     }
 
     .win-btn.close {
       background: #e56b6f;
+    }
+
+    .win-btn.close:hover,
+    .win-btn.close.is-hover {
+      background: #d9485f;
+    }
+
+    .win-btn.close:active,
+    .win-btn.close.is-press {
+      background: #bf344d;
+    }
+
+    .preview-shell.is-minimized .window {
+      display: none;
+    }
+
+    .preview-shell.is-closed .window {
+      display: none;
+    }
+
+    .preview-shell.is-maximized {
+      width: min(92vw, 980px);
+    }
+
+    .preview-status {
+      display: none;
+      padding: 12px 16px 14px;
+      color: var(--title-fg);
+      font-size: 13px;
+      background: rgba(255, 255, 255, 0.08);
+      border-top: 1px solid rgba(255, 255, 255, 0.12);
+    }
+
+    .preview-shell.is-minimized .preview-status,
+    .preview-shell.is-closed .preview-status {
+      display: block;
+    }
+
+    .preview-status a {
+      color: #fff;
+      text-decoration: underline;
     }
 
     .window {
@@ -257,6 +320,8 @@
       background: var(--log-bg);
       border-color: var(--log-border);
       color: #fff;
+      overflow-wrap: anywhere;
+      word-break: break-word;
     }
 
     .screen {
@@ -283,6 +348,7 @@
       color: var(--muted);
       font-size: 13px;
       line-height: 1.55;
+      min-height: 40px;
     }
 
     .notice.error {
@@ -303,11 +369,12 @@
       <div class="titlebar">
         <div class="name">FB私聊助手 Pro</div>
         <div class="win-actions">
-          <div class="win-btn"></div>
-          <div class="win-btn"></div>
-          <div class="win-btn close"></div>
+          <button class="win-btn" type="button" data-win-action="minimize" title="最小化">—</button>
+          <button class="win-btn" type="button" data-win-action="maximize" title="最大化">□</button>
+          <button class="win-btn close" type="button" data-win-action="close" title="关闭">✕</button>
         </div>
       </div>
+      <div class="preview-status" id="preview-status"></div>
 
       <div class="window">
         <div class="screen" id="screen-activation">
@@ -328,7 +395,7 @@
               <div class="input" style="width: 360px; height: 40px;">请输入激活码</div>
               <button class="btn primary" style="height: 40px; min-width: 96px;">验证激活</button>
             </div>
-            <div class="notice error">当前账号已到期或登录状态已失效，请重新输入有效激活码后继续使用。</div>
+            <div class="notice error">激活码已失效请重新激活登录使用</div>
           </div>
         </div>
 
@@ -401,14 +468,86 @@ resource_tracker: There appear to be 8 leaked semaphore objects to clean up at s
   <script>
     const tabs = document.querySelectorAll('.tab');
     const screens = document.querySelectorAll('.screen');
+    const shell = document.querySelector('.preview-shell');
+    const statusBar = document.getElementById('preview-status');
+    const windowButtons = document.querySelectorAll('.win-btn');
+    const maximizeBtn = document.querySelector('[data-win-action="maximize"]');
+
+    function setPreviewStatus(message, allowRestore = false) {
+      if (!statusBar) return;
+      if (!message) {
+        statusBar.innerHTML = '';
+        return;
+      }
+      statusBar.innerHTML = allowRestore
+        ? `${message} <a href="#" data-preview-restore="true">点击恢复</a>`
+        : message;
+    }
+
+    function resetWindowShell() {
+      shell.classList.remove('is-minimized', 'is-closed');
+      setPreviewStatus('');
+    }
+
+    function updateMaximizeButton() {
+      if (!maximizeBtn || !shell) return;
+      const isMaximized = shell.classList.contains('is-maximized');
+      maximizeBtn.textContent = isMaximized ? '❐' : '□';
+      maximizeBtn.title = isMaximized ? '还原' : '最大化';
+    }
+
+    windowButtons.forEach((button) => {
+      button.addEventListener('mouseenter', () => button.classList.add('is-hover'));
+      button.addEventListener('mouseleave', () => {
+        button.classList.remove('is-hover', 'is-press');
+      });
+      button.addEventListener('mousedown', () => button.classList.add('is-press'));
+      button.addEventListener('mouseup', () => {
+        button.classList.remove('is-press');
+      });
+      button.addEventListener('click', () => {
+        const action = button.dataset.winAction;
+        if (action === 'minimize') {
+          shell.classList.toggle('is-minimized');
+          shell.classList.remove('is-closed');
+          setPreviewStatus(shell.classList.contains('is-minimized') ? '窗口已最小化。' : '', true);
+          return;
+        }
+        if (action === 'maximize') {
+          resetWindowShell();
+          shell.classList.toggle('is-maximized');
+          updateMaximizeButton();
+          return;
+        }
+        if (action === 'close') {
+          shell.classList.remove('is-minimized');
+          shell.classList.add('is-closed');
+          setPreviewStatus('窗口已关闭。', true);
+        }
+      });
+    });
 
     tabs.forEach((tab) => {
       tab.addEventListener('click', () => {
         const screen = tab.dataset.screen;
         tabs.forEach((item) => item.classList.toggle('active', item === tab));
         screens.forEach((item) => item.classList.toggle('active', item.id === `screen-${screen}`));
+        resetWindowShell();
+        if (shell.classList.contains('is-maximized')) {
+          updateMaximizeButton();
+        }
       });
     });
+
+    document.addEventListener('click', (event) => {
+      const restoreTrigger = event.target.closest('[data-preview-restore="true"]');
+      if (!restoreTrigger) return;
+      event.preventDefault();
+      resetWindowShell();
+      updateMaximizeButton();
+    });
+
+    updateMaximizeButton();
   </script>
 </body>
 </html>

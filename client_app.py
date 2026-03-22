@@ -363,9 +363,20 @@ def _client_can_use_token(client_config, license_data):
 
 
 class ClientApp:
-    WINDOW_WIDTH = 602
-    WINDOW_HEIGHT = 552
-    TITLE_BAR_HEIGHT = 36
+    WINDOW_WIDTH = 640
+    WINDOW_HEIGHT = 560
+    TITLE_BAR_HEIGHT = 38
+    CONTENT_PAD_X = 8
+    CONTENT_PAD_TOP = 8
+    CONTENT_PAD_BOTTOM = 10
+    PANEL_SPACING = 3
+    LOCAL_FIELD_WIDTH = 190
+    API_FIELD_WIDTH = 250
+    INTERVAL_STACK_WIDTH = 150
+    COUNT_FIELD_WIDTH = 46
+    WINDOW_NO_FIELD_WIDTH = 64
+    PARAM_LEFT_GROUP_WIDTH = 250
+    PARAM_RIGHT_GROUP_WIDTH = 332
     SHELL_BG = "#edf4ff"
     WINDOW_BG = "#dbe7f6"
     PANEL_BG = "#eef5ff"
@@ -376,7 +387,7 @@ class ClientApp:
     ACTIVATION_GLOW = "#eef6ff"
     ACTIVATION_LINE = "#d8e8ff"
     ACTIVATION_GRID = "#f2f8ff"
-    TITLE_FONT = ("Microsoft YaHei", 13, "bold")
+    TITLE_FONT = ("Microsoft YaHei", 14, "bold")
     TOOLBAR_FONT = ("Microsoft YaHei", 11, "bold")
     HEADER_FONT = ("Microsoft YaHei", 12, "bold")
     LABEL_FONT = ("Microsoft YaHei", 12, "bold")
@@ -386,7 +397,7 @@ class ClientApp:
     TEXT_FONT = ("Consolas", 10)
     MESSAGE_FONT = ("Consolas", 11)
     NOTICE_FONT = ("Microsoft YaHei", 9)
-    SESSION_NOTICE_TEXT = "当前账号已到期或登录状态已失效，请重新输入有效激活码后继续使用。"
+    SESSION_NOTICE_TEXT = "激活码已失效请重新激活登录使用"
 
     def __init__(self, root: tk.Tk):
         self.root = root
@@ -655,11 +666,11 @@ class ClientApp:
             bg=self.TITLE_BG,
             fg=self.TITLE_FG,
         )
-        title_label.pack(side="left", padx=12)
+        title_label.pack(side="left", padx=10)
         self.title_label = title_label
 
         button_frame = tk.Frame(title_bar, bg=self.TITLE_BG)
-        button_frame.pack(side="right", padx=8, pady=8)
+        button_frame.pack(side="right", padx=10, pady=9)
 
         self.minimize_btn = self._create_window_button(
             button_frame,
@@ -855,8 +866,9 @@ class ClientApp:
         self.verify_btn.grid(row=1, column=1, padx=(12, 0), ipady=4)
         self._register_feedback_button("verify", self.verify_btn, "验证激活", managed=False)
 
-        tip_frame = tk.Frame(body, bg=self.ACTIVATION_BG)
+        tip_frame = tk.Frame(body, bg=self.ACTIVATION_BG, height=40)
         tip_frame.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(12, 0))
+        tip_frame.grid_propagate(False)
         tip_frame.grid_columnconfigure(0, weight=1)
         tip_frame.grid_columnconfigure(1, weight=1)
 
@@ -870,7 +882,7 @@ class ClientApp:
             anchor="w",
             wraplength=380,
         )
-        self.activation_notice_label.grid(row=0, column=0, sticky="w")
+        self.activation_notice_label.grid(row=0, column=0, sticky="nw")
 
     def _build_activation_backdrop(self, host, mode):
         canvas = tk.Canvas(
@@ -958,7 +970,12 @@ class ClientApp:
             highlightthickness=0,
             bd=0,
         )
-        shell.pack(fill="both", expand=True, padx=4, pady=4)
+        shell.pack(
+            fill="both",
+            expand=True,
+            padx=self.CONTENT_PAD_X,
+            pady=(self.CONTENT_PAD_TOP, self.CONTENT_PAD_BOTTOM),
+        )
         shell.pack_propagate(False)
 
         toolbar = tk.Frame(
@@ -966,9 +983,9 @@ class ClientApp:
             bg=self.PANEL_BG,
             highlightthickness=1,
             highlightbackground=self.BORDER_COLOR,
-            height=44,
+            height=46,
         )
-        toolbar.pack(fill="x", padx=6, pady=(4, 2))
+        toolbar.pack(fill="x", padx=0, pady=(0, self.PANEL_SPACING))
         toolbar.pack_propagate(False)
 
         button_row = tk.Frame(toolbar, bg=self.PANEL_BG)
@@ -1008,66 +1025,88 @@ class ClientApp:
             bg=self.PANEL_BG,
             highlightthickness=1,
             highlightbackground=self.BORDER_COLOR,
-            height=88,
+            height=92,
         )
-        param_panel.pack(fill="x", padx=6, pady=(0, 2))
+        param_panel.pack(fill="x", padx=0, pady=(0, self.PANEL_SPACING))
         param_panel.pack_propagate(False)
-        top_row = tk.Frame(param_panel, bg=self.PANEL_BG)
-        top_row.pack(fill="x", padx=10, pady=(8, 4))
-        bottom_row = tk.Frame(param_panel, bg=self.PANEL_BG)
-        bottom_row.pack(fill="x", padx=10, pady=(0, 8))
+        params_grid = tk.Frame(param_panel, bg=self.PANEL_BG)
+        params_grid.pack(fill="both", expand=True, padx=10, pady=(8, 8))
+        params_grid.grid_columnconfigure(0, minsize=self.PARAM_LEFT_GROUP_WIDTH, weight=1)
+        params_grid.grid_columnconfigure(1, minsize=self.PARAM_RIGHT_GROUP_WIDTH, weight=1)
+        params_grid.grid_rowconfigure(0, weight=1)
+        params_grid.grid_rowconfigure(1, weight=1)
 
-        local_group = tk.Frame(top_row, bg=self.PANEL_BG)
-        local_group.pack(side="left")
+        local_group = tk.Frame(params_grid, bg=self.PANEL_BG)
+        local_group.grid(row=0, column=0, sticky="w")
         tk.Label(
-            local_group, text="本地地址", font=self.SECTION_LABEL_FONT, bg=self.PANEL_BG, fg="#24416e"
-        ).pack(side="left", padx=(0, 8))
-        local_field_width = 190
-        local_field = tk.Frame(local_group, bg=self.PANEL_BG, width=local_field_width, height=30)
-        local_field.pack(side="left")
-        local_field.pack_propagate(False)
+            local_group,
+            text="本地地址",
+            font=self.SECTION_LABEL_FONT,
+            bg=self.PANEL_BG,
+            fg="#24416e",
+        ).grid(row=0, column=0, padx=(0, 8), sticky="w")
+        local_field = tk.Frame(local_group, bg=self.PANEL_BG, width=self.LOCAL_FIELD_WIDTH, height=32)
+        local_field.grid(row=0, column=1, sticky="w")
+        local_field.grid_propagate(False)
         self.bit_api_entry = self._create_entry(local_field, self.bit_api, font=("Microsoft YaHei", 11))
         self.bit_api_entry.pack(fill="both", expand=True, ipady=4)
 
-        api_group = tk.Frame(top_row, bg=self.PANEL_BG)
-        api_group.pack(side="right")
+        api_group = tk.Frame(params_grid, bg=self.PANEL_BG)
+        api_group.grid(row=0, column=1, sticky="e")
         tk.Label(
-            api_group, text="浏览器 API", font=self.SECTION_LABEL_FONT, bg=self.PANEL_BG, fg="#24416e"
-        ).pack(side="left", padx=(0, 8))
-        api_field = tk.Frame(api_group, bg=self.PANEL_BG, width=212, height=30)
-        api_field.pack(side="left")
-        api_field.pack_propagate(False)
+            api_group,
+            text="浏览器 API",
+            font=self.SECTION_LABEL_FONT,
+            bg=self.PANEL_BG,
+            fg="#24416e",
+        ).grid(row=0, column=0, padx=(0, 8), sticky="w")
+        api_field = tk.Frame(api_group, bg=self.PANEL_BG, width=self.API_FIELD_WIDTH, height=32)
+        api_field.grid(row=0, column=1, sticky="e")
+        api_field.grid_propagate(False)
         self.api_token_entry = self._create_entry(api_field, self.api_token, font=("Microsoft YaHei", 11))
         self.api_token_entry.pack(fill="both", expand=True, ipady=4)
 
-        freq_group = tk.Frame(bottom_row, bg=self.PANEL_BG)
-        freq_group.pack(side="left")
+        freq_group = tk.Frame(params_grid, bg=self.PANEL_BG)
+        freq_group.grid(row=1, column=0, sticky="w", pady=(9, 0))
         tk.Label(
-            freq_group, text="发送频率", font=self.SECTION_LABEL_FONT, bg=self.PANEL_BG, fg="#24416e"
-        ).pack(side="left", padx=(0, 8))
-        interval_stack = tk.Frame(freq_group, bg=self.PANEL_BG, width=150, height=30)
-        interval_stack.pack(side="left")
+            freq_group,
+            text="发送频率",
+            font=self.SECTION_LABEL_FONT,
+            bg=self.PANEL_BG,
+            fg="#24416e",
+        ).grid(row=0, column=0, padx=(0, 8), sticky="w")
+        interval_stack = tk.Frame(freq_group, bg=self.PANEL_BG, width=self.INTERVAL_STACK_WIDTH, height=32)
+        interval_stack.grid(row=0, column=1, sticky="w")
         interval_stack.grid_propagate(False)
+        interval_stack.grid_columnconfigure(0, minsize=self.INTERVAL_STACK_WIDTH)
         self.min_interval = self._create_entry(
             interval_stack, tk.StringVar(), width=5, justify="center", font=("Microsoft YaHei", 11)
         )
-        self.min_interval.place(x=0, y=0, width=52, height=30)
-        tk.Label(interval_stack, text="—", font=self.LABEL_FONT, bg=self.PANEL_BG, fg="#24416e").place(
-            x=70, y=5, width=14, height=20
-        )
+        self.min_interval.place(x=0, y=0, width=52, height=32)
+        tk.Label(
+            interval_stack,
+            text="—",
+            font=self.LABEL_FONT,
+            bg=self.PANEL_BG,
+            fg="#24416e",
+        ).place(x=70, y=6, width=14, height=20)
         self.max_interval = self._create_entry(
             interval_stack, tk.StringVar(), width=5, justify="center", font=("Microsoft YaHei", 11)
         )
-        self.max_interval.place(x=98, y=0, width=52, height=30)
+        self.max_interval.place(x=98, y=0, width=52, height=32)
 
-        window_group = tk.Frame(bottom_row, bg=self.PANEL_BG)
-        window_group.pack(side="right")
+        window_group = tk.Frame(params_grid, bg=self.PANEL_BG)
+        window_group.grid(row=1, column=1, sticky="e", pady=(9, 0))
         tk.Label(
-            window_group, text="窗口数量", font=self.SECTION_LABEL_FONT, bg=self.PANEL_BG, fg="#24416e"
-        ).pack(side="left", padx=(0, 8))
-        count_field = tk.Frame(window_group, bg=self.PANEL_BG, width=46, height=30)
-        count_field.pack(side="left")
-        count_field.pack_propagate(False)
+            window_group,
+            text="窗口数量",
+            font=self.SECTION_LABEL_FONT,
+            bg=self.PANEL_BG,
+            fg="#24416e",
+        ).grid(row=0, column=0, padx=(0, 8), sticky="w")
+        count_field = tk.Frame(window_group, bg=self.PANEL_BG, width=self.COUNT_FIELD_WIDTH, height=32)
+        count_field.grid(row=0, column=1, sticky="w")
+        count_field.grid_propagate(False)
         self.window_count_entry = self._create_entry(
             count_field,
             self.window_count_text,
@@ -1077,11 +1116,15 @@ class ClientApp:
         )
         self.window_count_entry.pack(fill="both", expand=True, ipady=4)
         tk.Label(
-            window_group, text="窗口号", font=self.SECTION_LABEL_FONT, bg=self.PANEL_BG, fg="#24416e"
-        ).pack(side="left", padx=(12, 8))
-        no_field = tk.Frame(window_group, bg=self.PANEL_BG, width=64, height=30)
-        no_field.pack(side="left")
-        no_field.pack_propagate(False)
+            window_group,
+            text="窗口号",
+            font=self.SECTION_LABEL_FONT,
+            bg=self.PANEL_BG,
+            fg="#24416e",
+        ).grid(row=0, column=2, padx=(12, 8), sticky="w")
+        no_field = tk.Frame(window_group, bg=self.PANEL_BG, width=self.WINDOW_NO_FIELD_WIDTH, height=32)
+        no_field.grid(row=0, column=3, sticky="w")
+        no_field.grid_propagate(False)
         self.window_no_entry = self._create_entry(
             no_field,
             self.window_no_text,
@@ -1094,7 +1137,7 @@ class ClientApp:
             window_group, "单独启动", "#4f7df0", self._trigger_single_run, width=8
         )
         self.single_run_btn.configure(font=("Microsoft YaHei", 11, "bold"), padx=0, pady=2)
-        self.single_run_btn.pack(side="left", padx=(12, 0), ipady=2)
+        self.single_run_btn.grid(row=0, column=4, padx=(12, 0), sticky="w", ipady=2)
         self._register_feedback_button("single", self.single_run_btn, "单独启动", managed=False)
 
         message_panel = tk.Frame(
@@ -1102,9 +1145,9 @@ class ClientApp:
             bg=self.PANEL_BG,
             highlightthickness=1,
             highlightbackground=self.BORDER_COLOR,
-            height=134,
+            height=136,
         )
-        message_panel.pack(fill="x", padx=6, pady=(0, 2))
+        message_panel.pack(fill="x", padx=0, pady=(0, self.PANEL_SPACING))
         message_panel.pack_propagate(False)
         tk.Label(
             message_panel,
@@ -1146,7 +1189,7 @@ class ClientApp:
             highlightbackground=self.BORDER_COLOR,
             bd=0,
         )
-        log_panel.pack(fill="both", expand=True, padx=6, pady=(0, 4))
+        log_panel.pack(fill="both", expand=True, padx=0, pady=0)
         log_header = tk.Frame(log_panel, bg=self.PANEL_BG)
         log_header.pack(fill="x", padx=10, pady=(3, 3))
         tk.Label(log_header, text="实时日志", font=self.SECTION_TITLE_FONT, bg=self.PANEL_BG, fg="#24416e").pack(side="left")
@@ -1174,7 +1217,7 @@ class ClientApp:
             relief="flat",
             bd=0,
             highlightthickness=0,
-            wrap="word",
+            wrap="char",
             spacing1=1,
             spacing3=1,
             padx=10,
