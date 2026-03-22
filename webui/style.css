@@ -879,6 +879,14 @@ button.ghost {
   max-width: 55px;
 }
 
+.card.sub-device-info-card[data-page="device-info"] .data-table th:nth-child(6) {
+  white-space: normal;
+  line-height: 1.15;
+  word-break: break-all;
+  padding-left: 4px;
+  padding-right: 4px;
+}
+
 .card.sub-device-info-card[data-page="device-info"] .data-table th:nth-child(7),
 .card.sub-device-info-card[data-page="device-info"] .data-table td:nth-child(7) {
   width: 170px;
