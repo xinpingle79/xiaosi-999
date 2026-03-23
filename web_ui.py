@@ -3071,6 +3071,7 @@ def handle_agent_log(payload):
         group_id = str(delivery_event.get("group_id") or "").strip()
         profile_url = str(delivery_event.get("profile_url") or "").strip()
         account_id = str(delivery_event.get("account_id") or (_agent or {}).get("owner") or "").strip()
+        scope_id = str(delivery_event.get("scope_id") or "").strip() or None
         user_id = str(delivery_event.get("user_id") or "").strip() or None
         success = bool(delivery_event.get("success"))
         if group_id and profile_url and account_id:
@@ -3083,6 +3084,7 @@ def handle_agent_log(payload):
                     success=success,
                     user_id=user_id,
                     machine_id=machine_id,
+                    scope_id=scope_id,
                 )
             finally:
                 db.close()

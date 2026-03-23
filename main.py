@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import os
 import random
 import re
@@ -112,7 +113,17 @@ def _normalize_message_templates(templates):
     ]
 
 
-def _sync_delivery_event(config, group_id, profile_url, account_id, success, user_id=None, machine_id="", reason=""):
+def _sync_delivery_event(
+    config,
+    group_id,
+    profile_url,
+    account_id,
+    success,
+    user_id=None,
+    machine_id="",
+    reason="",
+    scope_id=None,
+):
     server_url = str(config.get("server_url") or "").strip().rstrip("/")
     agent_token = str(config.get("agent_token") or "").strip()
     resolved_machine_id = str(machine_id or config.get("machine_id") or "").strip()
@@ -120,6 +131,7 @@ def _sync_delivery_event(config, group_id, profile_url, account_id, success, use
     normalized_profile_url = str(profile_url or "").strip()
     normalized_account_id = str(account_id or "").strip()
     normalized_reason = str(reason or "").strip()
+    normalized_scope_id = str(scope_id or "").strip()
     if not (
         server_url
         and agent_token
@@ -143,6 +155,7 @@ def _sync_delivery_event(config, group_id, profile_url, account_id, success, use
                     "success": bool(success),
                     "reason": normalized_reason,
                     "machine_id": resolved_machine_id,
+                    "scope_id": normalized_scope_id,
                 },
             },
             timeout=5,
@@ -153,7 +166,17 @@ def _sync_delivery_event(config, group_id, profile_url, account_id, success, use
         return False
 
 
-def _record_delivery_result(db, config, group_id, target, account_id, machine_id, success, reason=""):
+def _record_delivery_result(
+    db,
+    config,
+    group_id,
+    target,
+    account_id,
+    machine_id,
+    success,
+    reason="",
+    scope_id=None,
+):
     profile_url = str(target.get("profile_url") or target.get("group_user_url") or "").strip()
     if not profile_url:
         return
@@ -165,6 +188,7 @@ def _record_delivery_result(db, config, group_id, target, account_id, machine_id
         user_id=user_id,
         machine_id=machine_id,
         success=success,
+        scope_id=scope_id,
     )
     _sync_delivery_event(
         config=config,
@@ -175,6 +199,7 @@ def _record_delivery_result(db, config, group_id, target, account_id, machine_id
         user_id=user_id,
         machine_id=machine_id,
         reason=reason,
+        scope_id=scope_id,
     )
 
 
@@ -278,6 +303,12 @@ def run_bitbrowser_batch(config, msgs, browser_settings):
     total_sent = 0
     finished_groups = 0
     profile_index = build_profile_index(profiles)
+    partition_total = len(profiles)
+    profile_partition_index = {
+        str(profile.get("id") or "").strip(): index
+        for index, profile in enumerate(profiles)
+        if str(profile.get("id") or "").strip()
+    }
 
     with ThreadPoolExecutor(
         max_workers=max(1, len(profiles)),
@@ -286,12 +317,19 @@ def run_bitbrowser_batch(config, msgs, browser_settings):
         future_map = {}
 
         def submit_profile(profile):
+            profile_id = str(profile.get("id") or "").strip()
+            partition_index = profile_partition_index.get(profile_id, 0)
             future = executor.submit(
                 run_single_session,
                 config,
                 msgs,
                 browser_settings,
                 profile,
+                None,
+                {
+                    "index": partition_index,
+                    "count": partition_total,
+                },
             )
             future_map[future] = profile
 
@@ -358,14 +396,27 @@ def run_single_bitbrowser_window(config, msgs, browser_settings, window_token):
         return
 
     log.info(f"[{format_account_label(profile)}] 已收到单独启动请求。")
-    summary = run_single_session(config, msgs, browser_settings, profile, window_token=window_token)
+    summary = run_single_session(
+        config,
+        msgs,
+        browser_settings,
+        profile,
+        window_token=window_token,
+    )
     log.info(
         f"[{summary['account_id']}] 单独窗口任务结束，"
         f"完成 {summary['finished_groups']} 个小组，成功发送 {summary['messages_sent']} 条消息。"
     )
 
 
-def run_single_session(config, msgs, browser_settings, profile=None, window_token=None):
+def run_single_session(
+    config,
+    msgs,
+    browser_settings,
+    profile=None,
+    window_token=None,
+    window_partition=None,
+):
     db = Database()
     task_cfg = config["task_settings"]
     bm = BrowserManager(browser_settings)
@@ -402,6 +453,13 @@ def run_single_session(config, msgs, browser_settings, profile=None, window_toke
                 stats_account_id = owner_username or profile_account_id
                 account_id = stats_account_id
                 alert_account_id = label or profile_account_id
+                scope_id = resolve_window_scope_id(
+                    profile=profile,
+                    browser_id=browser_id,
+                    window_token=window_token_label,
+                    account_id=profile_account_id,
+                    machine_id=machine_id,
+                )
                 scraper = Scraper(page, window_label=alert_account_id)
                 sender = Messager(page, task_cfg, window_label=alert_account_id)
                 max_messages = normalize_message_limit(task_cfg.get("max_messages_per_account", 0))
@@ -456,12 +514,42 @@ def run_single_session(config, msgs, browser_settings, profile=None, window_toke
                         "finished_groups": 0,
                         "reason": "no_groups",
                     }
+                partition_count = int((window_partition or {}).get("count") or 0)
+                partition_index = int((window_partition or {}).get("index") or 0)
+                if partition_count > 1:
+                    total_group_count = len(group_urls)
+                    group_urls = partition_group_urls(
+                        group_urls,
+                        partition_index,
+                        partition_count,
+                    )
+                    if not group_urls:
+                        log.info(
+                            f"[{alert_account_id}] 小组分片已启用：窗口 {partition_index + 1}/{partition_count}，"
+                            "当前窗口本轮未分配到小组。"
+                        )
+                        return {
+                            "account_id": alert_account_id,
+                            "messages_sent": 0,
+                            "finished_groups": 0,
+                            "reason": "no_partition_groups",
+                        }
+                    log.info(
+                        f"[{alert_account_id}] 小组分片已启用：窗口 {partition_index + 1}/{partition_count}，"
+                        f"分配 {len(group_urls)}/{total_group_count} 个小组。"
+                    )
 
                 total_sent = 0
                 finished_groups = 0
                 final_reason = "completed"
                 for idx, group_url in enumerate(group_urls, start=1):
-                    cont, _ = wait_if_paused(task_cfg)
+                    cont, _ = wait_if_paused(
+                        task_cfg,
+                        db=db,
+                        group_id=None,
+                        account_id=account_id,
+                        scope_id=scope_id,
+                    )
                     if not cont:
                         log.warning(f"[{alert_account_id}] 检测到停止标记，任务提前结束。")
                         final_reason = "stopped"
@@ -483,7 +571,7 @@ def run_single_session(config, msgs, browser_settings, profile=None, window_toke
                         log.warning(f"[{alert_account_id}] 进入小组成员页失败，跳过当前小组。")
                         continue
                     group_id = scraper.get_current_group_id()
-                    if group_id and db.is_group_done(group_id, account_id=account_id):
+                    if group_id and db.is_group_done(group_id, account_id=account_id, scope_id=scope_id):
                         log.info(f"[{alert_account_id}] 当前小组已标记完成，跳过: {group_url}")
                         continue
                     log.info(f"[{alert_account_id}] 开始处理第 {idx}/{len(group_urls)} 个小组: {group_url}")
@@ -498,6 +586,7 @@ def run_single_session(config, msgs, browser_settings, profile=None, window_toke
                         db=db,
                         config=config,
                         account_id=account_id,
+                        scope_id=scope_id,
                         machine_id=machine_id,
                         owner_username=owner_username,
                         probe_templates=probe_templates,
@@ -566,7 +655,7 @@ def run_single_session(config, msgs, browser_settings, profile=None, window_toke
                         break
                     if result["reason"] == "group_exhausted":
                         log.info(f"[{alert_account_id}] 当前小组已扫描到底部且没有新用户，继续下一个小组。")
-                        db.mark_group_done(group_id, account_id=alert_account_id)
+                        db.mark_group_done(group_id, account_id=account_id, scope_id=scope_id)
 
                 log.info(
                     f"[{alert_account_id}] 当前窗口处理结束，共完成 {finished_groups} 个小组，"
@@ -677,6 +766,38 @@ def resolve_window_token(profile, provided=None):
     return ""
 
 
+def resolve_window_scope_id(profile=None, browser_id=None, window_token=None, account_id=None, machine_id=None):
+    candidates = [
+        str(browser_id or "").strip(),
+        str((profile or {}).get("id") or "").strip(),
+        str(window_token or "").strip(),
+        str(account_id or "").strip(),
+        str(machine_id or "").strip(),
+    ]
+    for value in candidates:
+        if value:
+            return value
+    return "global"
+
+
+def stable_partition_slot(value, partition_count):
+    normalized = str(value or "").strip()
+    if partition_count <= 1 or not normalized:
+        return 0
+    digest = hashlib.sha1(normalized.encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], "big") % partition_count
+
+
+def partition_group_urls(group_urls, partition_index, partition_count):
+    if partition_count <= 1:
+        return list(group_urls or [])
+    return [
+        url
+        for url in (group_urls or [])
+        if stable_partition_slot(url, partition_count) == partition_index
+    ]
+
+
 def collect_target_groups(scraper, task_cfg):
     current_group_root = scraper.get_current_group_root_url() if scraper.is_group_members_page() else None
     group_urls = scraper.collect_joined_group_urls(
@@ -730,6 +851,7 @@ def process_current_group(
     db,
     config,
     account_id,
+    scope_id,
     machine_id,
     owner_username,
     probe_templates,
@@ -749,7 +871,7 @@ def process_current_group(
     )
     if not newcomers_found:
         return {"messages_sent": 0, "reason": "newcomers_section_not_found"}
-    cursor = db.get_cursor(group_id, account_id=account_id)
+    cursor = db.get_cursor(group_id, account_id=account_id, scope_id=scope_id)
     max_scroll_rounds = task_cfg.get("scroll_times", 60)
     idle_scroll_limit = task_cfg.get("idle_scroll_limit", 3)
     cursor_search_rounds = task_cfg.get("resume_search_times", 20)
@@ -765,6 +887,7 @@ def process_current_group(
             db=db,
             config=config,
             account_id=account_id,
+            scope_id=scope_id,
             machine_id=machine_id,
             group_id=group_id,
             owner_username=owner_username,
@@ -799,6 +922,7 @@ def process_current_group(
                 db=db,
                 config=config,
                 account_id=account_id,
+                scope_id=scope_id,
                 machine_id=machine_id,
                 group_id=group_id,
                 owner_username=owner_username,
@@ -826,6 +950,7 @@ def process_current_group(
         db=db,
         config=config,
         account_id=account_id,
+        scope_id=scope_id,
         machine_id=machine_id,
         group_id=group_id,
         owner_username=owner_username,
@@ -848,6 +973,7 @@ def process_member_targets(
     db,
     config,
     account_id,
+    scope_id,
     machine_id,
     group_id,
     owner_username,
@@ -902,6 +1028,7 @@ def process_member_targets(
             db=db,
             group_id=group_id,
             account_id=account_id,
+            scope_id=scope_id,
             anchor=last_anchor,
         )
         if not cont:
@@ -1132,6 +1259,7 @@ def process_member_targets(
             db=db,
             group_id=group_id,
             account_id=account_id,
+            scope_id=scope_id,
             anchor=last_anchor,
         )
         if not cont:
@@ -1159,9 +1287,10 @@ def process_member_targets(
             account_id=account_id,
             profile_url=profile_url,
             user_id=target.get("user_id"),
+            scope_id=scope_id,
         ):
             log.info(f"已发过，跳过: {target['name']} ({profile_url})")
-            db.save_cursor(group_id, target, account_id=account_id)
+            db.save_cursor(group_id, target, account_id=account_id, scope_id=scope_id)
             ui_settle_sleep(task_cfg)
             continue
 
@@ -1170,9 +1299,10 @@ def process_member_targets(
             profile_url=profile_url,
             account_id=account_id,
             user_id=target.get("user_id"),
+            scope_id=scope_id,
         ):
             log.info(f"其他窗口正在处理，跳过: {target['name']} ({profile_url})")
-            db.save_cursor(group_id, target, account_id=account_id)
+            db.save_cursor(group_id, target, account_id=account_id, scope_id=scope_id)
             ui_settle_sleep(task_cfg)
             continue
 
@@ -1198,6 +1328,7 @@ def process_member_targets(
                     account_id=account_id,
                     profile_url=profile_url,
                     user_id=target.get("user_id"),
+                    scope_id=scope_id,
                 )
 
         if result["status"] == "sent":
@@ -1209,9 +1340,10 @@ def process_member_targets(
                 account_id=account_id,
                 machine_id=machine_id,
                 success=True,
+                scope_id=scope_id,
             )
             messages_sent += 1
-            db.save_cursor(group_id, target, account_id=account_id)
+            db.save_cursor(group_id, target, account_id=account_id, scope_id=scope_id)
             if reached_message_limit(message_budget, messages_sent):
                 return {
                     "found_cursor": found_cursor,
@@ -1238,7 +1370,7 @@ def process_member_targets(
         elif result["status"] == "skip":
             log.info(f"跳过成员 {target['name']}: {result['reason']}")
             if should_advance_cursor_for_skip(result.get("reason")):
-                db.save_cursor(group_id, target, account_id=account_id)
+                db.save_cursor(group_id, target, account_id=account_id, scope_id=scope_id)
                 log.info(f"断点推进：成员 {target['name']} 属于永久跳过，已更新 cursor。")
             else:
                 log.warning(f"断点保留：成员 {target['name']} 属于暂时性失败，当前不推进 cursor。")
@@ -1253,6 +1385,7 @@ def process_member_targets(
                 machine_id=machine_id,
                 success=False,
                 reason=result.get("reason") or "blocked",
+                scope_id=scope_id,
             )
             reason = result.get("reason") or "account_restricted"
             window_block_reasons = {
@@ -1303,6 +1436,7 @@ def process_member_targets(
                 machine_id=machine_id,
                 success=False,
                 reason=result.get("reason") or "stranger_message_limit_reached",
+                scope_id=scope_id,
             )
             return {
                 "found_cursor": found_cursor,
@@ -1320,6 +1454,7 @@ def process_member_targets(
                 machine_id=machine_id,
                 success=False,
                 reason=result.get("reason") or "error",
+                scope_id=scope_id,
             )
             log.warning(
                 f"处理成员失败，保留原断点等待下次重试: {target['name']} - {result['reason']}"
@@ -1507,13 +1642,13 @@ def should_pause(task_cfg):
     pause_flag_file = (os.environ.get(ENV_PAUSE_FLAG) or "").strip()
     return bool(pause_flag_file and os.path.exists(pause_flag_file))
 
-def wait_if_paused(task_cfg, db=None, group_id=None, account_id=None, anchor=None):
+def wait_if_paused(task_cfg, db=None, group_id=None, account_id=None, scope_id=None, anchor=None):
     if not should_pause(task_cfg):
         return True, False
     log.info("⏸ 已暂停，等待继续...")
     if db and group_id and anchor:
         try:
-            db.save_cursor(group_id, anchor, account_id=account_id)
+            db.save_cursor(group_id, anchor, account_id=account_id, scope_id=scope_id)
         except Exception:
             pass
     while should_pause(task_cfg):
