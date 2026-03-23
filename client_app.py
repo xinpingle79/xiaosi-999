@@ -481,8 +481,10 @@ class ClientApp:
         self.root.resizable(False, False)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.bind("<Map>", self._handle_window_map)
+        self.root.bind_all("<ButtonPress-1>", self._maybe_start_window_drag, add="+")
         self.root.bind_all("<B1-Motion>", self._drag_window, add="+")
         self.root.bind_all("<ButtonRelease-1>", self._stop_window_drag, add="+")
+        self.root.bind_all("<Double-Button-1>", self._maybe_toggle_maximize, add="+")
 
         self.client_config = load_client_config()
         self.license_data = load_license()
@@ -926,11 +928,6 @@ class ClientApp:
         )
         self.close_btn.pack(side="left")
 
-        for widget in (title_bar, title_label):
-            widget.bind("<ButtonPress-1>", self._start_window_drag)
-            widget.bind("<B1-Motion>", self._drag_window)
-            widget.bind("<Double-Button-1>", lambda _event: self._toggle_maximize())
-
     def _create_window_button(self, parent, text, command, bg="#5f86b8", activebg="#4f74a5", pressbg=None):
         textvariable = text if isinstance(text, tk.StringVar) else None
         btn = tk.Button(
@@ -979,6 +976,43 @@ class ClientApp:
             and 0 <= event.y <= button.winfo_height()
         )
         self._set_window_button_visual(button, "hover" if inside else "normal")
+
+    def _widget_is_descendant(self, widget, ancestor):
+        current = widget
+        while current is not None:
+            if current is ancestor:
+                return True
+            current = getattr(current, "master", None)
+        return False
+
+    def _window_control_buttons(self):
+        return tuple(
+            button
+            for button in (self.minimize_btn, self.maximize_btn, self.close_btn)
+            if button is not None
+        )
+
+    def _is_title_bar_drag_target(self, widget):
+        if widget is None or self.title_bar is None:
+            return False
+        if not self._widget_is_descendant(widget, self.title_bar):
+            return False
+        for button in self._window_control_buttons():
+            if widget is button or self._widget_is_descendant(widget, button):
+                return False
+        return True
+
+    def _maybe_start_window_drag(self, event):
+        widget = getattr(event, "widget", None)
+        if not self._is_title_bar_drag_target(widget):
+            return
+        self._start_window_drag(event)
+
+    def _maybe_toggle_maximize(self, event):
+        widget = getattr(event, "widget", None)
+        if not self._is_title_bar_drag_target(widget):
+            return
+        self._toggle_maximize()
 
     def _start_window_drag(self, event):
         if self._is_maximized:
