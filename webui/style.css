@@ -461,7 +461,8 @@ button:disabled {
 .stat-grid {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: 10px;
+  gap: 12px;
+  align-items: stretch;
 }
 
 .stat-grid-admin {
@@ -476,18 +477,36 @@ button:disabled {
   background: #fff;
   box-shadow: 0 4px 14px rgba(18, 38, 63, 0.05);
   text-align: center;
+  min-height: 138px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
 }
 
 .stat-title {
   font-size: 14px;
   color: #5a6b82;
   margin-bottom: 8px;
+  width: 100%;
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1.4;
+  text-align: center;
 }
 
 .stat-value {
   font-size: 28px;
   font-weight: 700;
   color: #1f334f;
+  width: 100%;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1.2;
   margin-bottom: 10px;
 }
 
@@ -497,6 +516,11 @@ button:disabled {
   font-size: 12px;
   color: #6c7b91;
   justify-content: center;
+  align-items: center;
+  width: 100%;
+  min-height: 32px;
+  flex-wrap: wrap;
+  margin-top: auto;
 }
 
 .stat-meta span {
@@ -510,12 +534,20 @@ button:disabled {
   padding-bottom: 20px;
 }
 
+.chart-card .card-header {
+  align-items: flex-start;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
 .chart-legend {
   display: flex;
   align-items: center;
   gap: 12px;
   font-size: 12px;
   color: #66758c;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .chart-legend .dot {
