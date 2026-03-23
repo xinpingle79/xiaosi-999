@@ -1609,8 +1609,6 @@ def should_advance_cursor_for_skip(reason):
         "follow_only",
         "friend_required",
         "invite_only",
-        "profile_message_unavailable",
-        "message_button_not_found",
     }
     return str(reason or "").strip() in permanent_reasons
 

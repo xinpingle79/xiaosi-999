@@ -45,11 +45,97 @@ class Messager:
         'div[aria-label="發送訊息"]',
         'div[aria-label="發消息"]',
         'div[aria-label="Message"]',
+        'div[aria-label="Send message"]',
+        'div[aria-label="ส่งข้อความ"]',
+        'div[aria-label="Nhắn tin"]',
+        'div[aria-label="Gửi tin nhắn"]',
+        'div[aria-label="Enviar mensaje"]',
+        'div[aria-label="Enviar mensagem"]',
+        'div[aria-label="Envoyer un message"]',
+        'div[aria-label="Nachricht senden"]',
+        'div[aria-label="Invia messaggio"]',
+        'div[aria-label="Kirim pesan"]',
+        'div[aria-label="Hantar mesej"]',
+        'div[aria-label="Mesaj gönder"]',
+        'div[aria-label="Отправить сообщение"]',
+        'div[aria-label="Wyślij wiadomość"]',
+        'div[aria-label="메시지 보내기"]',
+        'div[aria-label="メッセージを送信"]',
+        'div[aria-label="إرسال رسالة"]',
+        'div[aria-label="বার্তা পাঠান"]',
+        'div[aria-label="मैसेज भेजें"]',
+        'button[aria-label="发消息"]',
+        'button[aria-label="发送消息"]',
+        'button[aria-label="發送訊息"]',
+        'button[aria-label="發消息"]',
+        'button[aria-label="Message"]',
+        'button[aria-label="Send message"]',
+        'button[aria-label="ส่งข้อความ"]',
+        'button[aria-label="Nhắn tin"]',
+        'button[aria-label="Gửi tin nhắn"]',
+        'button[aria-label="Enviar mensaje"]',
+        'button[aria-label="Enviar mensagem"]',
+        'button[aria-label="Envoyer un message"]',
+        'button[aria-label="Nachricht senden"]',
+        'button[aria-label="Invia messaggio"]',
+        'button[aria-label="Kirim pesan"]',
+        'button[aria-label="Hantar mesej"]',
+        'button[aria-label="Mesaj gönder"]',
+        'button[aria-label="Отправить сообщение"]',
+        'button[aria-label="Wyślij wiadomość"]',
+        'button[aria-label="메시지 보내기"]',
+        'button[aria-label="メッセージを送信"]',
+        'button[aria-label="إرسال رسالة"]',
+        'button[aria-label="বার্তা পাঠান"]',
+        'button[aria-label="मैसेज भेजें"]',
         'div[role="button"]:has-text("发消息")',
         'div[role="button"]:has-text("发送消息")',
         'div[role="button"]:has-text("發送訊息")',
         'div[role="button"]:has-text("發消息")',
         'div[role="button"]:has-text("Message")',
+        'div[role="button"]:has-text("Send message")',
+        'div[role="button"]:has-text("ส่งข้อความ")',
+        'div[role="button"]:has-text("Nhắn tin")',
+        'div[role="button"]:has-text("Gửi tin nhắn")',
+        'div[role="button"]:has-text("Enviar mensaje")',
+        'div[role="button"]:has-text("Enviar mensagem")',
+        'div[role="button"]:has-text("Envoyer un message")',
+        'div[role="button"]:has-text("Nachricht senden")',
+        'div[role="button"]:has-text("Invia messaggio")',
+        'div[role="button"]:has-text("Kirim pesan")',
+        'div[role="button"]:has-text("Hantar mesej")',
+        'div[role="button"]:has-text("Mesaj gönder")',
+        'div[role="button"]:has-text("Отправить сообщение")',
+        'div[role="button"]:has-text("Wyślij wiadomość")',
+        'div[role="button"]:has-text("메시지 보내기")',
+        'div[role="button"]:has-text("メッセージを送信")',
+        'div[role="button"]:has-text("إرسال رسالة")',
+        'div[role="button"]:has-text("বার্তা পাঠান")',
+        'div[role="button"]:has-text("मैसेज भेजें")',
+        'button:has-text("发消息")',
+        'button:has-text("发送消息")',
+        'button:has-text("發送訊息")',
+        'button:has-text("發消息")',
+        'button:has-text("Message")',
+        'button:has-text("Send message")',
+        'button:has-text("ส่งข้อความ")',
+        'button:has-text("Nhắn tin")',
+        'button:has-text("Gửi tin nhắn")',
+        'button:has-text("Enviar mensaje")',
+        'button:has-text("Enviar mensagem")',
+        'button:has-text("Envoyer un message")',
+        'button:has-text("Nachricht senden")',
+        'button:has-text("Invia messaggio")',
+        'button:has-text("Kirim pesan")',
+        'button:has-text("Hantar mesej")',
+        'button:has-text("Mesaj gönder")',
+        'button:has-text("Отправить сообщение")',
+        'button:has-text("Wyślij wiadomość")',
+        'button:has-text("메시지 보내기")',
+        'button:has-text("メッセージを送信")',
+        'button:has-text("إرسال رسالة")',
+        'button:has-text("বার্তা পাঠান")',
+        'button:has-text("मैसेज भेजें")',
     ]
     MEMBER_CARD_MESSAGE_TEXTS = [
         "发消息",
@@ -58,18 +144,23 @@ class Messager:
         "發消息",
         "Message",
         "Send message",
+        "Send a message",
         "Send Message",
         "Enviar mensaje",
+        "Enviar un mensaje",
         "Mensaje",
         "Enviar mensagem",
+        "Enviar uma mensagem",
         "Mensagem",
         "Envoyer un message",
+        "Envoyer message",
         "Message",
         "Nachricht senden",
         "Nachricht",
         "Invia messaggio",
         "Messaggio",
         "ส่งข้อความ",
+        "ข้อความ",
         "Nhắn tin",
         "Gửi tin nhắn",
         "Kirim pesan",
@@ -84,6 +175,27 @@ class Messager:
         "إرسال رسالة",
         "বার্তা পাঠান",
         "मैसेज भेजें",
+    ]
+    MEMBER_CARD_MESSAGE_HINT_KEYWORDS = [
+        "message",
+        "mensaje",
+        "mensagem",
+        "messaggio",
+        "nachricht",
+        "ส่งข้อความ",
+        "ข้อความ",
+        "nhắn tin",
+        "tin nhắn",
+        "pesan",
+        "mesej",
+        "mesaj",
+        "сообщение",
+        "wiadomość",
+        "메시지",
+        "メッセージ",
+        "رسالة",
+        "বার্তা",
+        "मैसेज",
     ]
     MESSAGE_EDITOR_SELECTORS = [
         'div[role="textbox"][aria-label="发消息"]',
@@ -1101,8 +1213,6 @@ class Messager:
             return "friend_required"
         if any(token in normalized for token in self.INVITE_TEXTS):
             return "invite_only"
-        if hover_card is not None:
-            return "profile_message_unavailable"
         return None
 
     def _extract_action_texts_from_scope(self, scope):
@@ -1112,7 +1222,7 @@ class Messager:
                     const normalize = (value) => (value || '').replace(/\\s+/g, ' ').trim();
                     const values = [];
                     const seen = new Set();
-                    for (const el of Array.from(node.querySelectorAll('button, a, div[role="button"], [aria-label]'))) {
+                    for (const el of Array.from(node.querySelectorAll('button, a, [role="button"], [aria-label]'))) {
                         if (el.offsetParent === null) continue;
                         const text = normalize(el.innerText);
                         const aria = normalize(el.getAttribute && el.getAttribute('aria-label'));
@@ -1144,7 +1254,7 @@ class Messager:
                     const values = [];
                     const seen = new Set();
                     for (let depth = 0; depth < 4 && root; depth += 1) {
-                        for (const el of Array.from(root.querySelectorAll('button, a, div[role="button"], [aria-label]'))) {
+                        for (const el of Array.from(root.querySelectorAll('button, a, [role="button"], [aria-label]'))) {
                             if (el === node || node.contains(el) || el.offsetParent === null) continue;
                             const box = el.getBoundingClientRect();
                             if (!box.width || !box.height) continue;
@@ -1826,9 +1936,9 @@ class Messager:
             }
 
         return {
-            "status": "skip",
+            "status": "error",
             "reason": "message_button_not_found",
-            "log": f"{self._prefix()}当前成员卡片没有可用的发消息按钮，跳过: {name}",
+            "log": f"{self._prefix()}当前成员卡片未识别到可用的发消息按钮，保留断点待重试: {name}",
         }
 
     def _close_visible_chat_windows(self):
@@ -2224,7 +2334,7 @@ class Messager:
                 self._matches_any_text(normalized_actions, self.MEMBER_CARD_MESSAGE_TEXTS)
                 or any(
                     keyword in normalized_actions.lower()
-                    for keyword in ["message", "mensaje", "mensagem", "messaggio"]
+                    for keyword in self.MEMBER_CARD_MESSAGE_HINT_KEYWORDS
                 )
             )
             if has_gate_action and not has_message_action:
