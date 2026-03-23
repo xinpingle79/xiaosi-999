@@ -299,7 +299,9 @@ def run_bitbrowser_batch(config, msgs, browser_settings):
         log.error("未获取到任何可用的比特浏览器窗口，任务结束。")
         return
 
-    log.info(f"已自动识别 {len(profiles)} 个比特浏览器窗口，将并发启动并执行。")
+    log.info(
+        f"已自动识别 {len(profiles)} 个比特浏览器窗口，将顺序接入：前一窗口进入小组成员页后再放行下一窗口，并发执行。"
+    )
     total_sent = 0
     finished_groups = 0
     profile_index = build_profile_index(profiles)
@@ -316,7 +318,7 @@ def run_bitbrowser_batch(config, msgs, browser_settings):
     ) as executor:
         future_map = {}
 
-        def submit_profile(profile):
+        def submit_profile(profile, startup_ready_event=None):
             profile_id = str(profile.get("id") or "").strip()
             partition_index = profile_partition_index.get(profile_id, 0)
             future = executor.submit(
@@ -330,11 +332,17 @@ def run_bitbrowser_batch(config, msgs, browser_settings):
                     "index": partition_index,
                     "count": partition_total,
                 },
+                startup_ready_event,
             )
             future_map[future] = profile
 
+        previous_startup_ready_event = None
         for profile in profiles:
-            submit_profile(profile)
+            if previous_startup_ready_event is not None:
+                previous_startup_ready_event.wait()
+            current_startup_ready_event = threading.Event()
+            submit_profile(profile, startup_ready_event=current_startup_ready_event)
+            previous_startup_ready_event = current_startup_ready_event
 
         while future_map:
             done, _ = wait(
@@ -416,6 +424,7 @@ def run_single_session(
     profile=None,
     window_token=None,
     window_partition=None,
+    startup_ready_event=None,
 ):
     db = Database()
     task_cfg = config["task_settings"]
@@ -433,6 +442,13 @@ def run_single_session(
     formal_templates = template_resolution["templates"]
     template_source = template_resolution["template_source"]
     template_stats = template_resolution["stats"]
+    startup_gate_released = False
+
+    def release_startup_gate():
+        nonlocal startup_gate_released
+        if startup_ready_event and not startup_gate_released:
+            startup_ready_event.set()
+            startup_gate_released = True
 
     try:
         with sync_playwright() as p:
@@ -440,6 +456,7 @@ def run_single_session(
                 browser_id = profile.get("id") if profile else None
                 session = bm.open_for_browser(p, browser_id=browser_id)
                 if not session:
+                    release_startup_gate()
                     log.error(f"[{label or '默认窗口'}] 连接浏览器失败，跳过当前窗口。")
                     return {
                         "account_id": label or "unknown",
@@ -484,6 +501,7 @@ def run_single_session(
                 )
 
                 if owner_username and db.is_account_disabled(owner_username):
+                    release_startup_gate()
                     log.warning(f"[{alert_account_id}] 当前账号已禁用，停止任务。")
                     return {
                         "account_id": alert_account_id,
@@ -493,6 +511,7 @@ def run_single_session(
                     }
 
                 if not formal_templates:
+                    release_startup_gate()
                     log.error(f"[{alert_account_id}] 正式发送文案为空，当前窗口无法启动。")
                     return {
                         "account_id": alert_account_id,
@@ -507,6 +526,7 @@ def run_single_session(
 
                 group_urls = collect_target_groups(scraper, task_cfg)
                 if not group_urls:
+                    release_startup_gate()
                     log.error(f"[{alert_account_id}] 未能收集到任何已加入小组，流程结束。")
                     return {
                         "account_id": alert_account_id,
@@ -524,6 +544,7 @@ def run_single_session(
                         partition_count,
                     )
                     if not group_urls:
+                        release_startup_gate()
                         log.info(
                             f"[{alert_account_id}] 小组分片已启用：窗口 {partition_index + 1}/{partition_count}，"
                             "当前窗口本轮未分配到小组。"
@@ -570,6 +591,7 @@ def run_single_session(
                     if not scraper.open_group_members_page(group_url):
                         log.warning(f"[{alert_account_id}] 进入小组成员页失败，跳过当前小组。")
                         continue
+                    release_startup_gate()
                     group_id = scraper.get_current_group_id()
                     if group_id and db.is_group_done(group_id, account_id=account_id, scope_id=scope_id):
                         log.info(f"[{alert_account_id}] 当前小组已标记完成，跳过: {group_url}")
@@ -668,6 +690,7 @@ def run_single_session(
                     "reason": final_reason,
                 }
             finally:
+                release_startup_gate()
                 bm.close(session)
     finally:
         db.close()
