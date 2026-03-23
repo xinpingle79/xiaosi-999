@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 import requests
 import tkinter as tk
 import yaml
+from tkinter import font as tkfont
 from tkinter import messagebox, ttk
 
 APP_NAME = "小四客户端"
@@ -449,6 +450,7 @@ def _client_can_use_token(client_config, license_data):
 class ClientApp:
     WINDOW_WIDTH = 680
     WINDOW_HEIGHT = 560
+    WINDOWS_APP_ID = "FB.PrivateChatHelper.Pro"
     TITLE_BAR_HEIGHT = 38
     CONTENT_PAD_X = 8
     CONTENT_PAD_TOP = 8
@@ -494,6 +496,7 @@ class ClientApp:
 
     def __init__(self, root: tk.Tk):
         self.root = root
+        self._sync_layout_metrics()
         self.root.title("FB私聊助手 Pro")
         self.root.configure(bg=self.WINDOW_BG)
         self.root.overrideredirect(True)
@@ -526,6 +529,7 @@ class ClientApp:
         self._action_button_styles = {}
         self._action_lock_until = {}
         self._taskbar_style_ready = False
+        self._taskbar_shell_refresh_pending = False
         self._button_state_snapshot = {
             "agent_online": False,
             "task_running": False,
@@ -718,9 +722,84 @@ class ClientApp:
         pos_y = max((screen_h - height) // 2, 0)
         return f"{width}x{height}+{pos_x}+{pos_y}"
 
+    def _measure_text_width(self, font_def, text, extra=0):
+        try:
+            font = tkfont.Font(root=self.root, font=font_def)
+            return font.measure(str(text or "")) + extra
+        except Exception:
+            return (len(str(text or "")) * 8) + extra
+
+    def _sync_layout_metrics(self):
+        local_label_width = max(
+            self._measure_text_width(self.SECTION_LABEL_FONT, "本地地址"),
+            self._measure_text_width(self.SECTION_LABEL_FONT, "发送频率"),
+        ) + 10
+        right_label_width = max(
+            self._measure_text_width(self.SECTION_LABEL_FONT, "浏览器 API"),
+            self._measure_text_width(self.SECTION_LABEL_FONT, "窗口数量"),
+        ) + 12
+        window_inline_label_width = self._measure_text_width(self.SECTION_LABEL_FONT, "窗口号") + 10
+        entry_font = ("Microsoft YaHei", 11)
+        button_font = ("Microsoft YaHei", 11, "bold")
+        self.LOCAL_FIELD_WIDTH = max(
+            self.LOCAL_FIELD_WIDTH,
+            self._measure_text_width(entry_font, "http://127.0.0.1:54346", extra=26),
+        )
+        self.API_FIELD_WIDTH = max(
+            self.API_FIELD_WIDTH,
+            self._measure_text_width(entry_font, "4f8ebccc8adc1c0d8478", extra=30),
+        )
+        interval_field_width = max(52, self._measure_text_width(entry_font, "000", extra=24))
+        interval_dash_width = max(14, self._measure_text_width(self.LABEL_FONT, "—", extra=6))
+        self.INTERVAL_STACK_WIDTH = max(
+            self.INTERVAL_STACK_WIDTH,
+            (interval_field_width * 2) + interval_dash_width + 32,
+        )
+        self.COUNT_FIELD_WIDTH = max(self.COUNT_FIELD_WIDTH, self._measure_text_width(entry_font, "000", extra=24))
+        self.WINDOW_NO_FIELD_WIDTH = max(
+            self.WINDOW_NO_FIELD_WIDTH,
+            self._measure_text_width(entry_font, "00000000", extra=24),
+        )
+        self.RIGHT_MAIN_LABEL_WIDTH = max(self.RIGHT_MAIN_LABEL_WIDTH, right_label_width)
+        single_button_width = max(84, self._measure_text_width(button_font, "单独启动", extra=28))
+        self.PARAM_LEFT_GROUP_WIDTH = max(
+            self.PARAM_LEFT_GROUP_WIDTH,
+            local_label_width + 8 + self.LOCAL_FIELD_WIDTH,
+            local_label_width + 8 + self.INTERVAL_STACK_WIDTH,
+        )
+        self.PARAM_RIGHT_GROUP_WIDTH = max(
+            self.PARAM_RIGHT_GROUP_WIDTH,
+            self.RIGHT_MAIN_LABEL_WIDTH + self.API_FIELD_WIDTH,
+            self.RIGHT_MAIN_LABEL_WIDTH
+            + self.COUNT_FIELD_WIDTH
+            + 8
+            + window_inline_label_width
+            + 6
+            + self.WINDOW_NO_FIELD_WIDTH
+            + 8
+            + single_button_width,
+        )
+        param_row_width = self.PARAM_LEFT_GROUP_WIDTH + self.PARAM_COLUMN_GAP + self.PARAM_RIGHT_GROUP_WIDTH
+        self.WINDOW_WIDTH = max(self.WINDOW_WIDTH, param_row_width + (self.CONTENT_PAD_X * 2) + 26)
+
     def _initialize_window_shell(self):
+        self._set_windows_app_id()
         self._apply_window_icon()
         self._ensure_taskbar_window(refresh_shell=True)
+
+    def _set_windows_app_id(self):
+        if not sys.platform.startswith("win"):
+            return
+        try:
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(self.WINDOWS_APP_ID)
+        except Exception:
+            pass
+
+    def _window_style_api(self):
+        user32 = ctypes.windll.user32
+        get_style = getattr(user32, "GetWindowLongPtrW", None) or user32.GetWindowLongW
+        set_style = getattr(user32, "SetWindowLongPtrW", None) or user32.SetWindowLongW
+        return get_style, set_style
 
     def _apply_window_icon(self):
         if not sys.platform.startswith("win"):
@@ -738,7 +817,15 @@ class ClientApp:
             except Exception:
                 continue
 
-    def _ensure_taskbar_window(self, refresh_shell=False):
+    def _deiconify_then_iconify(self):
+        try:
+            self.root.deiconify()
+            self.root.update_idletasks()
+            self.root.iconify()
+        finally:
+            self._taskbar_shell_refresh_pending = False
+
+    def _ensure_taskbar_window(self, refresh_shell=False, iconify_after_refresh=False):
         if not sys.platform.startswith("win"):
             return
         try:
@@ -753,10 +840,12 @@ class ClientApp:
             SWP_NOACTIVATE = 0x0010
             SWP_FRAMECHANGED = 0x0020
 
-            style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+            get_style, set_style = self._window_style_api()
+            style = get_style(hwnd, GWL_EXSTYLE)
             desired_style = (style & ~WS_EX_TOOLWINDOW) | WS_EX_APPWINDOW
+            style_changed = desired_style != style
             if desired_style != style:
-                ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, desired_style)
+                set_style(hwnd, GWL_EXSTYLE, desired_style)
                 ctypes.windll.user32.SetWindowPos(
                     hwnd,
                     0,
@@ -766,12 +855,18 @@ class ClientApp:
                     0,
                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
                 )
-            if refresh_shell and not self._taskbar_style_ready:
+            if refresh_shell or style_changed or not self._taskbar_style_ready:
                 self._taskbar_style_ready = True
                 self.root.withdraw()
-                self.root.after(30, self.root.deiconify)
+                if iconify_after_refresh:
+                    self._taskbar_shell_refresh_pending = True
+                    self.root.after(30, self._deiconify_then_iconify)
+                else:
+                    self.root.after(30, self.root.deiconify)
         except Exception:
-            pass
+            self._taskbar_shell_refresh_pending = False
+            if iconify_after_refresh:
+                self.root.iconify()
 
     def _initial_window_count(self):
         raw = _parse_int(
@@ -918,6 +1013,8 @@ class ClientApp:
         self.root.geometry(f"+{event.x_root - offset_x}+{event.y_root - offset_y}")
 
     def _handle_window_map(self, _event=None):
+        if self._taskbar_shell_refresh_pending:
+            return
         if self._is_minimizing:
             self._is_minimizing = False
             self.root.after(10, self._restore_custom_window_chrome)
@@ -930,8 +1027,11 @@ class ClientApp:
 
     def _minimize_window(self):
         self._is_minimizing = True
+        if not sys.platform.startswith("win"):
+            self.root.iconify()
+            return
         self.root.overrideredirect(False)
-        self.root.iconify()
+        self._ensure_taskbar_window(refresh_shell=True, iconify_after_refresh=True)
 
     def _toggle_maximize(self):
         if self._is_maximized:
@@ -1202,26 +1302,20 @@ class ClientApp:
             bg=self.PANEL_BG,
             highlightthickness=1,
             highlightbackground=self.BORDER_COLOR,
-            height=92,
         )
         param_panel.pack(fill="x", padx=0, pady=(0, self.PANEL_SPACING))
-        param_panel.pack_propagate(False)
         params_grid = tk.Frame(
             param_panel,
             bg=self.PANEL_BG,
-            width=self.PARAM_LEFT_GROUP_WIDTH + self.PARAM_COLUMN_GAP + self.PARAM_RIGHT_GROUP_WIDTH,
-            height=68,
         )
         params_grid.pack(anchor="w", padx=8, pady=(8, 8))
-        params_grid.pack_propagate(False)
         params_grid.grid_columnconfigure(0, minsize=self.PARAM_LEFT_GROUP_WIDTH)
         params_grid.grid_columnconfigure(1, minsize=self.PARAM_RIGHT_GROUP_WIDTH)
         params_grid.grid_rowconfigure(0, minsize=32)
         params_grid.grid_rowconfigure(1, minsize=32)
 
-        local_group = tk.Frame(params_grid, bg=self.PANEL_BG, width=self.PARAM_LEFT_GROUP_WIDTH, height=32)
+        local_group = tk.Frame(params_grid, bg=self.PANEL_BG)
         local_group.grid(row=0, column=0, sticky="w")
-        local_group.grid_propagate(False)
         tk.Label(
             local_group,
             text="本地地址",
@@ -1235,9 +1329,8 @@ class ClientApp:
         self.bit_api_entry = self._create_entry(local_field, self.bit_api, font=("Microsoft YaHei", 11))
         self.bit_api_entry.pack(fill="both", expand=True, ipady=4)
 
-        api_group = tk.Frame(params_grid, bg=self.PANEL_BG, width=self.PARAM_RIGHT_GROUP_WIDTH, height=32)
+        api_group = tk.Frame(params_grid, bg=self.PANEL_BG)
         api_group.grid(row=0, column=1, sticky="w", padx=(self.PARAM_COLUMN_GAP, 0))
-        api_group.grid_propagate(False)
         api_label_holder = tk.Frame(
             api_group,
             bg=self.PANEL_BG,
@@ -1259,9 +1352,8 @@ class ClientApp:
         self.api_token_entry = self._create_entry(api_field, self.api_token, font=("Microsoft YaHei", 11))
         self.api_token_entry.pack(fill="both", expand=True, ipady=4)
 
-        freq_group = tk.Frame(params_grid, bg=self.PANEL_BG, width=self.PARAM_LEFT_GROUP_WIDTH, height=32)
+        freq_group = tk.Frame(params_grid, bg=self.PANEL_BG)
         freq_group.grid(row=1, column=0, sticky="w", pady=(9, 0))
-        freq_group.grid_propagate(False)
         tk.Label(
             freq_group,
             text="发送频率",
@@ -1289,9 +1381,8 @@ class ClientApp:
         )
         self.max_interval.place(x=98, y=0, width=52, height=32)
 
-        window_group = tk.Frame(params_grid, bg=self.PANEL_BG, width=self.PARAM_RIGHT_GROUP_WIDTH, height=32)
+        window_group = tk.Frame(params_grid, bg=self.PANEL_BG)
         window_group.grid(row=1, column=1, sticky="w", padx=(self.PARAM_COLUMN_GAP, 0), pady=(9, 0))
-        window_group.grid_propagate(False)
         window_label_holder = tk.Frame(
             window_group,
             bg=self.PANEL_BG,
@@ -1337,7 +1428,7 @@ class ClientApp:
         )
         self.window_no_entry.pack(fill="both", expand=True, ipady=4)
         self.single_run_btn = self._create_action_button(
-            window_group, "单独启动", "#4f7df0", self._trigger_single_run, width=8
+            window_group, "单独启动", "#4f7df0", self._trigger_single_run, width=None
         )
         self.single_run_btn.configure(font=("Microsoft YaHei", 11, "bold"), padx=0, pady=2)
         self.single_run_btn.grid(row=0, column=4, padx=(8, 0), sticky="w", ipady=2)
@@ -1455,23 +1546,24 @@ class ClientApp:
         )
 
     def _create_action_button(self, parent, text, bg, command, fg="#ffffff", width=9):
-        button = tk.Button(
-            parent,
-            text=text,
-            font=self.TOOLBAR_FONT,
-            bg=bg,
-            fg=fg,
-            activebackground=bg,
-            activeforeground=fg,
-            relief="raised",
-            bd=1,
-            width=width,
-            cursor="hand2",
-            command=command,
-            padx=0,
-            pady=3,
-            disabledforeground=fg,
-        )
+        button_kwargs = {
+            "text": text,
+            "font": self.TOOLBAR_FONT,
+            "bg": bg,
+            "fg": fg,
+            "activebackground": bg,
+            "activeforeground": fg,
+            "relief": "raised",
+            "bd": 1,
+            "cursor": "hand2",
+            "command": command,
+            "padx": 0,
+            "pady": 3,
+            "disabledforeground": fg,
+        }
+        if width is not None:
+            button_kwargs["width"] = width
+        button = tk.Button(parent, **button_kwargs)
         self._action_button_styles[button] = self._build_action_button_style(bg, fg)
         button.bind("<Enter>", lambda _event, target=button: self._set_action_button_visual(target, "hover"))
         button.bind("<Leave>", lambda _event, target=button: self._sync_action_button_visual(target))
