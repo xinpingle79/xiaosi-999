@@ -36,41 +36,9 @@
       padding: 22px 20px 28px;
     }
 
-    .tabs {
-      display: flex;
-      justify-content: center;
-      gap: 16px;
-      margin-bottom: 16px;
-    }
-
-    .tab {
-      min-width: 128px;
-      border: 1px solid var(--border);
-      background: #ffffff;
-      color: var(--text);
-      border-radius: 12px;
-      padding: 10px 18px;
-      font-size: 13px;
-      font-weight: 700;
-      cursor: pointer;
-    }
-
-    .tab.active {
-      background: var(--primary);
-      color: #fff;
-      box-shadow: 0 8px 18px rgba(79, 125, 240, 0.25);
-    }
-
-    .intro {
-      text-align: center;
-      color: var(--muted);
-      font-size: 14px;
-      margin-bottom: 18px;
-    }
-
     .preview-shell {
       width: 680px;
-      min-height: 560px;
+      height: 560px;
       margin: 0 auto;
       border: 1px solid var(--border);
       background: var(--shell-bg);
@@ -140,39 +108,9 @@
       background: #bf344d;
     }
 
-    .preview-shell.is-minimized .window {
-      display: none;
-    }
-
-    .preview-shell.is-closed .window {
-      display: none;
-    }
-
-    .preview-shell.is-maximized {
-      width: min(92vw, 980px);
-    }
-
-    .preview-status {
-      display: none;
-      padding: 12px 16px 14px;
-      color: var(--title-fg);
-      font-size: 13px;
-      background: rgba(255, 255, 255, 0.08);
-      border-top: 1px solid rgba(255, 255, 255, 0.12);
-    }
-
-    .preview-shell.is-minimized .preview-status,
-    .preview-shell.is-closed .preview-status {
-      display: block;
-    }
-
-    .preview-status a {
-      color: #fff;
-      text-decoration: underline;
-    }
-
     .window {
       padding: 8px 8px 10px;
+      height: calc(100% - 38px);
     }
 
     .panel {
@@ -352,8 +290,10 @@
     }
 
     .row {
-      justify-content: space-between;
-      gap: 10px;
+      display: grid;
+      grid-template-columns: 280px 308px;
+      column-gap: 12px;
+      justify-content: start;
     }
 
     .row + .row {
@@ -366,11 +306,22 @@
       gap: 8px;
     }
 
+    .row-left,
+    .row-right {
+      width: 100%;
+    }
+
     .label {
       font-size: 12px;
       font-weight: 700;
       color: var(--text);
       white-space: nowrap;
+    }
+
+    .right-main-label {
+      width: 64px;
+      text-align: left;
+      flex: 0 0 64px;
     }
 
     .input {
@@ -418,6 +369,18 @@
       line-height: 1.45;
     }
 
+    .operation-screen {
+      display: flex;
+      flex-direction: column;
+      min-height: 504px;
+      height: 100%;
+    }
+
+    .message-panel .text-box {
+      min-height: 96px;
+      padding: 8px 10px;
+    }
+
     .log-head {
       display: flex;
       align-items: center;
@@ -429,12 +392,23 @@
     }
 
     .log-meta {
+      display: flex;
+      align-items: center;
+      gap: 10px;
       font-weight: 400;
       color: var(--muted);
     }
 
+    .log-panel {
+      display: flex;
+      flex-direction: column;
+      flex: 1;
+      min-height: 0;
+    }
+
     .log-box {
-      min-height: 192px;
+      min-height: 0;
+      flex: 1;
       background: var(--log-bg);
       border-color: var(--log-border);
       color: #fff;
@@ -442,161 +416,21 @@
       word-break: break-word;
     }
 
-    .screen {
-      display: none;
-    }
-
-    .screen.active {
-      display: block;
-    }
-
-    .activation-body {
-      min-height: 508px;
-      padding: 0;
-      overflow: hidden;
-      position: relative;
-    }
-
-    .activation-stage {
-      height: 100%;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      padding: 20px 24px 28px;
-      background:
-        radial-gradient(circle at 18% 82%, #f5faff 0, #f5faff 18%, transparent 19%),
-        radial-gradient(circle at 88% 86%, #f5faff 0, #f5faff 16%, transparent 17%),
-        linear-gradient(#f2f8ff 1px, transparent 1px),
-        linear-gradient(90deg, #f2f8ff 1px, transparent 1px);
-      background-size: auto, auto, 38px 38px, 38px 38px;
-      background-position: 0 0, 0 0, 18px 18px, 18px 18px;
-    }
-
-    .activation-content {
-      width: 100%;
-      max-width: 520px;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      padding-top: 26px;
-    }
-
-    .activation-brand {
-      font-size: 28px;
-      font-weight: 700;
-      line-height: 1.15;
-      color: #f2483d;
-      text-align: center;
-      text-shadow: 0 10px 22px rgba(80, 123, 190, 0.16);
-      margin-bottom: 30px;
-    }
-
-    .activation-form-block {
-      width: 100%;
-      max-width: 460px;
-    }
-
-    .activation-field-label {
-      font-size: 15px;
-      font-weight: 700;
-      color: var(--text);
-      margin-bottom: 10px;
-      text-align: left;
-    }
-
-    .activation-entry-row {
-      display: flex;
-      align-items: center;
-      justify-content: flex-start;
-      gap: 16px;
-    }
-
-    .activation-input {
-      width: 304px;
-      height: 42px;
-      font-size: 15px;
-    }
-
-    .activation-btn {
-      height: 42px;
-      min-width: 96px;
-      font-size: 16px;
-      font-weight: 700;
-    }
-
-    .notice {
-      margin-top: 20px;
-      max-width: 420px;
-      min-height: 40px;
-      color: var(--muted);
-      font-size: 13px;
-      line-height: 1.55;
-      text-align: center;
-    }
-
-    .notice.error {
-      color: #cf2d2d;
-    }
   </style>
 </head>
 <body>
   <div class="page">
-    <div class="tabs">
-      <button class="tab" data-screen="activation">预览激活页</button>
-      <button class="tab" data-screen="expired">预览到期页</button>
-      <button class="tab active" data-screen="operation">预览操作页</button>
-    </div>
-    <div class="intro">当前页面是基于正式客户端当前结构做的网页镜像，用于直接看比例、间距和布局。</div>
-
     <div class="preview-shell">
       <div class="titlebar">
         <div class="name">FB私聊助手 Pro</div>
         <div class="win-actions">
-          <button class="win-btn" type="button" data-win-action="minimize" title="最小化">—</button>
-          <button class="win-btn" type="button" data-win-action="maximize" title="最大化">□</button>
-          <button class="win-btn close" type="button" data-win-action="close" title="关闭">✕</button>
+          <button class="win-btn" type="button" title="最小化">—</button>
+          <button class="win-btn" type="button" title="最大化">□</button>
+          <button class="win-btn close" type="button" title="关闭">✕</button>
         </div>
       </div>
-      <div class="preview-status" id="preview-status"></div>
-
       <div class="window">
-        <div class="screen" id="screen-activation">
-          <div class="panel activation-body">
-            <div class="activation-stage">
-              <div class="activation-content">
-                <div class="activation-brand">FB私聊助手</div>
-                <div class="activation-form-block">
-                  <div class="activation-field-label">激活码</div>
-                  <div class="activation-entry-row">
-                    <div class="input activation-input">请输入激活码</div>
-                    <button class="btn primary activation-btn">验证激活</button>
-                  </div>
-                </div>
-                <div class="notice">验证成功后自动进入操作界面。</div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div class="screen" id="screen-expired">
-          <div class="panel activation-body">
-            <div class="activation-stage">
-              <div class="activation-content">
-                <div class="activation-brand">FB私聊助手</div>
-                <div class="activation-form-block">
-                  <div class="activation-field-label">激活码</div>
-                  <div class="activation-entry-row">
-                    <div class="input activation-input">请输入激活码</div>
-                    <button class="btn primary activation-btn">验证激活</button>
-                  </div>
-                </div>
-                <div class="notice error">激活码已失效，请重新激活后继续使用</div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div class="screen active" id="screen-operation">
+        <div class="operation-screen">
           <div class="panel toolbar">
             <div class="toolbar-left">
               <button class="btn primary">启动</button>
@@ -616,7 +450,7 @@
                 <div class="input w-local">http://127.0.0.1:54346</div>
               </div>
               <div class="row-right field-group">
-                <div class="label">浏览器 API</div>
+                <div class="label right-main-label">浏览器 API</div>
                 <div class="input w-api">745b99c1c93f42cf8ce884e0cf301649</div>
               </div>
             </div>
@@ -628,7 +462,7 @@
                 <div class="input w-small">6</div>
               </div>
               <div class="row-right field-group">
-                <div class="label">窗口数量</div>
+                <div class="label right-main-label">窗口数量</div>
                 <div class="input w-count">10</div>
                 <div class="label">窗口号</div>
                 <div class="input w-no"></div>
@@ -637,16 +471,19 @@
             </div>
           </div>
 
-          <div class="panel">
+          <div class="panel message-panel">
             <div class="section-title">发送文本</div>
             <div class="text-box">Hello
 Hello, nice to meet you</div>
           </div>
 
-          <div class="panel">
+          <div class="panel log-panel">
             <div class="log-head">
               <div>实时日志</div>
-              <div class="log-meta">已发送： 0　失败： 0</div>
+              <div class="log-meta">
+                <span>发送： 0</span>
+                <span>失败： 0</span>
+              </div>
             </div>
             <div class="log-box">[32m2026-03-19 03:48:54 [INFO] === 开始执行 ===
 [32m2026-03-19 03:48:54 [WARNING] BitBrowser 会话关闭，当前窗口跳过
@@ -661,90 +498,5 @@ resource_tracker: There appear to be 8 leaked semaphore objects to clean up at s
       </div>
     </div>
   </div>
-
-  <script>
-    const tabs = document.querySelectorAll('.tab');
-    const screens = document.querySelectorAll('.screen');
-    const shell = document.querySelector('.preview-shell');
-    const statusBar = document.getElementById('preview-status');
-    const windowButtons = document.querySelectorAll('.win-btn');
-    const maximizeBtn = document.querySelector('[data-win-action="maximize"]');
-
-    function setPreviewStatus(message, allowRestore = false) {
-      if (!statusBar) return;
-      if (!message) {
-        statusBar.innerHTML = '';
-        return;
-      }
-      statusBar.innerHTML = allowRestore
-        ? `${message} <a href="#" data-preview-restore="true">点击恢复</a>`
-        : message;
-    }
-
-    function resetWindowShell() {
-      shell.classList.remove('is-minimized', 'is-closed');
-      setPreviewStatus('');
-    }
-
-    function updateMaximizeButton() {
-      if (!maximizeBtn || !shell) return;
-      const isMaximized = shell.classList.contains('is-maximized');
-      maximizeBtn.textContent = isMaximized ? '❐' : '□';
-      maximizeBtn.title = isMaximized ? '还原' : '最大化';
-    }
-
-    windowButtons.forEach((button) => {
-      button.addEventListener('mouseenter', () => button.classList.add('is-hover'));
-      button.addEventListener('mouseleave', () => {
-        button.classList.remove('is-hover', 'is-press');
-      });
-      button.addEventListener('mousedown', () => button.classList.add('is-press'));
-      button.addEventListener('mouseup', () => {
-        button.classList.remove('is-press');
-      });
-      button.addEventListener('click', () => {
-        const action = button.dataset.winAction;
-        if (action === 'minimize') {
-          shell.classList.toggle('is-minimized');
-          shell.classList.remove('is-closed');
-          setPreviewStatus(shell.classList.contains('is-minimized') ? '窗口已最小化。' : '', true);
-          return;
-        }
-        if (action === 'maximize') {
-          resetWindowShell();
-          shell.classList.toggle('is-maximized');
-          updateMaximizeButton();
-          return;
-        }
-        if (action === 'close') {
-          shell.classList.remove('is-minimized');
-          shell.classList.add('is-closed');
-          setPreviewStatus('窗口已关闭。', true);
-        }
-      });
-    });
-
-    tabs.forEach((tab) => {
-      tab.addEventListener('click', () => {
-        const screen = tab.dataset.screen;
-        tabs.forEach((item) => item.classList.toggle('active', item === tab));
-        screens.forEach((item) => item.classList.toggle('active', item.id === `screen-${screen}`));
-        resetWindowShell();
-        if (shell.classList.contains('is-maximized')) {
-          updateMaximizeButton();
-        }
-      });
-    });
-
-    document.addEventListener('click', (event) => {
-      const restoreTrigger = event.target.closest('[data-preview-restore="true"]');
-      if (!restoreTrigger) return;
-      event.preventDefault();
-      resetWindowShell();
-      updateMaximizeButton();
-    });
-
-    updateMaximizeButton();
-  </script>
 </body>
 </html>

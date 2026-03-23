@@ -77,6 +77,17 @@ def _build_server_base_url(request_host=""):
     return f"http://{host}:{port}"
 
 
+def _sanitize_server_settings(data):
+    settings = dict(data or {})
+    task_settings = settings.get("task_settings")
+    if isinstance(task_settings, dict):
+        task_settings = dict(task_settings)
+        task_settings.pop("send_interval_seconds", None)
+        task_settings.pop("typing_delay", None)
+        settings["task_settings"] = task_settings
+    return settings
+
+
 def _drop_session(token):
     session = SESSION_STORE.pop(token, None)
     if not session:
@@ -541,11 +552,7 @@ class TaskManager:
                 )
                 return True, None
             configs = db.list_device_configs(owner_name)
-            target_cfg = None
-            for cfg in configs:
-                if str(cfg.get("machine_id") or "").strip() == machine_id:
-                    target_cfg = cfg
-                    break
+            target_cfg = _select_device_config(configs, machine_id=machine_id)
             if not target_cfg:
                 return False, "未配置设备"
             bit_api = str(target_cfg.get("bit_api") or "").strip()
@@ -600,16 +607,11 @@ class TaskManager:
         try:
             while True:
                 configs = db.list_device_configs(owner_name)
-                target_cfg = None
-                for cfg in configs:
-                    if str(cfg.get("machine_id") or "").strip() == machine_id:
-                        target_cfg = cfg
-                        break
-                if not target_cfg and api_token:
-                    for cfg in configs:
-                        if str(cfg.get("api_token") or "").strip() == api_token:
-                            target_cfg = cfg
-                            break
+                target_cfg = _select_device_config(
+                    configs,
+                    machine_id=machine_id,
+                    api_token=api_token,
+                )
                 if not target_cfg:
                     if time.time() >= deadline:
                         return False, "未配置设备", None
@@ -679,18 +681,14 @@ class TaskManager:
             db.close()
 
     def start(self, owner=None):
+        owner_name = str(owner or "").strip()
+        if not owner_name:
+            return False, "总后台不参与任务操作，请在子后台执行"
         with self._lock:
-            owner_name = owner or "admin"
-            self._clear_pause_state_db(owner_name, clear_global=owner is None)
+            self._clear_pause_state_db(owner_name, clear_global=False)
             self._logs.clear()
             self._logs.append("=== 任务已下发 ===")
             self._logs.append("=== 正在确认执行端在线状态 ===")
-            if owner is None:
-                return self._enqueue_agent_action(
-                    "start",
-                    owner=owner_name,
-                    wait_online_seconds=4.0,
-                )
             return self._enqueue_owner_device_actions(
                 "start",
                 owner_name,
@@ -698,42 +696,43 @@ class TaskManager:
             )
 
     def stop(self, owner=None):
+        owner_name = str(owner or "").strip()
+        if not owner_name:
+            return False, "总后台不参与任务操作，请在子后台执行"
         with self._lock:
-            owner_name = owner or "admin"
-            self._clear_pause_state_db(owner_name, clear_global=owner is None)
-            if owner is None:
-                return self._enqueue_agent_action(
-                    "stop", owner=owner_name, allow_disabled=True
-                )
+            self._clear_pause_state_db(owner_name, clear_global=False)
             return self._enqueue_owner_device_actions(
                 "stop", owner_name, allow_disabled=True
             )
 
     def pause(self, owner=None):
+        owner_name = str(owner or "").strip()
+        if not owner_name:
+            return False, "总后台不参与任务操作，请在子后台执行"
         with self._lock:
-            owner_name = owner or "admin"
             if not self._agent_has_running(owner_name):
                 return False, "当前没有运行中的任务"
             self._set_pause_state_db(True, owner=owner_name)
-            if owner is None:
-                return self._enqueue_agent_action("pause", owner=owner_name)
             return self._enqueue_owner_device_actions("pause", owner_name)
 
     def resume(self, owner=None):
+        owner_name = str(owner or "").strip()
+        if not owner_name:
+            return False, "总后台不参与任务操作，请在子后台执行"
         with self._lock:
-            owner_name = owner or "admin"
             if not self._agent_has_running(owner_name):
                 return False, "当前没有运行中的任务"
-            self._clear_pause_state_db(owner_name, clear_global=owner is None)
-            if owner is None:
-                return self._enqueue_agent_action("resume", owner=owner_name)
+            self._clear_pause_state_db(owner_name, clear_global=False)
             return self._enqueue_owner_device_actions("resume", owner_name)
 
     def restart_window(self, window_token, owner=None):
+        owner_name = str(owner or "").strip()
+        if not owner_name:
+            return False, "总后台不参与任务操作，请在子后台执行"
         with self._lock:
-            return self._enqueue_agent_action(
+            return self._enqueue_owner_device_actions(
                 "restart_window",
-                owner=owner,
+                owner_name,
                 window_token=str(window_token or "").strip(),
             )
 
@@ -741,33 +740,30 @@ class TaskManager:
         with self._lock:
             db = Database()
             try:
-                if hasattr(db, "count_agent_tasks"):
-                    running_tasks = db.count_agent_tasks(status="running", owner=owner)
-                else:
-                    running_tasks = 0
+                task_counts = _load_runtime_task_counts(owner=owner, db=db)
+                running_tasks = int(task_counts.get("running_tasks") or 0)
+                pending_tasks = int(task_counts.get("pending_tasks") or 0)
+                running_accounts = int(task_counts.get("running_accounts") or 0)
                 pause_global = db.is_pause_state()
                 pause_owner = db.is_pause_state(owner or "admin")
             except Exception:
                 running_tasks = 0
+                pending_tasks = 0
+                running_accounts = 0
                 pause_global = False
                 pause_owner = False
             finally:
                 db.close()
             running = running_tasks > 0
             task_paused = bool(running and (pause_global or pause_owner))
-            logs = list(self._logs)
-            task_pending = infer_task_pending(logs)
-            stats = build_runtime_stats(logs, account_id=owner)
-            if owner:
-                stats["runtime"] = {
-                    "running_windows": running_tasks,
-                    "running_accounts": 1 if running else 0,
-                }
-            else:
-                stats["runtime"] = {
-                    "running_windows": running_tasks,
-                    "running_accounts": running_tasks,
-                }
+            logs = _filter_runtime_logs(list(self._logs), account_id=owner)
+            task_pending = bool(pending_tasks > 0 or infer_task_pending(logs))
+            stats = build_runtime_stats(
+                logs,
+                account_id=owner,
+                running_tasks=running_tasks,
+                running_accounts=running_accounts,
+            )
             return {
                 "running": running,
                 "task_running": running,
@@ -1202,10 +1198,6 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 username = self._current_username(prefer_sub=True)
                 self._send_json(load_full_config(username))
                 return
-            if path == "/device_summary":
-                owner = self._current_username(prefer_sub=True)
-                self._send_json(handle_sub_device_summary(owner))
-                return
             if path == "/status":
                 owner = self._current_username(prefer_sub=True)
                 self._send_json(TASK_MANAGER.status(owner=owner))
@@ -1297,41 +1289,11 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 )
                 self._send_json({"ok": True})
                 return
-            if path == "/restart-window":
-                payload = self._read_json()
-                ok, error = TASK_MANAGER.restart_window(payload.get("window_token"))
-                if not ok:
-                    self._send_json({"error": error}, status=HTTPStatus.CONFLICT)
-                    return
-                self._send_json({"ok": True})
-                return
-            if path == "/start":
-                ok, error = TASK_MANAGER.start(owner=None)
-                if not ok:
-                    self._send_json({"error": error}, status=HTTPStatus.CONFLICT)
-                    return
-                self._send_json({"ok": True})
-                return
-            if path == "/stop":
-                ok, error = TASK_MANAGER.stop(owner=None)
-                if not ok:
-                    self._send_json({"error": error}, status=HTTPStatus.CONFLICT)
-                    return
-                self._send_json({"ok": True})
-                return
-            if path == "/pause":
-                ok, error = TASK_MANAGER.pause(owner=None)
-                if not ok:
-                    self._send_json({"error": error}, status=HTTPStatus.CONFLICT)
-                    return
-                self._send_json({"ok": True})
-                return
-            if path == "/resume":
-                ok, error = TASK_MANAGER.resume(owner=None)
-                if not ok:
-                    self._send_json({"error": error}, status=HTTPStatus.CONFLICT)
-                    return
-                self._send_json({"ok": True})
+            if path in {"/restart-window", "/start", "/stop", "/pause", "/resume"}:
+                self._send_json(
+                    {"error": "总后台不参与任务操作，请在子后台执行"},
+                    status=HTTPStatus.FORBIDDEN,
+                )
                 return
             if path == "/users/add":
                 payload = self._read_json()
@@ -1734,7 +1696,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
         )
 
 def load_full_config(username=None):
-    settings = read_yaml(SETTINGS_PATH)
+    settings = _sanitize_server_settings(read_yaml(SETTINGS_PATH))
     messages = read_yaml(MESSAGES_PATH)
     account_info = {}
 
@@ -1809,9 +1771,39 @@ def start_server(host, port, max_attempts=10):
     return None, port, last_error
 
 
-def build_runtime_stats(logs, account_id=None):
-    db_stats = _load_db_stats(account_id=account_id) if account_id else _load_db_stats()
-    logs = [str(line or "").strip() for line in (logs or []) if str(line or "").strip()]
+def _filter_runtime_logs(logs, account_id=None, machine_id=None):
+    normalized_logs = [
+        str(line or "").strip()
+        for line in (logs or [])
+        if str(line or "").strip()
+    ]
+    account_filter = str(account_id or "").strip()
+    machine_filter = str(machine_id or "").strip()
+    if not account_filter and not machine_filter:
+        return normalized_logs
+    filtered = []
+    for line in normalized_logs:
+        account_hit = True
+        machine_hit = True
+        if account_filter:
+            account_hit = line.startswith((f"[{account_filter}] ", f"[{account_filter}@")) or (
+                f"owner={account_filter}" in line
+            )
+        if machine_filter:
+            machine_hit = (
+                f"@{machine_filter}]" in line
+                or line.startswith(f"[{machine_filter}] ")
+                or f"machine_id={machine_filter}" in line
+                or f"执行端 {machine_filter}" in line
+            )
+        if account_hit and machine_hit:
+            filtered.append(line)
+    return filtered
+
+
+def build_runtime_stats(logs, account_id=None, machine_id=None, running_tasks=0, running_accounts=None):
+    db_stats = _load_db_stats(account_id=account_id, machine_id=machine_id)
+    logs = _filter_runtime_logs(logs, account_id=account_id, machine_id=machine_id)
     sent_patterns = ("✅ 成员页消息已发送",)
     failed_patterns = (
         "处理成员失败",
@@ -1827,11 +1819,24 @@ def build_runtime_stats(logs, account_id=None):
     )
     runtime_sent = sum(1 for line in logs if any(token in line for token in sent_patterns))
     runtime_failed = sum(1 for line in logs if any(token in line for token in failed_patterns))
+    runtime_running_windows = max(0, int(running_tasks or 0))
+    if running_accounts is None:
+        runtime_running_accounts = (
+            1 if account_id and runtime_running_windows > 0 else runtime_running_windows
+        )
+    else:
+        runtime_running_accounts = max(0, int(running_accounts or 0))
     return {
         "sent": runtime_sent,
         "failed": runtime_failed,
         "runtime_sent": runtime_sent,
         "runtime_failed": runtime_failed,
+        "runtime": {
+            "sent": runtime_sent,
+            "failed": runtime_failed,
+            "running_windows": runtime_running_windows,
+            "running_accounts": runtime_running_accounts,
+        },
         "db": db_stats,
     }
 
@@ -1948,7 +1953,40 @@ def _load_owner_device_summary(owner, db=None):
             db.close()
 
 
-def _load_db_stats(account_id=None):
+def _load_runtime_task_counts(owner=None, db=None):
+    owns_db = db is None
+    db = db or Database()
+    try:
+        if hasattr(db, "count_agent_tasks"):
+            running_tasks = db.count_agent_tasks(status="running", owner=owner)
+            pending_tasks = db.count_agent_tasks(status="pending", owner=owner)
+        else:
+            running_tasks = 0
+            pending_tasks = 0
+        account_filter = str(owner or "").strip()
+        if account_filter:
+            running_accounts = 1 if int(running_tasks or 0) > 0 else 0
+        else:
+            row = db.conn.execute(
+                """
+                SELECT COUNT(DISTINCT owner) AS total
+                FROM agent_tasks
+                WHERE status = 'running'
+                  AND COALESCE(owner, '') != ''
+                """
+            ).fetchone()
+            running_accounts = int(row["total"] or 0) if row else 0
+        return {
+            "running_tasks": int(running_tasks or 0),
+            "pending_tasks": int(pending_tasks or 0),
+            "running_accounts": int(running_accounts or 0),
+        }
+    finally:
+        if owns_db:
+            db.close()
+
+
+def _load_db_stats(account_id=None, machine_id=None):
     db = Database()
     try:
         now = datetime.now()
@@ -1958,11 +1996,12 @@ def _load_db_stats(account_id=None):
         yesterday_text = yesterday_start.strftime("%Y-%m-%d %H:%M:%S")
 
         account_filter = str(account_id or "").strip()
+        machine_filter = str(machine_id or "").strip()
         device_total = 0
         device_online = 0
         device_yesterday = 0
         max_devices = None
-        if account_filter:
+        if account_filter and not machine_filter:
             today_start_ts = today_start.timestamp()
             yesterday_start_ts = yesterday_start.timestamp()
             row = db.conn.execute(
@@ -1991,6 +2030,9 @@ def _load_db_stats(account_id=None):
             if account_filter:
                 clauses.append("account_id = ?")
                 params.append(account_filter)
+            if machine_filter:
+                clauses.append("machine_id = ?")
+                params.append(machine_filter)
             if start:
                 clauses.append("created_at >= ?")
                 params.append(start)
@@ -2007,6 +2049,9 @@ def _load_db_stats(account_id=None):
             if account_filter:
                 clauses.append("account_id = ?")
                 params.append(account_filter)
+            if machine_filter:
+                clauses.append("machine_id = ?")
+                params.append(machine_filter)
             if require_status and status is not None:
                 clauses.append("status = ?")
                 params.append(status)
@@ -2038,7 +2083,7 @@ def _load_db_stats(account_id=None):
             row = db.conn.execute(query, tuple(params)).fetchone()
             return int(row["total"] or 0) if row else 0
 
-        user_field = "profile_url" if account_filter else "account_id"
+        user_field = "profile_url" if (account_filter or machine_filter) else "account_id"
         active_field = user_field
 
         def build_trend_series(reference_time):
@@ -2166,16 +2211,6 @@ def _load_user_list():
         }
     finally:
         db.close()
-
-
-def handle_sub_device_summary(owner):
-    summary = _load_owner_device_summary(owner)
-    return {
-        "ok": True,
-        "online_devices": int(summary.get("online_devices") or 0),
-        "max_devices": summary.get("max_devices"),
-    }
-
 
 def handle_login(payload, role="user"):
     username = str(payload.get("username") or "").strip()
@@ -2345,6 +2380,56 @@ def _auto_bind_device_config(owner, machine_id, bit_api, api_token, source=""):
     finally:
         db.close()
 
+
+def _select_device_config(configs, machine_id="", api_token=""):
+    machine_id = str(machine_id or "").strip()
+    api_token = str(api_token or "").strip()
+    ordered = list(configs or [])
+    if not ordered:
+        return None
+
+    if machine_id and api_token:
+        for cfg in reversed(ordered):
+            if (
+                str(cfg.get("machine_id") or "").strip() == machine_id
+                and str(cfg.get("api_token") or "").strip() == api_token
+            ):
+                return cfg
+
+    if machine_id:
+        for cfg in reversed(ordered):
+            if str(cfg.get("machine_id") or "").strip() == machine_id:
+                return cfg
+
+    if api_token:
+        for cfg in reversed(ordered):
+            if str(cfg.get("api_token") or "").strip() == api_token:
+                return cfg
+
+    return None
+
+
+def _cleanup_device_config_duplicates(db, owner, keep_id, machine_id="", api_token=""):
+    owner = str(owner or "").strip()
+    machine_id = str(machine_id or "").strip()
+    api_token = str(api_token or "").strip()
+    keep_id = int(keep_id or 0)
+    if not owner or not keep_id:
+        return []
+
+    removed_ids = []
+    for cfg in db.list_device_configs(owner):
+        cfg_id = int(cfg.get("id") or 0)
+        if not cfg_id or cfg_id == keep_id:
+            continue
+        same_machine = machine_id and str(cfg.get("machine_id") or "").strip() == machine_id
+        same_token = api_token and str(cfg.get("api_token") or "").strip() == api_token
+        if not (same_machine or same_token):
+            continue
+        if db.delete_device_config(cfg_id, owner):
+            removed_ids.append(cfg_id)
+    return removed_ids
+
 def handle_client_activate(payload, request_host=""):
     activation_code = str(payload.get("activation_code") or "").strip()
     machine_id = str(payload.get("machine_id") or "").strip()
@@ -2493,21 +2578,26 @@ def _sync_client_device_config(owner, machine_id, bit_api, api_token, name=""):
     db = Database()
     try:
         configs = db.list_device_configs(owner)
-        matches = [
+        token_matches = [
             cfg for cfg in configs if str(cfg.get("api_token") or "").strip() == api_token
         ]
-        if len(matches) > 1:
+        if len(token_matches) > 1:
             return False, "api_token_conflict", None
-        if matches:
-            cfg = matches[0]
-            existing_machine = str(cfg.get("machine_id") or "").strip()
+
+        if token_matches:
+            token_cfg = token_matches[0]
+            existing_machine = str(token_cfg.get("machine_id") or "").strip()
             if existing_machine and existing_machine != machine_id:
                 return False, "device_bound", None
+
+        target_cfg = _select_device_config(configs, machine_id=machine_id, api_token=api_token)
+        if target_cfg:
+            existing_machine = str(target_cfg.get("machine_id") or "").strip()
             target_machine_id = machine_id or existing_machine
             updated = db.update_device_config(
-                cfg.get("id"),
+                target_cfg.get("id"),
                 owner,
-                display_name or str(cfg.get("name") or "").strip() or machine_id,
+                display_name or str(target_cfg.get("name") or "").strip() or machine_id,
                 target_machine_id,
                 bit_api,
                 api_token,
@@ -2515,8 +2605,23 @@ def _sync_client_device_config(owner, machine_id, bit_api, api_token, name=""):
             )
             if not updated:
                 return False, "not_found", None
-            return True, None, int(cfg.get("id") or 0)
+            config_id = int(target_cfg.get("id") or 0)
+            _cleanup_device_config_duplicates(
+                db,
+                owner,
+                config_id,
+                machine_id=target_machine_id,
+                api_token=api_token,
+            )
+            return True, None, config_id
         new_id = db.add_device_config(owner, display_name, machine_id, bit_api, api_token, 1)
+        _cleanup_device_config_duplicates(
+            db,
+            owner,
+            new_id,
+            machine_id=machine_id,
+            api_token=api_token,
+        )
         return True, None, new_id
     finally:
         db.close()
@@ -2539,22 +2644,6 @@ def handle_client_sync_config(payload):
     )
     if not ok:
         return {"ok": False, "error": error}
-    owner = verified.get("owner")
-    messages_payload = payload.get("messages") or {}
-    templates = messages_payload.get("templates")
-    if templates is not None:
-        normalized_templates = [
-            str(item).strip()
-            for item in (templates or [])
-            if str(item).strip()
-        ]
-        db = Database()
-        try:
-            existing = db.get_message_templates(owner) or {}
-            probe_templates = existing.get("probe_templates") or []
-            db.set_message_templates(owner, normalized_templates, probe_templates)
-        finally:
-            db.close()
     return {
         "ok": True,
         "data": {
@@ -2588,16 +2677,11 @@ def handle_client_status(payload):
             client_version = str(agent.get("client_version") or "").strip()
 
         configs = db.list_device_configs(owner)
-        target_cfg = None
-        for cfg in configs:
-            if str(cfg.get("machine_id") or "").strip() == machine_id:
-                target_cfg = cfg
-                break
-        if not target_cfg and api_token:
-            for cfg in configs:
-                if str(cfg.get("api_token") or "").strip() == api_token:
-                    target_cfg = cfg
-                    break
+        target_cfg = _select_device_config(
+            configs,
+            machine_id=machine_id,
+            api_token=api_token,
+        )
 
         stale_rows = TASK_MANAGER._cleanup_stale_machine_action_tasks(
             db,
@@ -2635,6 +2719,19 @@ def handle_client_status(payload):
 
     running_count = int(running_row["total"] or 0) if running_row else 0
     pending_count = int(pending_row["total"] or 0) if pending_row else 0
+    with TASK_MANAGER._lock:
+        owner_logs = _filter_runtime_logs(
+            list(TASK_MANAGER._logs),
+            account_id=owner,
+            machine_id=machine_id,
+        )
+    stats = build_runtime_stats(
+        owner_logs,
+        account_id=owner,
+        machine_id=machine_id,
+        running_tasks=running_count,
+        running_accounts=(1 if running_count > 0 else 0),
+    )
     task_paused = bool(running_count > 0 and (pause_global or pause_owner))
     config_synced = bool(target_cfg)
     device_bound = bool(
@@ -2692,6 +2789,7 @@ def handle_client_status(payload):
             "bit_api": str((target_cfg or {}).get("bit_api") or "").strip(),
             "api_token": str((target_cfg or {}).get("api_token") or "").strip(),
             "stale_cleanup_ids": [row["id"] for row in stale_rows],
+            "stats": stats,
         },
     }
 
@@ -2762,9 +2860,15 @@ def handle_client_action(payload, action):
             "message": f"当前状态不允许单独启动：{_translate_client_start_block_reason(status_info.get('start_block_reason'))}",
         }
 
+    owner_name = verified.get("owner")
+    if action == "pause":
+        TASK_MANAGER._set_pause_state_db(True, owner=owner_name)
+    elif action in {"start", "stop", "resume"}:
+        TASK_MANAGER._clear_pause_state_db(owner_name, clear_global=False)
+
     ok, error, detail = TASK_MANAGER.enqueue_machine_action(
         action,
-        owner_name=verified.get("owner"),
+        owner_name=owner_name,
         machine_id=verified.get("machine_id"),
         api_token=api_token,
         window_token=window_token,
@@ -3172,7 +3276,7 @@ def handle_user_delete(payload):
 
 
 def save_full_config(payload, actor_username=None, actor_role=None):
-    current_settings = read_yaml(SETTINGS_PATH)
+    current_settings = _sanitize_server_settings(read_yaml(SETTINGS_PATH))
     settings_payload = payload.get("settings") or {}
     messages_payload = payload.get("messages") or {}
     current_messages = read_yaml(MESSAGES_PATH) or {}
@@ -3210,7 +3314,8 @@ def save_full_config(payload, actor_username=None, actor_role=None):
     task_settings["idle_scroll_limit"] = 3
     task_settings["account_restricted_blocked_threshold"] = 2
     task_settings["account_restricted_signal_threshold"] = 3
-    task_settings["typing_delay"] = [100, 300]
+    task_settings.pop("send_interval_seconds", None)
+    task_settings.pop("typing_delay", None)
     messages = dict(current_messages)
     messages.update(messages_payload)
     messages["probe_templates"] = (

@@ -90,13 +90,16 @@ class Database:
             "account_id",
             "status",
             "created_at",
+            "machine_id",
         }
         if (
-            expected_columns.issubset(columns)
+            {"group_id", "profile_url", "user_id", "account_id", "status", "created_at"}.issubset(columns)
             and pk_map.get("account_id") == 1
             and pk_map.get("group_id") == 2
             and pk_map.get("profile_url") == 3
         ):
+            if "machine_id" not in columns:
+                self.conn.execute("ALTER TABLE sent_history ADD COLUMN machine_id TEXT")
             self._ensure_sent_history_indexes()
             return
 
@@ -111,6 +114,7 @@ class Database:
         account_column = "account_id" if "account_id" in columns else "NULL AS account_id"
         status_column = "status" if "status" in columns else "1 AS status"
         created_column = "created_at" if "created_at" in columns else "NULL AS created_at"
+        machine_id_column = "machine_id" if "machine_id" in columns else "NULL AS machine_id"
 
         rows = self.conn.execute(
             f"""
@@ -120,7 +124,8 @@ class Database:
                 {user_id_column},
                 {account_column},
                 {status_column},
-                {created_column}
+                {created_column},
+                {machine_id_column}
             FROM sent_history
             """
         ).fetchall()
@@ -133,8 +138,8 @@ class Database:
             self.conn.execute(
                 """
                 INSERT OR REPLACE INTO sent_history_new
-                (account_id, group_id, profile_url, user_id, status, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                (account_id, group_id, profile_url, user_id, status, created_at, machine_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     row["account_id"],
@@ -143,6 +148,7 @@ class Database:
                     row["user_id"],
                     row["status"],
                     row["created_at"],
+                    row["machine_id"],
                 ),
             )
 
@@ -160,6 +166,7 @@ class Database:
                 user_id TEXT,
                 status INTEGER,
                 created_at DATETIME,
+                machine_id TEXT,
                 PRIMARY KEY (account_id, group_id, profile_url)
             )
             """
@@ -184,6 +191,7 @@ class Database:
                 "user_id": user_id,
                 "status": 1 if row["status"] is None else row["status"],
                 "created_at": row["created_at"] or "1970-01-01 00:00:00",
+                "machine_id": str(row["machine_id"] or "").strip() or None,
             }
             key = (
                 f"{account_id}|{group_id}|user:{user_id}"
@@ -1691,12 +1699,13 @@ class Database:
         except Exception as exc:
             log.error(f"释放发送占位失败: {exc}")
 
-    def mark_done(self, group_id, profile_url, account_id, success=True, user_id=None):
+    def mark_done(self, group_id, profile_url, account_id, success=True, user_id=None, machine_id=None):
         try:
             normalized_group_id = self.normalize_group_id(group_id)
             normalized_url = self.normalize_profile_url(profile_url)
             normalized_user_id = user_id or self.extract_user_id(normalized_url)
             normalized_account_id = self.normalize_account_scope(account_id)
+            normalized_machine_id = str(machine_id or "").strip() or None
             if not normalized_group_id or not normalized_url:
                 raise ValueError("invalid_profile_url")
 
@@ -1716,8 +1725,8 @@ class Database:
             self.conn.execute(
                 """
                 INSERT OR REPLACE INTO sent_history
-                (account_id, group_id, profile_url, user_id, status, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                (account_id, group_id, profile_url, user_id, status, created_at, machine_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     normalized_account_id,
@@ -1726,6 +1735,7 @@ class Database:
                     normalized_user_id,
                     status,
                     now,
+                    normalized_machine_id,
                 ),
             )
             self.conn.commit()

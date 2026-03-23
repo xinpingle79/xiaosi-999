@@ -71,7 +71,7 @@ def setup_logger():
     )
     
     # 输出到文件
-    logger.add(str(log_dir / "runtime_{time}.log"), rotation="500 MB", encoding="utf-8", enqueue=True)
+    logger.add(str(log_dir / "runtime_{time}.log"), rotation="500 MB", encoding="utf-8")
     
     return logger
 

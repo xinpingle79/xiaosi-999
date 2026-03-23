@@ -67,11 +67,6 @@ jobs:
         run: |
           python -m PyInstaller --noconfirm --clean --windowed --onefile --name FB_RPA_Client --icon assets/fb_chat_helper.ico client_app.py
 
-      - name: Build Desktop Alert
-        shell: pwsh
-        run: |
-          python -m PyInstaller --noconfirm --clean --windowed --onefile --name FB_Group_RPA_Alert desktop_alert.py
-
       - name: Stage Client Package
         shell: pwsh
         run: |
@@ -79,7 +74,6 @@ jobs:
           Copy-Item dist/FB_RPA_Client.exe dist/FB_RPA_Client/
           Copy-Item dist/FB_RPA_Worker.exe dist/FB_RPA_Client/
           Copy-Item dist/FB_RPA_Main.exe dist/FB_RPA_Client/
-          Copy-Item dist/FB_Group_RPA_Alert.exe dist/FB_RPA_Client/
           Copy-Item config/messages.yaml dist/FB_RPA_Client/config/
           Copy-Item config/client.example.yaml dist/FB_RPA_Client/config/
 

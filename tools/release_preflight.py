@@ -54,7 +54,6 @@ EXPECTED_RELEASE_FILES = {
     "dist/FB_RPA_Client/FB_RPA_Client.exe",
     "dist/FB_RPA_Client/FB_RPA_Worker.exe",
     "dist/FB_RPA_Client/FB_RPA_Main.exe",
-    "dist/FB_RPA_Client/FB_Group_RPA_Alert.exe",
     "dist/FB_RPA_Client/config/client.example.yaml",
     "dist/FB_RPA_Client/config/messages.yaml",
 }

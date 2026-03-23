@@ -42,6 +42,7 @@ worker 只从服务器拉取统一任务队列，不再读取独立的本地 wor
 - `admin_account.*`：管理员账号
 - `agent_security.*`：token 有效期、心跳与设备限制
 - `runtime_dir`：运行时目录（可选）
+- 服务端不再维护 `send_interval_seconds`，发送频率只认客户端本地配置
 
 ### 客户端配置
 `config/client.yaml`
@@ -50,6 +51,7 @@ worker 只从服务器拉取统一任务队列，不再读取独立的本地 wor
 - `agent_token` / `token_expires_at`：激活成功后保存的长期运行凭证
 - `bit_api` / `api_token`：本地唯一连接配置来源
 - `task_settings.*`：执行参数（本地保存）
+  其中 `task_settings.send_interval_seconds` 是发送频率唯一权威来源，默认 `0-0`
 - `runtime_dir`：运行时目录（可选）
 
 仓库只跟踪配置模板：
@@ -88,7 +90,7 @@ worker 只从服务器拉取统一任务队列，不再读取独立的本地 wor
 
 ## 干净打包链
 当前唯一正式打包链为 GitHub Actions：
-- `/Users/a123/Downloads/融合的fb/.github/workflows/build-windows.yml`
+- `.github/workflows/build-windows.yml`
 
 打包前后都必须执行：
 ```bash
@@ -99,7 +101,6 @@ python3 tools/release_preflight.py
 - `FB_RPA_Client.exe`
 - `FB_RPA_Worker.exe`
 - `FB_RPA_Main.exe`
-- `FB_Group_RPA_Alert.exe`
 - `config/messages.yaml`
 - `config/client.example.yaml`
 

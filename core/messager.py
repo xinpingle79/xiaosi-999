@@ -1,5 +1,4 @@
 import os
-import random
 import time
 from pathlib import Path
 
@@ -523,18 +522,122 @@ class Messager:
     def _visible_timeout(self, default_ms=200, min_ms=80):
         return self._scale_ms(default_ms, min_ms=min_ms)
 
-    def send_member_card_dm(self, target, probe_text, greeting_text, delay_range):
+    def _inspect_surface_cleanup_state(self):
+        try:
+            if self.page.is_closed():
+                return {
+                    "has_chat_close": False,
+                    "has_chat_editor": False,
+                    "has_member_card": False,
+                    "has_popup_closer": False,
+                }
+        except Exception:
+            return {
+                "has_chat_close": False,
+                "has_chat_editor": False,
+                "has_member_card": False,
+                "has_popup_closer": False,
+            }
+        try:
+            state = self.page.evaluate(
+                """(payload) => {
+                    const normalize = (value) => (value || '').replace(/\\s+/g, ' ').trim();
+                    const isVisible = (el) => {
+                        if (!el) return false;
+                        const rect = el.getBoundingClientRect();
+                        if (!rect.width || !rect.height) return false;
+                        const style = window.getComputedStyle(el);
+                        if (!style) return false;
+                        return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+                    };
+                    const hasVisibleSelector = (selectors) => {
+                        for (const selector of selectors || []) {
+                            try {
+                                if (Array.from(document.querySelectorAll(selector)).some((el) => isVisible(el))) {
+                                    return true;
+                                }
+                            } catch (e) {}
+                        }
+                        return false;
+                    };
+                    const labels = payload.labels || [];
+                    const dialogs = Array.from(
+                        document.querySelectorAll(
+                            'div[role="dialog"], div[aria-modal="true"], div[role="alertdialog"], div[role="alert"]'
+                        )
+                    ).filter((el) => {
+                        if (!isVisible(el)) return false;
+                        const rect = el.getBoundingClientRect();
+                        return rect.width >= 180 && rect.height >= 80 && rect.right > window.innerWidth * 0.4;
+                    });
+                    const hasPopupCloser = dialogs.some((dialog) => {
+                        return Array.from(
+                            dialog.querySelectorAll('button, div[role="button"], [aria-label]')
+                        ).some((el) => {
+                            if (!isVisible(el)) return false;
+                            const text = normalize(el.innerText);
+                            const aria = normalize(el.getAttribute && el.getAttribute('aria-label'));
+                            const combined = `${aria} ${text}`.trim();
+                            return labels.some((token) => combined.includes(token));
+                        });
+                    });
+                    return {
+                        has_chat_close: hasVisibleSelector(payload.chatCloseSelectors || []),
+                        has_chat_editor: hasVisibleSelector(payload.editorSelectors || []),
+                        has_member_card: hasVisibleSelector(payload.memberCardCloseSelectors || []),
+                        has_popup_closer: hasPopupCloser,
+                    };
+                }""",
+                {
+                    "chatCloseSelectors": self.CHAT_CLOSE_SELECTORS,
+                    "editorSelectors": self.MESSAGE_EDITOR_SELECTORS,
+                    "memberCardCloseSelectors": self.MEMBER_CARD_CLOSE_SELECTORS,
+                    "labels": self.POPUP_CLOSE_LABELS,
+                },
+            )
+            return state or {
+                "has_chat_close": False,
+                "has_chat_editor": False,
+                "has_member_card": False,
+                "has_popup_closer": False,
+            }
+        except Exception:
+            return {
+                "has_chat_close": False,
+                "has_chat_editor": False,
+                "has_member_card": False,
+                "has_popup_closer": False,
+            }
+
+    def send_member_card_dm(self, target, probe_text, greeting_text):
         name = target.get("name") or ""
         user_id = target.get("user_id") or ""
         try:
             self._adopt_existing_facebook_page()
             self._wait_if_paused()
             log.info(f"💬 正在处理成员卡片: {name} ({user_id})")
-            preclear_chat = self._close_visible_chat_windows()
-            preclear_popup = self._dismiss_interfering_popups(context=f"成员 {name} 入口前置清场")
-            preclear_card = self._dismiss_member_hover_card()
-            preclear_overlay = self._detect_blocking_overlay()
-            preclear_chat_left = bool(self._locate_chat_session())
+            cleanup_state = self._inspect_surface_cleanup_state()
+            preclear_chat = (
+                self._close_visible_chat_windows()
+                if cleanup_state.get("has_chat_close") or cleanup_state.get("has_chat_editor")
+                else 0
+            )
+            preclear_popup = (
+                self._dismiss_interfering_popups(context=f"成员 {name} 入口前置清场")
+                if cleanup_state.get("has_popup_closer")
+                else 0
+            )
+            preclear_card = (
+                self._dismiss_member_hover_card()
+                if cleanup_state.get("has_member_card")
+                else 0
+            )
+            preclear_overlay = self._detect_blocking_overlay() if cleanup_state.get("has_popup_closer") else None
+            preclear_chat_left = (
+                bool(self._locate_chat_session())
+                if cleanup_state.get("has_chat_close") or cleanup_state.get("has_chat_editor")
+                else False
+            )
             if preclear_overlay and (preclear_chat > 0 or preclear_popup > 0 or preclear_card > 0):
                 preclear_popup += self._dismiss_interfering_popups(context=f"成员 {name} 二次前置清场")
                 preclear_card += self._dismiss_member_hover_card()
@@ -596,76 +699,8 @@ class Messager:
                 self._wait_for_stable_box(link, max_rounds=3, delay=0.06)
             self._wait_if_paused()
 
-            try:
-                link.hover(timeout=action_timeout)
-            except Exception:
-                try:
-                    link.hover(timeout=max(action_timeout, 1200))
-                except Exception:
-                    failure = self._classify_message_button_failure(
-                        link,
-                        name,
-                        hover_card=None,
-                        timed_out=False,
-                    )
-                    log.info(failure["log"])
-                    result = {"status": failure.get("status", "error"), "reason": failure["reason"]}
-                    if failure.get("alert_text"):
-                        result["alert_text"] = failure["alert_text"]
-                    return result
-
-            hover_card = self._wait_for_hover_card(link, timeout_ms=self.hover_card_wait_timeout_ms)
-            if not hover_card:
-                retry_link, retry_hover_card = self._retry_hover_card_after_refind(
-                    target,
-                    timeout_ms=min(self.hover_card_wait_timeout_ms, 3200),
-                )
-                if retry_link:
-                    link = retry_link
-                if retry_hover_card:
-                    hover_card = retry_hover_card
-            if not hover_card:
-                failure = self._classify_message_button_failure(
-                    link,
-                    name,
-                    hover_card=None,
-                    timed_out=False,
-                )
-                log.info(failure["log"])
-                self._dismiss_member_hover_card()
-                result = {"status": failure.get("status", "skip"), "reason": failure["reason"]}
-                if failure.get("alert_text"):
-                    result["alert_text"] = failure["alert_text"]
-                return result
-
-            button = self._find_member_card_message_button(link, hover_card=hover_card)
-            if not button:
-                failure = self._classify_message_button_failure(
-                    link,
-                    name,
-                    hover_card=hover_card,
-                    timed_out=False,
-                )
-                if failure["reason"] != "message_button_blocked_popup" and not self._should_wait_for_message_button(hover_card):
-                    log.info(failure["log"])
-                    self._dismiss_member_hover_card()
-                    result = {"status": failure.get("status", "skip"), "reason": failure["reason"]}
-                    if failure.get("alert_text"):
-                        result["alert_text"] = failure["alert_text"]
-                    return result
-
-                button = self._wait_for_member_card_message_button(
-                    link,
-                    hover_card=hover_card,
-                    timeout_ms=self.message_button_wait_timeout_ms,
-                )
-            if not button:
-                failure = self._classify_message_button_failure(
-                    link,
-                    name,
-                    hover_card=hover_card,
-                    timed_out=True,
-                )
+            button, failure = self._resolve_member_card_message_button(link, name)
+            if failure:
                 log.info(failure["log"])
                 self._dismiss_member_hover_card()
                 result = {"status": failure.get("status", "skip"), "reason": failure["reason"]}
@@ -675,25 +710,26 @@ class Messager:
 
             # 只有在确定要点击发消息按钮时才关闭聊天窗口，避免无按钮时浪费时间
             self._wait_if_paused()
-            self._close_visible_chat_windows()
+            ready_cleanup_state = self._inspect_surface_cleanup_state()
+            if ready_cleanup_state.get("has_chat_close") or ready_cleanup_state.get("has_chat_editor"):
+                self._close_visible_chat_windows()
 
-            if button is not True:
+            try:
+                button.click(timeout=action_timeout)
+                log.info(f"{self._prefix()}发消息按钮点击成功: {name}")
+            except Exception:
                 try:
-                    button.click(timeout=action_timeout)
-                    log.info(f"{self._prefix()}发消息按钮点击成功: {name}")
+                    button.evaluate("el => el.click()")
+                    log.info(f"{self._prefix()}发消息按钮点击成功(JS): {name}")
                 except Exception:
-                    try:
-                        button.evaluate("el => el.click()")
-                        log.info(f"{self._prefix()}发消息按钮点击成功(JS): {name}")
-                    except Exception:
-                        log.warning(f"发消息按钮点击失败，跳过: {name}")
-                        self._dismiss_member_hover_card()
-                        return {"status": "error", "reason": "message_button_click_failed"}
+                    log.warning(f"发消息按钮点击失败，跳过: {name}")
+                    self._dismiss_member_hover_card()
+                    return {"status": "error", "reason": "message_button_click_failed"}
             self._wait_if_paused()
 
             chat_session = self._wait_for_chat_session(
                 expected_name=name,
-                timeout_ms=self.chat_session_wait_timeout_ms,
+                timeout_ms=min(self.chat_session_wait_timeout_ms, 3600),
             )
             if not chat_session:
                 restriction = self._detect_chat_restriction(expected_name=name)
@@ -708,7 +744,7 @@ class Messager:
                 if closed_popups:
                     chat_session = self._wait_for_chat_session(
                         expected_name=name,
-                        timeout_ms=min(self.chat_session_wait_timeout_ms, 3200),
+                        timeout_ms=min(self.chat_session_wait_timeout_ms, 1800),
                     )
                     if chat_session:
                         log.info(f"{self._prefix()}关闭干扰弹层后，聊天窗口恢复可用: {name}")
@@ -739,7 +775,7 @@ class Messager:
             try:
                 if not self._wait_for_editor_ready(
                     chat_session["editor"],
-                    timeout_ms=self.editor_ready_wait_timeout_ms,
+                    timeout_ms=min(self.editor_ready_wait_timeout_ms, 2200),
                 ):
                     log.warning(f"{self._prefix()}输入框未准备就绪，跳过: {name}")
                     return {"status": "error", "reason": "chat_editor_not_ready"}
@@ -764,11 +800,14 @@ class Messager:
                 if not primary_text:
                     return {"status": "error", "reason": "empty_message"}
 
-                delivery_state = self._type_and_send(
+                delivery_state = self._paste_and_send(
                     chat_session["editor"],
                     primary_text,
-                    delay_range,
                 )
+
+                if delivery_state == "paste_failed":
+                    log.warning(f"{self._prefix()}聊天输入框粘贴消息失败，跳过: {name}")
+                    return {"status": "error", "reason": "chat_editor_paste_failed"}
 
                 if delivery_state == "limit_reached":
                     log.warning(f"聊天窗提示陌生消息数量已达上限: {name}")
@@ -890,16 +929,101 @@ class Messager:
             log.error(f"⚠️ 成员页发送流程中断: {exc}")
             return {"status": "error", "reason": repr(exc)}
 
-    def _type_and_send(self, editor, text, delay_range):
+    def _paste_text_into_editor(self, editor, text):
+        normalized_text = self._normalize_text(text)
+        if not normalized_text:
+            return False
+        try:
+            editor.click()
+        except Exception:
+            return False
+        self._sleep(0.04, min_seconds=0.01)
+        try:
+            editor.press("Meta+A" if os.name != "nt" and os.uname().sysname == "Darwin" else "Control+A")
+            self._sleep(0.02, min_seconds=0.01)
+            editor.press("Backspace")
+        except Exception:
+            try:
+                editor.evaluate(
+                    """(el) => {
+                        if (!el) return;
+                        if (el.isContentEditable || el.getAttribute('contenteditable') === 'true') {
+                            el.textContent = '';
+                        } else if ('value' in el) {
+                            el.value = '';
+                        } else {
+                            el.textContent = '';
+                        }
+                        try { el.dispatchEvent(new Event('input', { bubbles: true })); } catch (e) {}
+                        try { el.dispatchEvent(new Event('change', { bubbles: true })); } catch (e) {}
+                    }"""
+                )
+            except Exception:
+                pass
+        try:
+            self.page.keyboard.insert_text(text)
+            self._sleep(0.05, min_seconds=0.02)
+            inserted = editor.evaluate(
+                """(el, payload) => {
+                    const text = String((payload || {}).text || '');
+                    const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+                    if (!el || !text) return false;
+                    const actual = el.isContentEditable || el.getAttribute('contenteditable') === 'true'
+                        ? (el.innerText || el.textContent || '')
+                        : ('value' in el ? el.value : (el.textContent || ''));
+                    return normalize(actual).includes(normalize(text));
+                }""",
+                {"text": text},
+            )
+            if inserted:
+                return True
+        except Exception:
+            pass
+        try:
+            inserted = editor.evaluate(
+                """(el, payload) => {
+                    const text = String((payload || {}).text || '');
+                    const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+                    if (!el || !text) return false;
+                    const isEditable = !!(el.isContentEditable || el.getAttribute('contenteditable') === 'true');
+                    el.focus();
+                    try {
+                        if (isEditable) {
+                            el.textContent = text;
+                        } else if ('value' in el) {
+                            el.value = text;
+                        } else {
+                            el.textContent = text;
+                        }
+                    } catch (e) {
+                        return false;
+                    }
+                    try {
+                        el.dispatchEvent(new InputEvent('input', {
+                            bubbles: true,
+                            inputType: 'insertText',
+                            data: text,
+                        }));
+                    } catch (e) {
+                        try { el.dispatchEvent(new Event('input', { bubbles: true })); } catch (_) {}
+                    }
+                    try { el.dispatchEvent(new Event('change', { bubbles: true })); } catch (e) {}
+                    const actual = isEditable
+                        ? (el.innerText || el.textContent || '')
+                        : ('value' in el ? el.value : (el.textContent || ''));
+                    return normalize(actual).includes(normalize(text));
+                }""",
+                {"text": text},
+            )
+            return bool(inserted)
+        except Exception:
+            return False
+
+    def _paste_and_send(self, editor, text):
         before_hits = self._count_message_hits(editor, text)
-        editor.click()
-        self._sleep(0.08)
-
-        min_delay, max_delay = delay_range
-        for char in text:
-            self.page.keyboard.type(char)
-            self._sleep(random.uniform(min_delay / 1000, max_delay / 1000), min_seconds=0.01)
-
+        if not self._paste_text_into_editor(editor, text):
+            return "paste_failed"
+        self._sleep(0.04, min_seconds=0.01)
         self.page.keyboard.press("Enter")
         return self._wait_for_delivery(editor, text, before_hits)
 
@@ -913,7 +1037,7 @@ class Messager:
             if not state:
                 if self._check_stranger_limit_global():
                     return "limit_reached"
-                self._sleep(0.25)
+                self._sleep(0.12)
                 continue
 
             if state["has_stranger_limit"]:
@@ -941,7 +1065,7 @@ class Messager:
                     return "sent"
             else:
                 success_seen_at = None
-            self._sleep(0.25)
+            self._sleep(0.12)
         if self._check_stranger_limit_global():
             return "limit_reached"
         return "timeout"
@@ -969,7 +1093,7 @@ class Messager:
             if not state:
                 if self._check_stranger_limit_global():
                     return "limit_reached"
-                self._sleep(0.25)
+                self._sleep(0.12)
                 continue
 
             if state["has_stranger_limit"]:
@@ -999,7 +1123,7 @@ class Messager:
             else:
                 success_seen_at = None
 
-            self._sleep(0.25)
+            self._sleep(0.12)
 
         if self._check_stranger_limit_global():
             return "limit_reached"
@@ -1219,15 +1343,27 @@ class Messager:
                     """(payload) => {
                         const texts = payload.strangerLimitTexts || [];
                         const normalize = (value) => (value || '').replace(/\\s+/g, ' ').trim();
-                        const bodyText = normalize(document.body && document.body.innerText);
-                        if (texts.some((t) => bodyText.includes(t))) {
-                            return true;
-                        }
-
+                        const isVisible = (el) => {
+                            if (!el) return false;
+                            const rect = el.getBoundingClientRect();
+                            if (!rect.width || !rect.height) return false;
+                            if (rect.bottom < 0 || rect.top > window.innerHeight) return false;
+                            const style = window.getComputedStyle(el);
+                            if (!style) return false;
+                            return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+                        };
                         const nodes = Array.from(
-                            document.querySelectorAll('[role="alert"], [role="status"], [aria-live], [aria-label]')
+                            document.querySelectorAll(
+                                'div[role="dialog"], div[role="alertdialog"], div[role="alert"], div[role="status"], [aria-live]'
+                            )
                         );
                         return nodes.some((el) => {
+                            if (!isVisible(el)) return false;
+                            const rect = el.getBoundingClientRect();
+                            if (rect.width < 140 || rect.height < 24) return false;
+                            if (rect.right < window.innerWidth * 0.3 && rect.width < window.innerWidth * 0.5) {
+                                return false;
+                            }
                             const text = normalize(el.innerText);
                             const aria = normalize(el.getAttribute && el.getAttribute('aria-label'));
                             return texts.some((s) => text.includes(s) || aria.includes(s));
@@ -1846,8 +1982,14 @@ class Messager:
         user_id = target.get("user_id")
         group_user_url = target.get("group_user_url")
         target_name = str(target.get("name") or "").strip()
+        link_selector = str(target.get("link_selector") or "").strip()
         abs_top = target.get("abs_top")
         abs_left = target.get("abs_left")
+
+        if link_selector:
+            direct_locator = self._find_member_link_by_selector(link_selector)
+            if direct_locator:
+                return direct_locator
 
         selectors = []
         if group_user_url:
@@ -1929,6 +2071,18 @@ class Messager:
             return None
         candidates.sort(key=lambda item: (item[0], item[1], item[2]))
         return candidates[0][3]
+
+    def _find_member_link_by_selector(self, selector):
+        try:
+            locator = self.page.locator(selector).first
+            if not locator.is_visible(timeout=self._scale_ms(260, min_ms=100)):
+                return None
+            box = self._safe_bounding_box(locator, timeout_ms=320)
+            if not box:
+                return None
+            return locator
+        except Exception:
+            return None
 
     def _find_visible_member_link_by_target(self, user_id=None, group_user_url=None, target_name="", abs_top=None, abs_left=None):
         try:
@@ -2024,36 +2178,125 @@ class Messager:
         except Exception:
             return None
 
-    def _retry_hover_card_after_refind(self, target, timeout_ms):
-        try:
-            self._dismiss_interfering_popups(context="成员资料卡重试阶段")
-        except Exception:
-            pass
-        self._dismiss_member_hover_card()
-        retry_link = self._find_member_link(target)
-        if not retry_link:
-            return None, None
-        try:
-            retry_link.scroll_into_view_if_needed(timeout=self._scale_ms(1600, min_ms=800))
-        except Exception:
-            pass
-        try:
-            retry_link.hover(timeout=self._scale_ms(1800, min_ms=900))
-        except Exception:
-            return retry_link, None
-        hover_card = self._wait_for_hover_card(retry_link, timeout_ms=timeout_ms)
-        return retry_link, hover_card
-
-    def _find_member_card_message_button(self, link, hover_card=None):
-        link_box = self._wait_for_stable_box(link)
+    def _resolve_member_card_message_button(self, link, name):
+        link_box = self._wait_for_stable_box(link, max_rounds=2, delay=0.06)
         if not link_box:
-            return None
+            return None, self._classify_message_button_failure(
+                link,
+                name,
+                hover_card=None,
+                timed_out=False,
+            )
 
+        state = {
+            "link_box": link_box,
+            "hover_card": self._find_hover_card_container(link_box),
+            "overlay_cleared": False,
+            "rehovered": False,
+        }
+
+        if state["hover_card"] is None:
+            self._trigger_hover_card(link)
+            state["rehovered"] = True
+            state["hover_card"] = self._wait_for_condition(
+                "成员资料卡",
+                "等待资料卡区域渲染完成",
+                lambda: self._find_hover_card_container(state["link_box"]),
+                timeout_ms=min(self.hover_card_wait_timeout_ms, self._scale_ms(1400, min_ms=700)),
+                interval=0.12,
+            )
+
+        if state["hover_card"] is None:
+            if self._detect_blocking_overlay():
+                self._dismiss_interfering_popups(context=f"成员 {name} 资料卡识别阶段")
+                self._dismiss_member_hover_card()
+                state["overlay_cleared"] = True
+            try:
+                link.scroll_into_view_if_needed(timeout=self._scale_ms(1200, min_ms=600))
+                state["link_box"] = self._wait_for_stable_box(link, max_rounds=2, delay=0.06) or state["link_box"]
+            except Exception:
+                pass
+            state["hover_card"] = self._find_hover_card_container(state["link_box"])
+            if state["hover_card"] is None:
+                self._trigger_hover_card(link)
+                state["hover_card"] = self._wait_for_condition(
+                    "成员资料卡",
+                    "二次等待资料卡区域渲染完成",
+                    lambda: self._find_hover_card_container(state["link_box"]),
+                    timeout_ms=min(self.hover_card_wait_timeout_ms, self._scale_ms(900, min_ms=450)),
+                    interval=0.12,
+                )
+                state["rehovered"] = True
+
+        hover_card = state["hover_card"]
         if hover_card is None:
-            hover_card = self._find_hover_card_container(link_box)
-        if hover_card is None:
-            return None
-        return self._find_message_button_in_container(hover_card)
+            return None, self._classify_message_button_failure(
+                link,
+                name,
+                hover_card=None,
+                timed_out=False,
+            )
+
+        button = self._find_message_button_in_container(hover_card)
+        if button:
+            return button, None
+
+        failure = self._classify_message_button_failure(
+            link,
+            name,
+            hover_card=hover_card,
+            timed_out=False,
+        )
+        if failure["reason"] != "message_button_blocked_popup" and not self._should_wait_for_message_button(hover_card):
+            return None, failure
+
+        state["hover_card"] = hover_card
+        state["rehovered"] = False
+
+        def _locate():
+            current_card = state["hover_card"]
+            if current_card is None:
+                current_card = self._find_hover_card_container(state["link_box"])
+                state["hover_card"] = current_card
+            if current_card is not None:
+                current_button = self._find_message_button_in_container(current_card)
+                if current_button:
+                    return current_button
+            if not state["overlay_cleared"] and self._detect_blocking_overlay():
+                self._dismiss_interfering_popups(context="成员资料卡按钮识别阶段")
+                self._dismiss_member_hover_card()
+                state["hover_card"] = None
+                state["overlay_cleared"] = True
+                state["rehovered"] = False
+                return None
+            if not state["rehovered"]:
+                self._trigger_hover_card(link)
+                state["rehovered"] = True
+                return None
+            refreshed_box = self._wait_for_stable_box(link, max_rounds=1, delay=0.04)
+            if refreshed_box:
+                state["link_box"] = refreshed_box
+            current_card = self._find_hover_card_container(state["link_box"])
+            if current_card is None:
+                return None
+            state["hover_card"] = current_card
+            return self._find_message_button_in_container(current_card)
+
+        button = self._wait_for_condition(
+            "发消息按钮",
+            "等待资料卡中的“发消息”按钮可点击",
+            _locate,
+            timeout_ms=min(self.message_button_wait_timeout_ms, self._scale_ms(1600, min_ms=800)),
+            interval=0.12,
+        )
+        if button:
+            return button, None
+        return None, self._classify_message_button_failure(
+            link,
+            name,
+            hover_card=state["hover_card"],
+            timed_out=True,
+        )
 
     def _find_message_button_in_container(self, container):
         for selector in self.MEMBER_CARD_MESSAGE_SELECTORS:
@@ -2169,40 +2412,21 @@ class Messager:
         candidates.sort(key=lambda item: (item[0], item[1], item[2]))
         return candidates[0][3]
 
-    def _ensure_hover_card(self, link):
-        link_box = self._wait_for_stable_box(link)
-        if not link_box:
-            return None
-        for attempt in range(2):
-            try:
-                link.hover(timeout=self._scale_ms(1400, min_ms=900))
-            except Exception:
-                pass
-            card = self._wait_for_condition(
-                "成员资料卡",
-                "等待悬停后的资料卡出现",
-                lambda: self._find_hover_card_container(link_box),
-                timeout_ms=self._scale_ms(520, min_ms=280),
-                interval=0.08,
+    def _trigger_hover_card(self, link):
+        triggered = False
+        try:
+            link.hover(timeout=self._scale_ms(900, min_ms=450))
+            triggered = True
+        except Exception:
+            pass
+        try:
+            link.evaluate(
+                "node => node.dispatchEvent(new MouseEvent('mouseover', {bubbles:true}))"
             )
-            if card:
-                return card
-            try:
-                link.evaluate(
-                    "node => node.dispatchEvent(new MouseEvent('mouseover', {bubbles:true}))"
-                )
-            except Exception:
-                pass
-            card = self._wait_for_condition(
-                "成员资料卡",
-                "等待 mouseover 后资料卡出现",
-                lambda: self._find_hover_card_container(link_box),
-                timeout_ms=self._scale_ms(320, min_ms=180),
-                interval=0.06,
-            )
-            if card:
-                return card
-        return None
+            triggered = True
+        except Exception:
+            pass
+        return triggered
 
     def _wait_for_stable_box(self, locator, max_rounds=3, tolerance=2.0, delay=0.15):
         last = None
@@ -2268,7 +2492,7 @@ class Messager:
             "等待聊天输入框出现",
             lambda: self._locate_chat_session(expected_name=expected_name),
             timeout_ms=timeout_ms,
-            interval=0.25,
+            interval=0.12,
         )
         return result
 
@@ -2321,7 +2545,7 @@ class Messager:
             "等待输入框可见且可写",
             lambda: self._editor_ready(editor),
             timeout_ms=timeout_ms,
-            interval=0.2,
+            interval=0.12,
         )
         return bool(result)
 
@@ -2344,64 +2568,6 @@ class Messager:
             )
         except Exception:
             return False
-
-    def _wait_for_hover_card(self, link, timeout_ms=None):
-        timeout_ms = self._scale_ms(timeout_ms or self.hover_card_wait_timeout_ms, min_ms=1500)
-        link_box = self._wait_for_stable_box(link, max_rounds=2, delay=0.08)
-        if not link_box:
-            return None
-        card = self._wait_for_condition(
-            "成员资料卡",
-            "等待资料卡区域渲染完成",
-            lambda: self._find_hover_card_container(link_box) or self._ensure_hover_card(link),
-            timeout_ms=timeout_ms,
-            interval=0.25,
-        )
-        if card:
-            return card
-        self._dismiss_interfering_popups(context="成员资料卡等待阶段")
-        self._dismiss_member_hover_card()
-        try:
-            link.scroll_into_view_if_needed(timeout=self._scale_ms(1600, min_ms=800))
-            self._wait_for_stable_box(link, max_rounds=3, delay=0.06)
-        except Exception:
-            pass
-        return self._wait_for_condition(
-            "成员资料卡",
-            "二次等待资料卡区域渲染完成",
-            lambda: self._ensure_hover_card(link),
-            timeout_ms=min(timeout_ms, self._scale_ms(3200, min_ms=1600)),
-            interval=0.25,
-        )
-
-    def _wait_for_member_card_message_button(self, link, hover_card=None, timeout_ms=None):
-        timeout_ms = self._scale_ms(timeout_ms or self.message_button_wait_timeout_ms, min_ms=1500)
-        state = {"hover_card": hover_card}
-
-        def _locate():
-            current_card = state["hover_card"]
-            if current_card is None:
-                current_card = self._ensure_hover_card(link)
-                state["hover_card"] = current_card
-            if current_card is None:
-                return None
-            button = self._find_member_card_message_button(link, hover_card=current_card)
-            if not button and self._detect_blocking_overlay():
-                self._dismiss_interfering_popups(context="成员资料卡按钮识别阶段")
-                state["hover_card"] = self._ensure_hover_card(link)
-                current_card = state["hover_card"]
-                if current_card is None:
-                    return None
-                button = self._find_member_card_message_button(link, hover_card=current_card)
-            return button
-
-        return self._wait_for_condition(
-            "发消息按钮",
-            "等待资料卡中的“发消息”按钮可点击",
-            _locate,
-            timeout_ms=timeout_ms,
-            interval=0.25,
-        )
 
     def _find_chat_close_button(self, editor, expected_name=None):
         try:

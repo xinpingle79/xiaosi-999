@@ -449,6 +449,23 @@ class Scraper:
                 """(payload) => {
                     const labels = payload.labels || [];
                     const normalize = (value) => (value || '').replace(/\\s+/g, ' ').trim();
+                    const cssPath = (el) => {
+                        if (!el || !(el instanceof Element)) return null;
+                        const parts = [];
+                        let node = el;
+                        while (node && node.nodeType === Node.ELEMENT_NODE && node !== document.body) {
+                            const tag = node.tagName.toLowerCase();
+                            let index = 1;
+                            let sibling = node.previousElementSibling;
+                            while (sibling) {
+                                if (sibling.tagName === node.tagName) index += 1;
+                                sibling = sibling.previousElementSibling;
+                            }
+                            parts.unshift(`${tag}:nth-of-type(${index})`);
+                            node = node.parentElement;
+                        }
+                        return parts.length ? parts.join(' > ') : null;
+                    };
                     const matchesLabel = (text, label) => {
                         if (!text || !label) return false;
                         if (text === label) return true;
@@ -554,6 +571,7 @@ class Scraper:
                                 reason: 'ok',
                                 label: item.label,
                                 headingText: item.text,
+                                containerSelector: cssPath(node),
                                 headingTop: item.rect.top + window.scrollY,
                                 headingBottom: item.rect.bottom + window.scrollY,
                                 sectionTop: item.rect.top + window.scrollY,
@@ -876,14 +894,11 @@ class Scraper:
 
     def collect_visible_new_member_targets(self, anchor=None, require_after_anchor=False):
         current_user_url = self._get_current_user_url()
-        targets = []
-        seen_urls = set()
         anchor_user_id = anchor.get("user_id") if anchor else None
-
-        self._wait_for_member_list_stable(timeout=0.9)
 
         payload = self._extract_visible_member_candidates(anchor_user_id)
         items = payload.get("items", []) if isinstance(payload, dict) else (payload or [])
+        fallback_items = payload.get("fallbackItems", []) if isinstance(payload, dict) else []
         anchor_found = payload.get("anchorFound", True) if isinstance(payload, dict) else True
         scope_confirmed = bool(payload.get("scopeConfirmed")) if isinstance(payload, dict) else False
         scope_reason = str(payload.get("scopeReason") or "").strip() if isinstance(payload, dict) else ""
@@ -906,10 +921,17 @@ class Scraper:
             scope_label=scope_label,
         )
 
+        targets = self._build_member_targets_from_items(items, current_user_url)
+        fallback_targets = self._build_member_targets_from_items(fallback_items, current_user_url)
+
         if require_after_anchor and anchor_user_id and not anchor_found:
-            return [], False
+            targets = []
         if not scope_confirmed:
-            return [], anchor_found
+            return {
+                "targets": [],
+                "fallback_targets": [],
+                "anchor_found": anchor_found,
+            }
         if anchor_user_id and anchor_found:
             self._set_sequence_anchor_hint(
                 anchor_user_id=anchor_user_id,
@@ -919,20 +941,11 @@ class Scraper:
         elif not anchor_user_id:
             self._set_sequence_anchor_hint()
 
-        for item in items:
-            target = self._build_member_target(item)
-            if not target:
-                continue
-            if target["profile_url"] == current_user_url:
-                continue
-            if target["profile_url"] in seen_urls:
-                continue
-            if target.get("source_scope") != "newcomers":
-                continue
-            seen_urls.add(target["profile_url"])
-            targets.append(target)
-
-        return targets, anchor_found
+        return {
+            "targets": targets,
+            "fallback_targets": fallback_targets,
+            "anchor_found": anchor_found,
+        }
 
     def scroll_member_list(self):
         scope = self._locate_newcomers_scope()
@@ -2169,6 +2182,7 @@ class Scraper:
                     """(payload) => {
                 const anchorUserId = payload.anchorUserId || '';
                 const scope = payload.scope || {};
+                const scopeSelector = scope.containerSelector || '';
                 const recentJoinRe = /(刚加入|刚刚加入|加入时间[:：]\\s*\\S+|(约|大约|大概)?\\s*\\d+\\s*(秒|分钟|小时|天|周|月|个月|年)前(?:加入)?|\\d{4}年\\d{1,2}月\\d{1,2}日由.+添加|joined\\s+(just now|just|\\d+\\s*(second|minute|hour|day|week|month|year)s?\\s+ago|on\\s+\\w+)|added\\s+by|se\\s+unió|hace\\s+\\d+|añadido\\s+por|entrou|há\\s+\\d+|adicionado\\s+por|a\\s+rejoint|il\\s+y\\s+a|ajouté\\s+par|beigetreten|vor\\s+\\d+|si\\s+è\\s+unito|fa\\s+\\d+|aggiunto\\s+da|toegetreden|geleden|присоединился|назад|dołączył|temu|katıldı|önce|انضم|منذ|शामिल|पहले|bergabung|yang\\s+lalu|menyertai|yang\\s+lalu|tham\\s+gia|trước|参加|前|가입|전|เพิ่งเข้าร่วม|เข้าร่วมเมื่อ|เข้าร่วม|เมื่อ\\s*\\d+\\s*(วินาที|นาที|ชั่วโมง|วัน|สัปดาห์|เดือน|ปี)ที่แล้ว|ចូលរួម|ເຂົ້າຮ່ວມ|sumali|nakaraan)/i;
                 const groupUserRe = /\\/groups\\/[^/]+\\/user\\/\\d+\\/?/i;
                 const skipNames = new Set(['查看全部', 'See all', '邀请', 'Invite', '发消息', 'Message', '更多', 'More']);
@@ -2192,6 +2206,23 @@ class Scraper:
                 const laneMinX = Math.max(0, scopeLeft - 32);
                 const laneMaxX = Math.min(window.innerWidth, scopeRight + 96);
                 const actionHintRe = /(发消息|发送消息|發送訊息|message|send message|add friend|follow|connect)/i;
+                    const cssPath = (el) => {
+                        if (!el || !(el instanceof Element)) return null;
+                        const parts = [];
+                        let node = el;
+                        while (node && node.nodeType === Node.ELEMENT_NODE && node !== document.body) {
+                            const tag = node.tagName.toLowerCase();
+                            let index = 1;
+                            let sibling = node.previousElementSibling;
+                            while (sibling) {
+                                if (sibling.tagName === node.tagName) index += 1;
+                                sibling = sibling.previousElementSibling;
+                            }
+                            parts.unshift(`${tag}:nth-of-type(${index})`);
+                            node = node.parentElement;
+                        }
+                        return parts.length ? parts.join(' > ') : null;
+                    };
                     const hasBlockedRole = (text) => blockedRoleTexts.some((token) => text.includes(token));
                     const getVisibleGroupUserIds = (node) => {
                         if (!node || !node.querySelectorAll) return [];
@@ -2207,9 +2238,13 @@ class Scraper:
                         }
                         return Array.from(ids);
                     };
+                    const scopeRoot = scopeSelector ? document.querySelector(scopeSelector) : null;
+                    const linkNodes = Array.from(
+                        (scopeRoot || document).querySelectorAll('a[href*="/groups/"][href*="/user/"]')
+                    );
 
                     let order = 0;
-                    for (const a of Array.from(document.querySelectorAll('a[href]'))) {
+                    for (const a of linkNodes) {
                     const href = a.getAttribute('href') || '';
                     if (!href || href.startsWith('#')) continue;
                     if (!groupUserRe.test(href)) continue;
@@ -2298,6 +2333,7 @@ class Scraper:
                         href,
                         userId,
                         name,
+                        selector: cssPath(a),
                         cardText: cardText.slice(0, 200),
                         top: rect.top,
                         left: rect.left,
@@ -2331,6 +2367,7 @@ class Scraper:
                     if (!anchorUserId) {
                         return {
                         items: deduped,
+                        fallbackItems: [],
                         anchorFound: true,
                         anchorAtTail: false,
                         scopeConfirmed: true,
@@ -2346,6 +2383,7 @@ class Scraper:
                     const afterAnchor = deduped.filter((item, index) => index > anchorIndex && String(item.userId || '') !== anchorToken);
                     return {
                         items: afterAnchor,
+                        fallbackItems: deduped,
                         anchorFound: true,
                         anchorAtTail: anchorIndex === deduped.length - 1,
                         scopeConfirmed: true,
@@ -2357,6 +2395,7 @@ class Scraper:
                 }
                     return {
                         items: [],
+                        fallbackItems: deduped,
                         anchorFound: false,
                         anchorAtTail: false,
                         scopeConfirmed: true,
@@ -2390,6 +2429,24 @@ class Scraper:
             "listFingerprint": "",
             "visibleCount": 0,
         }
+
+    def _build_member_targets_from_items(self, items, current_user_url):
+        targets = []
+        seen_urls = set()
+        for item in items or []:
+            target = self._build_member_target(item)
+            if not target:
+                continue
+            profile_url = target.get("profile_url") or ""
+            if not profile_url or profile_url == current_user_url:
+                continue
+            if profile_url in seen_urls:
+                continue
+            if target.get("source_scope") != "newcomers":
+                continue
+            seen_urls.add(profile_url)
+            targets.append(target)
+        return targets
 
     def _normalize_user_url(self, href):
         full_url = urljoin("https://www.facebook.com", href)
@@ -2435,6 +2492,7 @@ class Scraper:
             "user_id": user_id,
             "group_user_url": f"https://www.facebook.com/groups/{segments[1]}/user/{user_id}/",
             "profile_url": profile_url,
+            "link_selector": item.get("selector") or "",
             "card_text": item.get("cardText", ""),
             "abs_top": item.get("absTop"),
             "abs_left": item.get("absLeft"),

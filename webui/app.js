@@ -652,17 +652,13 @@ async function refreshStatus() {
   if (dashFailYesterday) dashFailYesterday.textContent = `昨日 ${dbStats.failed_yesterday ?? 0}`;
   if (dashFailTotal) dashFailTotal.textContent = `总计 ${dbStats.failed_total ?? 0}`;
   if (IS_SUB) {
-    const summaryResponse = await api("/device_summary");
-    if (summaryResponse.ok) {
-      const summary = summaryResponse.data || {};
-      const onlineDevices = Number(summary.online_devices ?? 0);
-      const maxDevices = summary.max_devices;
-      const maxLabel =
-        maxDevices === null || maxDevices === undefined || maxDevices === ""
-          ? "-"
-          : String(maxDevices);
-      if (dashUserToday) dashUserToday.textContent = `${onlineDevices} / ${maxLabel}`;
-    }
+    const onlineDevices = Number(dbStats.device_online ?? 0);
+    const maxDevices = dbStats.max_devices;
+    const maxLabel =
+      maxDevices === null || maxDevices === undefined || maxDevices === ""
+        ? "-"
+        : String(maxDevices);
+    if (dashUserToday) dashUserToday.textContent = `${onlineDevices} / ${maxLabel}`;
     if (dashUserYesterday)
       dashUserYesterday.textContent = `昨日在线 ${dbStats.device_yesterday ?? 0}`;
     if (dashUserTotal)
@@ -738,12 +734,6 @@ function splitLines(value) {
 function toInt(value, fallback) {
   const parsed = parseInt(String(value).trim(), 10);
   return Number.isFinite(parsed) ? parsed : fallback;
-}
-
-function normalizeRange(minValue, maxValue, fallbackMin, fallbackMax) {
-  const min = Math.max(1, toInt(minValue, fallbackMin));
-  const max = Math.max(1, toInt(maxValue, fallbackMax));
-  return min <= max ? [min, max] : [max, min];
 }
 
 function setActivePage(pageKey, title, persist = true) {
@@ -955,13 +945,6 @@ function setButtonDisabled(button, disabled, reason = "") {
   }
 }
 
-function getControlOwnerName() {
-  if (IS_SUB) {
-    return String(currentAccountInfo.username || "").trim();
-  }
-  return String(currentAccountInfo.username || "admin").trim() || "admin";
-}
-
 function inferTaskPending(status) {
   const logs = Array.isArray(status?.logs) ? status.logs.slice(-20) : [];
   const pendingTokens = [
@@ -985,6 +968,9 @@ function inferTaskPending(status) {
 }
 
 function applyTaskButtonState() {
+  if (!IS_SUB) {
+    return;
+  }
   const status = latestStatusPayload;
   if (!status) {
     setButtonDisabled(startBtn, true, "状态同步中");
@@ -995,13 +981,8 @@ function applyTaskButtonState() {
     return;
   }
 
-  const ownerName = getControlOwnerName();
-  const relevantAgents = IS_SUB
-    ? latestAgentRows
-    : latestAgentRows.filter((item) => String(item.owner || "").trim() === ownerName);
-  const relevantConfigs = IS_SUB
-    ? latestDeviceInfoRows
-    : latestDeviceInfoRows.filter((item) => String(item.owner || "").trim() === ownerName);
+  const relevantAgents = latestAgentRows;
+  const relevantConfigs = latestDeviceInfoRows;
   const enabledConfigs = relevantConfigs.filter((item) => Number(item.status ?? 1) !== 0);
   const hasBoundDevice = enabledConfigs.some((item) => String(item.machine_id || "").trim());
   const hasConnectionFields = enabledConfigs.some(

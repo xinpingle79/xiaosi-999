@@ -1,5 +1,4 @@
 import argparse
-import base64
 import os
 import random
 import re
@@ -8,6 +7,7 @@ import sys
 import threading
 import time
 import warnings
+import ctypes
 from datetime import datetime, timedelta
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
@@ -34,9 +34,9 @@ os.chdir(BASE_DIR)
 
 ENV_RUNTIME_DIR = "FB_RPA_RUNTIME_DIR"
 ALERT_HELPER_PATH = (
-    str(BASE_DIR / "FB_Group_RPA_Alert.exe")
-    if IS_FROZEN
-    else str(BASE_DIR / "desktop_alert.py")
+    str(BASE_DIR / "desktop_alert.py")
+    if not IS_FROZEN
+    else ""
 )
 ENV_BIT_API = "FB_RPA_BIT_API"
 ENV_API_TOKEN = "FB_RPA_API_TOKEN"
@@ -99,6 +99,51 @@ def load_runtime_files():
         with open(messages_path, "r", encoding="utf-8") as f:
             msgs = yaml.safe_load(f) or {}
     return config, msgs
+
+
+def _normalize_message_templates(templates):
+    return [
+        str(item).strip()
+        for item in (templates or [])
+        if str(item).strip()
+    ]
+
+
+def resolve_message_templates(local_messages, account_messages=None):
+    local_payload = local_messages if isinstance(local_messages, dict) else {}
+    account_payload = account_messages if isinstance(account_messages, dict) else {}
+    local_formal = _normalize_message_templates(local_payload.get("templates") or [])
+    local_probe = _normalize_message_templates(local_payload.get("probe_templates") or [])
+    owner_formal = _normalize_message_templates(account_payload.get("templates") or [])
+    owner_probe = _normalize_message_templates(account_payload.get("probe_templates") or [])
+
+    if local_formal:
+        selected_templates = local_formal
+        template_source = "local_messages_yaml"
+    elif owner_formal:
+        selected_templates = owner_formal
+        template_source = "db_owner_templates"
+    elif local_probe:
+        selected_templates = local_probe
+        template_source = "local_probe_templates"
+    elif owner_probe:
+        selected_templates = owner_probe
+        template_source = "db_owner_probe_templates"
+    else:
+        selected_templates = []
+        template_source = "missing_templates"
+
+    return {
+        "templates": selected_templates,
+        "probe_templates": local_probe or owner_probe,
+        "template_source": template_source,
+        "stats": {
+            "local_formal": len(local_formal),
+            "owner_formal": len(owner_formal),
+            "local_probe": len(local_probe),
+            "owner_probe": len(owner_probe),
+        },
+    }
 
 
 def _runtime_dir(config=None):
@@ -261,17 +306,15 @@ def run_single_session(config, msgs, browser_settings, profile=None, startup_loc
     label = format_account_label(profile)
     window_token_label = resolve_window_token(profile, window_token)
     owner_username = (os.environ.get(ENV_OWNER) or "").strip()
-    probe_templates = msgs.get("probe_templates") or ["你好"]
-    formal_templates = msgs.get("templates") or []
-    account_templates_used = False
-    template_source = "local_messages_yaml"
+    machine_id = str(config.get("machine_id") or "").strip()
+    account_messages = None
     if owner_username:
         account_messages = db.get_message_templates(owner_username)
-        if account_messages is not None:
-            probe_templates = account_messages.get("probe_templates") or []
-            formal_templates = account_messages.get("templates") or []
-            account_templates_used = True
-            template_source = "db_owner_templates"
+    template_resolution = resolve_message_templates(msgs, account_messages)
+    probe_templates = template_resolution["probe_templates"]
+    formal_templates = template_resolution["templates"]
+    template_source = template_resolution["template_source"]
+    template_stats = template_resolution["stats"]
 
     try:
         with sync_playwright() as p:
@@ -301,13 +344,21 @@ def run_single_session(config, msgs, browser_settings, profile=None, startup_loc
                 scraper = Scraper(page, window_label=alert_account_id)
                 sender = Messager(page, task_cfg, window_label=alert_account_id)
                 max_messages = normalize_message_limit(task_cfg.get("max_messages_per_account", 0))
-                if account_templates_used:
-                    log.info(f"[{alert_account_id}] 使用账号专属文案 ({len(formal_templates)} 条)")
-                else:
+                if template_source == "local_messages_yaml":
                     log.info(f"[{alert_account_id}] 使用本地文案文件 ({len(formal_templates)} 条)")
+                elif template_source == "db_owner_templates":
+                    log.info(f"[{alert_account_id}] 本地正式文案为空，回退子账户文案 ({len(formal_templates)} 条)")
+                elif template_source == "local_probe_templates":
+                    log.warning(f"[{alert_account_id}] 正式文案为空，改用本地探针文案发送。")
+                elif template_source == "db_owner_probe_templates":
+                    log.warning(f"[{alert_account_id}] 正式文案为空，改用子账户探针文案发送。")
                 log.info(
-                    f"[{alert_account_id}] 文案装载完成：source={template_source}，"
-                    f"formal={len(formal_templates)}，probe={len(probe_templates)}"
+                    f"[{alert_account_id}] 文案装载完成：selected={template_source}，"
+                    f"local_formal={template_stats['local_formal']}，"
+                    f"owner_formal={template_stats['owner_formal']}，"
+                    f"local_probe={template_stats['local_probe']}，"
+                    f"owner_probe={template_stats['owner_probe']}，"
+                    f"active={len(formal_templates)}，probe={len(probe_templates)}"
                 )
                 log.info(
                     f"[{alert_account_id}] 发送频率来源：source=client_yaml.task_settings.send_interval_seconds"
@@ -322,9 +373,6 @@ def run_single_session(config, msgs, browser_settings, profile=None, startup_loc
                         "reason": "account_disabled",
                     }
 
-                if not formal_templates and probe_templates:
-                    formal_templates = probe_templates
-                    log.warning(f"[{alert_account_id}] 正式文案为空，改用探针文案发送。")
                 if not formal_templates:
                     log.error(f"[{alert_account_id}] 正式发送文案为空，当前窗口无法启动。")
                     return {
@@ -388,6 +436,7 @@ def run_single_session(config, msgs, browser_settings, profile=None, startup_loc
                         sender=sender,
                         db=db,
                         account_id=account_id,
+                        machine_id=machine_id,
                         owner_username=owner_username,
                         probe_templates=probe_templates,
                         templates=formal_templates,
@@ -618,6 +667,7 @@ def process_current_group(
     sender,
     db,
     account_id,
+    machine_id,
     owner_username,
     probe_templates,
     templates,
@@ -651,6 +701,7 @@ def process_current_group(
             sender=sender,
             db=db,
             account_id=account_id,
+            machine_id=machine_id,
             group_id=group_id,
             owner_username=owner_username,
             probe_templates=probe_templates,
@@ -683,6 +734,7 @@ def process_current_group(
                 sender=sender,
                 db=db,
                 account_id=account_id,
+                machine_id=machine_id,
                 group_id=group_id,
                 owner_username=owner_username,
                 probe_templates=probe_templates,
@@ -708,6 +760,7 @@ def process_current_group(
         sender=sender,
         db=db,
         account_id=account_id,
+        machine_id=machine_id,
         group_id=group_id,
         owner_username=owner_username,
         probe_templates=probe_templates,
@@ -728,6 +781,7 @@ def process_member_targets(
     sender,
     db,
     account_id,
+    machine_id,
     group_id,
     owner_username,
     probe_templates,
@@ -797,10 +851,13 @@ def process_member_targets(
             }
 
         anchor_required = last_anchor is not None
-        targets, anchor_found = scraper.collect_visible_new_member_targets(
+        capture = scraper.collect_visible_new_member_targets(
             anchor=last_anchor if anchor_required else None,
             require_after_anchor=anchor_required,
         )
+        targets = list((capture or {}).get("targets") or [])
+        fallback_targets = list((capture or {}).get("fallback_targets") or [])
+        anchor_found = bool((capture or {}).get("anchor_found", True))
         scope_status = scraper.get_last_scope_status()
         member_list_snapshot = scraper.get_last_member_list_snapshot()
         if not scope_status.get("confirmed"):
@@ -815,26 +872,21 @@ def process_member_targets(
                 "reason": "newcomers_scope_unconfirmed",
             }
 
-        if anchor_required and not anchor_found and allow_anchor_reseed:
-            log.info("尾部锚点已离开当前视图，改为从新视图顶部继续顺序采集。")
-            targets, anchor_found = scraper.collect_visible_new_member_targets(
-                anchor=None,
-                require_after_anchor=False,
-            )
+        if anchor_required and not anchor_found and fallback_targets and allow_anchor_reseed:
+            log.info("尾部锚点已离开当前视图，直接从当前新视图顶部继续顺序采集。")
+            targets = fallback_targets
+            anchor_found = True
             allow_anchor_reseed = False
-            member_list_snapshot = scraper.get_last_member_list_snapshot()
         if (
             anchor_required
             and not anchor_found
+            and fallback_targets
             and not skip_until_cursor
             and int(member_list_snapshot.get("visible_count") or 0) > 0
         ):
-            log.info("锚点因列表刷新离开当前视图，改为从当前视图顶部重新衔接顺序采集。")
-            targets, anchor_found = scraper.collect_visible_new_member_targets(
-                anchor=None,
-                require_after_anchor=False,
-            )
-            member_list_snapshot = scraper.get_last_member_list_snapshot()
+            log.info("锚点因列表刷新离开当前视图，直接从当前视图顶部重新衔接顺序采集。")
+            targets = fallback_targets
+            anchor_found = True
         if anchor_required and not anchor_found:
             anchor_attempts += 1
             if anchor_attempts == 1:
@@ -1066,13 +1118,11 @@ def process_member_targets(
         )
         probe_text = ""
         result = None
-        typing_delay = task_cfg.get("typing_delay") or [100, 300]
         try:
             result = sender.send_member_card_dm(
                 target,
                 probe_text,
                 greeting_text,
-                typing_delay,
             )
         finally:
             if not result or result.get("status") != "sent":
@@ -1089,6 +1139,7 @@ def process_member_targets(
                 profile_url=profile_url,
                 account_id=account_id,
                 user_id=target.get("user_id"),
+                machine_id=machine_id,
             )
             messages_sent += 1
             db.save_cursor(group_id, target, account_id=account_id)
@@ -1306,15 +1357,15 @@ def get_send_interval_detail(task_cfg):
         raw = cache.get("value")
 
     if raw is None:
-        raw = [2, 6]
+        raw = [0, 0]
     if not isinstance(raw, (list, tuple)) or len(raw) != 2:
-        raw = [2, 6]
+        raw = [0, 0]
 
     try:
-        min_seconds = max(1, int(raw[0]))
-        max_seconds = max(1, int(raw[1]))
+        min_seconds = max(0, int(raw[0]))
+        max_seconds = max(0, int(raw[1]))
     except Exception:
-        min_seconds, max_seconds = 2, 6
+        min_seconds, max_seconds = 0, 0
 
     if min_seconds > max_seconds:
         min_seconds, max_seconds = max_seconds, min_seconds
@@ -1449,25 +1500,18 @@ def show_desktop_alert(title, message, critical=False):
             if _try_windows_dialog_alert(title, message, critical):
                 log.info("桌面提醒弹窗已显示成功（Windows 系统弹窗），等待用户确认。")
                 return True
-        if ALERT_HELPER_PATH.lower().endswith(".exe"):
-            command = [
-                ALERT_HELPER_PATH,
-                "--title",
-                title,
-                "--message",
-                message,
-                "--critical" if critical else "--info",
-            ]
-        else:
-            command = [
-                sys.executable,
-                ALERT_HELPER_PATH,
-                "--title",
-                title,
-                "--message",
-                message,
-                "--critical" if critical else "--info",
-            ]
+        if not ALERT_HELPER_PATH or not Path(ALERT_HELPER_PATH).exists():
+            log.warning("桌面弹窗 helper 不存在，已跳过 helper 回退链路。")
+            return False
+        command = [
+            sys.executable,
+            ALERT_HELPER_PATH,
+            "--title",
+            title,
+            "--message",
+            message,
+            "--critical" if critical else "--info",
+        ]
         process = subprocess.Popen(
             command,
             stdout=subprocess.PIPE,
@@ -1539,64 +1583,48 @@ def _try_windows_dialog_alert(title, message, critical):
     if not sys.platform.startswith("win"):
         return False
     try:
-        title_text = (title or "提醒").replace("'", "''")
-        message_text = (message or "").replace("'", "''")
-        icon = "Error" if critical else "Information"
-        script = (
-            "Add-Type -AssemblyName System.Windows.Forms\n"
-            f"$Title = '{title_text}'\n"
-            f"$Message = '{message_text}'\n"
-            f"$icon = [System.Windows.Forms.MessageBoxIcon]::{icon}\n"
-            "[System.Windows.Forms.MessageBox]::Show($Message, $Title, "
-            "[System.Windows.Forms.MessageBoxButtons]::OK, $icon) | Out-Null\n"
-        )
-        encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
-        for exe in ("powershell", "pwsh"):
-            try:
-                process = subprocess.Popen(
-                    [exe, "-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    close_fds=True,
-                )
-            except FileNotFoundError:
-                continue
-            time.sleep(0.6)
-            if process.poll() is not None:
-                _, stderr = process.communicate(timeout=1)
-                error_text = (stderr or "").strip()
-                if error_text:
-                    log.warning(f"PowerShell 弹窗失败: {error_text}")
-                continue
-            return True
-        return False
+        flags = 0x00000010 if critical else 0x00000040
+        ctypes.windll.user32.MessageBoxW(0, message or "", title or "提醒", flags)
+        return True
     except Exception as exc:
-        log.warning(f"PowerShell 弹窗失败: {exc}")
+        log.warning(f"Windows 系统弹窗失败: {exc}")
         return False
 
 
-def _should_throttle_window_alert(window_token, reason, cooldown_seconds=ALERT_COOLDOWN_SECONDS):
+def _window_alert_cache_key(window_token, reason):
     try:
         token = str(window_token or "").strip()
         reason_key = str(reason or "").strip()
         if not token or not reason_key:
-            return False
-        cache_key = f"{token}|{reason_key}"
-        now = time.time()
-        last_ts = _WINDOW_ALERT_CACHE.get(cache_key)
-        if last_ts and now - last_ts < cooldown_seconds:
-            return True
-        _WINDOW_ALERT_CACHE[cache_key] = now
-        return False
+            return ""
+        return f"{token}|{reason_key}"
     except Exception:
+        return ""
+
+
+def _is_window_alert_throttled(window_token, reason, cooldown_seconds=ALERT_COOLDOWN_SECONDS):
+    cache_key = _window_alert_cache_key(window_token, reason)
+    if not cache_key:
         return False
+    last_ts = _WINDOW_ALERT_CACHE.get(cache_key)
+    return bool(last_ts and time.time() - last_ts < cooldown_seconds)
+
+
+def _mark_window_alert_shown(window_token, reason):
+    cache_key = _window_alert_cache_key(window_token, reason)
+    if not cache_key:
+        return
+    _WINDOW_ALERT_CACHE[cache_key] = time.time()
 
 
 def show_window_limit_alert(window_token, reason, detail_text=None):
     token_text = str(window_token or "").strip()
     reason_text = str(reason or "").strip()
-    if _should_throttle_window_alert(token_text, reason_text):
+    if _is_window_alert_throttled(token_text, reason_text):
+        log.warning(
+            f"发送限制提醒已节流，跳过重复弹窗: window={token_text or 'unknown'} "
+            f"reason={reason_text or 'unknown'}"
+        )
         return False
 
     display_token = token_text or "unknown"
@@ -1609,7 +1637,15 @@ def show_window_limit_alert(window_token, reason, detail_text=None):
         lines.append(f"提示: {detail}")
     message = "\n".join(lines)
     log.error(message.replace("\n", " | "))
-    return show_desktop_alert("发送限制提醒", message, critical=True)
+    shown = show_desktop_alert("发送限制提醒", message, critical=True)
+    if shown:
+        _mark_window_alert_shown(token_text, reason_text)
+    else:
+        log.warning(
+            f"发送限制提醒弹窗显示失败，未写入节流缓存，将允许下次继续重试: "
+            f"window={token_text or 'unknown'} reason={reason_text or 'unknown'}"
+        )
+    return shown
 
 
 def show_account_restricted_alert(account_id, blocked_targets=None, silent_targets=None):

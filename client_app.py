@@ -6,6 +6,7 @@ import subprocess
 import sys
 import time
 import uuid
+import ctypes
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
@@ -72,6 +73,13 @@ def _client_config_path() -> Path:
 CLIENT_CONFIG_PATH = _client_config_path()
 
 
+def _messages_config_path() -> Path:
+    return ROOT_DIR / "config" / "messages.yaml"
+
+
+MESSAGES_CONFIG_PATH = _messages_config_path()
+
+
 def _default_machine_id() -> str:
     hostname = socket.gethostname()
     node = uuid.getnode()
@@ -94,7 +102,6 @@ def _default_client_config() -> dict:
         "browser": {
             "auto_discover_bitbrowser": True,
         },
-        "message_templates": [],
         "window_no": "",
         "task_settings": {
             "max_messages_per_account": 0,
@@ -104,10 +111,9 @@ def _default_client_config() -> dict:
             "idle_scroll_limit": 3,
             "account_restricted_blocked_threshold": 2,
             "account_restricted_signal_threshold": 3,
-            "typing_delay": [100, 300],
             "speed_factor": 0.85,
             "stranger_limit_cache_ms": 1200,
-            "send_interval_seconds": [2, 6],
+            "send_interval_seconds": [0, 0],
             "max_windows": 0,
             "resume_search_times": 20,
         },
@@ -122,14 +128,7 @@ def _sanitize_client_config(data: dict) -> dict:
     cleaned["api_token"] = str(cleaned.get("api_token") or "").strip()
     cleaned["agent_token"] = str(cleaned.get("agent_token") or "").strip()
     cleaned["window_no"] = str(cleaned.get("window_no") or "").strip()
-    templates = cleaned.get("message_templates") or []
-    if not isinstance(templates, list):
-        templates = []
-    cleaned["message_templates"] = [
-        str(item).strip()
-        for item in templates
-        if str(item).strip()
-    ]
+    cleaned.pop("message_templates", None)
     task_settings = cleaned.get("task_settings")
     if isinstance(task_settings, dict):
         for key in (
@@ -140,6 +139,7 @@ def _sanitize_client_config(data: dict) -> dict:
             "fast_hover_sleep_ms",
             "fast_retry_sleep_ms",
             "quick_no_button_precheck",
+            "typing_delay",
         ):
             task_settings.pop(key, None)
     if cleaned.get("token_expires_at") in ("", []):
@@ -171,6 +171,60 @@ def _deep_merge(base: dict, override: dict) -> dict:
     return merged
 
 
+def _normalize_message_templates(templates) -> list:
+    return [
+        str(item).strip()
+        for item in (templates or [])
+        if str(item).strip()
+    ]
+
+
+def load_messages_config() -> dict:
+    if not MESSAGES_CONFIG_PATH.exists():
+        return {}
+    try:
+        loaded = yaml.safe_load(MESSAGES_CONFIG_PATH.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return {}
+    return {
+        "probe_templates": _normalize_message_templates(loaded.get("probe_templates") or []),
+        "templates": _normalize_message_templates(loaded.get("templates") or []),
+    }
+
+
+def save_messages_config(templates=None, probe_templates=None) -> None:
+    current = load_messages_config()
+    payload = {
+        "probe_templates": _normalize_message_templates(current.get("probe_templates") or []),
+        "templates": _normalize_message_templates(current.get("templates") or []),
+    }
+    if probe_templates is not None:
+        payload["probe_templates"] = _normalize_message_templates(probe_templates)
+    if templates is not None:
+        payload["templates"] = _normalize_message_templates(templates)
+    MESSAGES_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    MESSAGES_CONFIG_PATH.write_text(
+        yaml.safe_dump(payload, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+
+
+def _migrate_legacy_message_templates(loaded: dict) -> bool:
+    if "message_templates" not in loaded:
+        return False
+    legacy_templates = _normalize_message_templates(loaded.get("message_templates") or [])
+    if not legacy_templates:
+        return False
+    current_messages = load_messages_config()
+    if current_messages.get("templates"):
+        return False
+    save_messages_config(
+        templates=legacy_templates,
+        probe_templates=current_messages.get("probe_templates") or [],
+    )
+    return True
+
+
 def load_client_config() -> dict:
     config = _default_client_config()
     if not CLIENT_CONFIG_PATH.exists():
@@ -179,10 +233,15 @@ def load_client_config() -> dict:
         loaded = yaml.safe_load(CLIENT_CONFIG_PATH.read_text(encoding="utf-8")) or {}
     except Exception:
         return config
+    if not isinstance(loaded, dict):
+        return config
+    migrated_legacy_templates = _migrate_legacy_message_templates(loaded)
     merged = _sanitize_client_config(_deep_merge(config, loaded))
     should_rewrite = False
     if _should_migrate_server_url(loaded.get("server_url") or ""):
         merged["server_url"] = DEFAULT_SERVER_URL
+        should_rewrite = True
+    if "message_templates" in loaded or migrated_legacy_templates:
         should_rewrite = True
     if any(key in loaded for key in ("activation_code", "register_token", "owner", "expire_at", "max_devices")):
         should_rewrite = True
@@ -376,7 +435,9 @@ class ClientApp:
     COUNT_FIELD_WIDTH = 46
     WINDOW_NO_FIELD_WIDTH = 64
     PARAM_LEFT_GROUP_WIDTH = 280
-    PARAM_RIGHT_GROUP_WIDTH = 360
+    PARAM_RIGHT_GROUP_WIDTH = 308
+    PARAM_COLUMN_GAP = 12
+    RIGHT_MAIN_LABEL_WIDTH = 64
     ACTION_LOCK_SECONDS = {
         "run": 4.0,
         "stop": 3.0,
@@ -439,6 +500,7 @@ class ClientApp:
         self._window_button_styles = {}
         self._action_button_styles = {}
         self._action_lock_until = {}
+        self._taskbar_style_ready = False
         self._button_state_snapshot = {
             "agent_online": False,
             "task_running": False,
@@ -477,6 +539,7 @@ class ClientApp:
         self._reset_log_session()
         self._load_message_templates()
         self._load_existing_state()
+        self.root.after(0, self._initialize_window_shell)
         self._schedule_status_refresh(initial=True)
         self._schedule_log_refresh(initial=True)
 
@@ -630,6 +693,61 @@ class ClientApp:
         pos_y = max((screen_h - height) // 2, 0)
         return f"{width}x{height}+{pos_x}+{pos_y}"
 
+    def _initialize_window_shell(self):
+        self._apply_window_icon()
+        self._ensure_taskbar_window(refresh_shell=True)
+
+    def _apply_window_icon(self):
+        if not sys.platform.startswith("win"):
+            return
+        candidates = [
+            ROOT_DIR / "assets" / "fb_chat_helper.ico",
+            ROOT_DIR / "fb_chat_helper.ico",
+        ]
+        for path in candidates:
+            if not path.exists():
+                continue
+            try:
+                self.root.iconbitmap(default=str(path))
+                return
+            except Exception:
+                continue
+
+    def _ensure_taskbar_window(self, refresh_shell=False):
+        if not sys.platform.startswith("win"):
+            return
+        try:
+            self.root.update_idletasks()
+            hwnd = ctypes.windll.user32.GetParent(self.root.winfo_id()) or self.root.winfo_id()
+            GWL_EXSTYLE = -20
+            WS_EX_APPWINDOW = 0x00040000
+            WS_EX_TOOLWINDOW = 0x00000080
+            SWP_NOMOVE = 0x0002
+            SWP_NOSIZE = 0x0001
+            SWP_NOZORDER = 0x0004
+            SWP_NOACTIVATE = 0x0010
+            SWP_FRAMECHANGED = 0x0020
+
+            style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+            desired_style = (style & ~WS_EX_TOOLWINDOW) | WS_EX_APPWINDOW
+            if desired_style != style:
+                ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, desired_style)
+                ctypes.windll.user32.SetWindowPos(
+                    hwnd,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+                )
+            if refresh_shell and not self._taskbar_style_ready:
+                self._taskbar_style_ready = True
+                self.root.withdraw()
+                self.root.after(30, self.root.deiconify)
+        except Exception:
+            pass
+
     def _initial_window_count(self):
         raw = _parse_int(
             (self.client_config.get("task_settings") or {}).get("max_windows") or 10,
@@ -777,9 +895,13 @@ class ClientApp:
     def _handle_window_map(self, _event=None):
         if self._is_minimizing:
             self._is_minimizing = False
-            self.root.after(10, lambda: self.root.overrideredirect(True))
+            self.root.after(10, self._restore_custom_window_chrome)
         elif not self.root.overrideredirect():
-            self.root.after(10, lambda: self.root.overrideredirect(True))
+            self.root.after(10, self._restore_custom_window_chrome)
+
+    def _restore_custom_window_chrome(self):
+        self.root.overrideredirect(True)
+        self._ensure_taskbar_window(refresh_shell=False)
 
     def _minimize_window(self):
         self._is_minimizing = True
@@ -1059,12 +1181,18 @@ class ClientApp:
         )
         param_panel.pack(fill="x", padx=0, pady=(0, self.PANEL_SPACING))
         param_panel.pack_propagate(False)
-        params_grid = tk.Frame(param_panel, bg=self.PANEL_BG)
-        params_grid.pack(fill="both", expand=True, padx=8, pady=(8, 8))
-        params_grid.grid_columnconfigure(0, minsize=self.PARAM_LEFT_GROUP_WIDTH, weight=1)
-        params_grid.grid_columnconfigure(1, minsize=self.PARAM_RIGHT_GROUP_WIDTH, weight=1)
-        params_grid.grid_rowconfigure(0, weight=1)
-        params_grid.grid_rowconfigure(1, weight=1)
+        params_grid = tk.Frame(
+            param_panel,
+            bg=self.PANEL_BG,
+            width=self.PARAM_LEFT_GROUP_WIDTH + self.PARAM_COLUMN_GAP + self.PARAM_RIGHT_GROUP_WIDTH,
+            height=68,
+        )
+        params_grid.pack(anchor="w", padx=8, pady=(8, 8))
+        params_grid.pack_propagate(False)
+        params_grid.grid_columnconfigure(0, minsize=self.PARAM_LEFT_GROUP_WIDTH)
+        params_grid.grid_columnconfigure(1, minsize=self.PARAM_RIGHT_GROUP_WIDTH)
+        params_grid.grid_rowconfigure(0, minsize=32)
+        params_grid.grid_rowconfigure(1, minsize=32)
 
         local_group = tk.Frame(params_grid, bg=self.PANEL_BG, width=self.PARAM_LEFT_GROUP_WIDTH, height=32)
         local_group.grid(row=0, column=0, sticky="w")
@@ -1083,17 +1211,25 @@ class ClientApp:
         self.bit_api_entry.pack(fill="both", expand=True, ipady=4)
 
         api_group = tk.Frame(params_grid, bg=self.PANEL_BG, width=self.PARAM_RIGHT_GROUP_WIDTH, height=32)
-        api_group.grid(row=0, column=1, sticky="e")
+        api_group.grid(row=0, column=1, sticky="w", padx=(self.PARAM_COLUMN_GAP, 0))
         api_group.grid_propagate(False)
-        tk.Label(
+        api_label_holder = tk.Frame(
             api_group,
+            bg=self.PANEL_BG,
+            width=self.RIGHT_MAIN_LABEL_WIDTH,
+            height=32,
+        )
+        api_label_holder.grid(row=0, column=0, sticky="w")
+        api_label_holder.grid_propagate(False)
+        tk.Label(
+            api_label_holder,
             text="浏览器 API",
             font=self.SECTION_LABEL_FONT,
             bg=self.PANEL_BG,
             fg="#24416e",
-        ).grid(row=0, column=0, padx=(0, 8), sticky="w")
+        ).pack(side="left", fill="y")
         api_field = tk.Frame(api_group, bg=self.PANEL_BG, width=self.API_FIELD_WIDTH, height=32)
-        api_field.grid(row=0, column=1, sticky="e")
+        api_field.grid(row=0, column=1, sticky="w")
         api_field.grid_propagate(False)
         self.api_token_entry = self._create_entry(api_field, self.api_token, font=("Microsoft YaHei", 11))
         self.api_token_entry.pack(fill="both", expand=True, ipady=4)
@@ -1129,15 +1265,23 @@ class ClientApp:
         self.max_interval.place(x=98, y=0, width=52, height=32)
 
         window_group = tk.Frame(params_grid, bg=self.PANEL_BG, width=self.PARAM_RIGHT_GROUP_WIDTH, height=32)
-        window_group.grid(row=1, column=1, sticky="e", pady=(9, 0))
+        window_group.grid(row=1, column=1, sticky="w", padx=(self.PARAM_COLUMN_GAP, 0), pady=(9, 0))
         window_group.grid_propagate(False)
-        tk.Label(
+        window_label_holder = tk.Frame(
             window_group,
+            bg=self.PANEL_BG,
+            width=self.RIGHT_MAIN_LABEL_WIDTH,
+            height=32,
+        )
+        window_label_holder.grid(row=0, column=0, sticky="w")
+        window_label_holder.grid_propagate(False)
+        tk.Label(
+            window_label_holder,
             text="窗口数量",
             font=self.SECTION_LABEL_FONT,
             bg=self.PANEL_BG,
             fg="#24416e",
-        ).grid(row=0, column=0, padx=(0, 8), sticky="w")
+        ).pack(side="left", fill="y")
         count_field = tk.Frame(window_group, bg=self.PANEL_BG, width=self.COUNT_FIELD_WIDTH, height=32)
         count_field.grid(row=0, column=1, sticky="w")
         count_field.grid_propagate(False)
@@ -1229,8 +1373,8 @@ class ClientApp:
         tk.Label(log_header, text="实时日志", font=self.SECTION_TITLE_FONT, bg=self.PANEL_BG, fg="#24416e").pack(side="left")
         counters = tk.Frame(log_header, bg=self.PANEL_BG)
         counters.pack(side="right")
-        tk.Label(counters, text="已发送：", font=self.META_FONT, bg=self.PANEL_BG, fg="#315070").pack(side="left")
-        tk.Label(counters, textvariable=self.sent_count_text, font=self.META_FONT, bg=self.PANEL_BG, fg="#315070").pack(side="left", padx=(0, 12))
+        tk.Label(counters, text="发送：", font=self.META_FONT, bg=self.PANEL_BG, fg="#315070").pack(side="left")
+        tk.Label(counters, textvariable=self.sent_count_text, font=self.META_FONT, bg=self.PANEL_BG, fg="#315070").pack(side="left", padx=(0, 10))
         tk.Label(counters, text="失败：", font=self.META_FONT, bg=self.PANEL_BG, fg="#315070").pack(side="left")
         tk.Label(counters, textvariable=self.failed_count_text, font=self.META_FONT, bg=self.PANEL_BG, fg="#315070").pack(side="left")
 
@@ -1449,24 +1593,8 @@ class ClientApp:
         self._set_activation_notice("", error=False)
 
     def _load_message_templates(self):
-        templates_text = ""
-        saved_templates = self.client_config.get("message_templates") or []
-        if isinstance(saved_templates, list):
-            templates = [str(item).strip() for item in saved_templates if str(item).strip()]
-            templates_text = "\n".join(templates)
-        if not templates_text:
-            message_path = ROOT_DIR / "config" / "messages.yaml"
-            if message_path.exists():
-                try:
-                    data = yaml.safe_load(message_path.read_text(encoding="utf-8")) or {}
-                    templates = [
-                        str(item).strip()
-                        for item in (data.get("templates") or [])
-                        if str(item).strip()
-                    ]
-                    templates_text = "\n".join(templates)
-                except Exception:
-                    templates_text = ""
+        templates = load_messages_config().get("templates") or []
+        templates_text = "\n".join(templates)
         if self.message_text is not None:
             self.message_text.delete("1.0", tk.END)
             if templates_text:
@@ -1475,7 +1603,7 @@ class ClientApp:
     def _reset_log_session(self):
         self._log_offsets = {}
         self._log_follow_tail = True
-        self._set_runtime_counters(0, 0)
+        self._reset_status_summary()
         try:
             self._log_path.parent.mkdir(parents=True, exist_ok=True)
             self._log_path.write_text("", encoding="utf-8")
@@ -1542,42 +1670,21 @@ class ClientApp:
         chunk = "".join(chunks)
         if not chunk:
             return
-        sent_patterns = ("✅ 成员页消息已发送",)
-        failed_patterns = (
-            "处理成员失败",
-            "发送流程中断",
-            "消息被拒绝",
-            "聊天窗口限制提示命中",
-            "输入框未准备就绪",
-            "连接浏览器失败",
-            "未能收集到任何已加入小组",
-            "正式发送文案为空",
-            "当前窗口已被系统限制继续发送消息",
-            "当前账号已被限制继续向该类用户发起消息",
-        )
-        sent_delta = sum(
-            1 for line in chunk.splitlines() if any(token in line for token in sent_patterns)
-        )
-        failed_delta = sum(
-            1 for line in chunk.splitlines() if any(token in line for token in failed_patterns)
-        )
-        if sent_delta or failed_delta:
-            try:
-                current_sent = int(self.sent_count_text.get() or 0)
-            except Exception:
-                current_sent = 0
-            try:
-                current_failed = int(self.failed_count_text.get() or 0)
-            except Exception:
-                current_failed = 0
-            self._set_runtime_counters(current_sent + sent_delta, current_failed + failed_delta)
         self.log_text.insert(tk.END, chunk)
         if self._log_follow_tail:
             self.log_text.see(tk.END)
 
-    def _set_runtime_counters(self, sent, failed):
-        self.sent_count_text.set(str(max(0, int(sent or 0))))
-        self.failed_count_text.set(str(max(0, int(failed or 0))))
+    def _reset_status_summary(self):
+        self.sent_count_text.set("0")
+        self.failed_count_text.set("0")
+
+    def _apply_remote_stats(self, info):
+        info = info or {}
+        stats = info.get("stats") or {}
+        stats = stats or {}
+        db_stats = stats.get("db") or {}
+        self.sent_count_text.set(str(_parse_int(db_stats.get("sent_today"), 0)))
+        self.failed_count_text.set(str(_parse_int(db_stats.get("failed_today"), 0)))
 
     def _collect_message_templates(self):
         if self.message_text is None:
@@ -1626,11 +1733,11 @@ class ClientApp:
 
     def _load_existing_state(self):
         send_interval = (
-            self.client_config.get("task_settings", {}).get("send_interval_seconds") or [2, 6]
+            self.client_config.get("task_settings", {}).get("send_interval_seconds") or [0, 0]
         )
         task_settings = self.client_config.get("task_settings") or {}
-        min_value = str(_parse_int(send_interval[0] if len(send_interval) > 0 else 2, 2))
-        max_value = str(_parse_int(send_interval[1] if len(send_interval) > 1 else 6, 6))
+        min_value = str(_parse_int(send_interval[0] if len(send_interval) > 0 else 0, 0))
+        max_value = str(_parse_int(send_interval[1] if len(send_interval) > 1 else 0, 0))
         self.min_interval.delete(0, tk.END)
         self.min_interval.insert(0, min_value)
         self.max_interval.delete(0, tk.END)
@@ -1690,10 +1797,10 @@ class ClientApp:
         self.machine_id = str(config.get("machine_id") or self.machine_id).strip()
 
     def _collect_send_interval(self):
-        min_value = _parse_int(self.min_interval.get(), 2)
-        max_value = _parse_int(self.max_interval.get(), 6)
-        if min_value <= 0 or max_value <= 0:
-            raise ValueError("发送频率必须大于 0")
+        min_value = _parse_int(self.min_interval.get(), 0)
+        max_value = _parse_int(self.max_interval.get(), 0)
+        if min_value < 0 or max_value < 0:
+            raise ValueError("发送频率不能小于 0")
         if min_value > max_value:
             min_value, max_value = max_value, min_value
         return [min_value, max_value]
@@ -1708,7 +1815,6 @@ class ClientApp:
     def _build_client_config(self):
         interval = self._collect_send_interval()
         max_windows = self._collect_window_count()
-        message_templates = self._collect_message_templates()
         config = load_client_config()
         config["server_url"] = self.server_url or DEFAULT_SERVER_URL
         config["machine_id"] = self.machine_id
@@ -1717,7 +1823,6 @@ class ClientApp:
         config["bit_api"] = _normalize_bit_api(self.bit_api.get())
         config["api_token"] = str(self.api_token.get() or "").strip()
         config["window_no"] = str(self.window_no_text.get() or "").strip()
-        config["message_templates"] = message_templates
         config.setdefault("task_settings", {})
         config["task_settings"]["send_interval_seconds"] = interval
         config["task_settings"]["max_windows"] = max_windows
@@ -1729,6 +1834,7 @@ class ClientApp:
             if not config["bit_api"] or not config["api_token"]:
                 messagebox.showerror("提示", "BitBrowser 地址与 API Token 不能为空")
                 return False
+        save_messages_config(templates=self._collect_message_templates())
         save_client_config(config)
         self.client_config = config
         self.server_url = _normalize_server_url(config.get("server_url") or DEFAULT_SERVER_URL)
@@ -1761,13 +1867,6 @@ class ClientApp:
             "bit_api": _normalize_bit_api(self.bit_api.get()),
             "api_token": str(self.api_token.get() or "").strip(),
             "name": socket.gethostname(),
-            "task_settings": {
-                "send_interval_seconds": self._collect_send_interval(),
-                "max_windows": self._collect_window_count(),
-            },
-            "messages": {
-                "templates": self._collect_message_templates(),
-            },
         }
         ok, data = self._post_client_api("/api/client/sync-config", payload)
         if not ok and show_error:
@@ -1948,6 +2047,7 @@ class ClientApp:
             error_code = str(data.get("error") or "").strip()
             if error_code in CLIENT_REACTIVATION_ERRORS:
                 self._clear_local_auth(preserve_license=True)
+                self._reset_status_summary()
                 self._apply_button_state(agent_online=False, task_running=False, task_pending=False)
                 self._show_activation_screen(self.SESSION_NOTICE_TEXT, error=True)
                 return None
@@ -1956,10 +2056,12 @@ class ClientApp:
                     f"执行端状态获取失败：{_translate_client_error(data.get('error'))}",
                     error=True,
                 )
+            self._reset_status_summary()
             self._apply_button_state(agent_online=False, task_running=False, task_pending=False)
             return None
 
         info = data.get("data") or {}
+        self._apply_remote_stats(info)
         self._apply_button_state(
             agent_online=bool(info.get("agent_online")),
             task_running=bool(info.get("task_running")),
