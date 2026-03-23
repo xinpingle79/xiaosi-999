@@ -187,7 +187,7 @@ class Database:
 
             user_id = row["user_id"] or self.extract_user_id(profile_url)
             account_id = self.normalize_account_scope(row["account_id"])
-            scope_id = self.normalize_scope_id(row["scope_id"], account_id=account_id)
+            scope_id = self.normalize_legacy_scope_id(row["scope_id"], account_id=account_id)
             candidate = {
                 "scope_id": scope_id,
                 "account_id": account_id,
@@ -250,7 +250,7 @@ class Database:
                 continue
             normalized_user_id = row["user_id"] or self.extract_user_id(normalized_profile_url)
             normalized_account_id = self.normalize_account_scope(row["account_id"])
-            normalized_scope_id = self.normalize_scope_id(row["scope_id"], account_id=normalized_account_id)
+            normalized_scope_id = self.normalize_legacy_scope_id(row["scope_id"], account_id=normalized_account_id)
             self.conn.execute(
                 """
                 INSERT OR REPLACE INTO send_claims
@@ -1416,7 +1416,7 @@ class Database:
                 continue
 
             account_id = self.normalize_account_scope(row["account_id"])
-            scope_id = self.normalize_scope_id(row["scope_id"], account_id=account_id)
+            scope_id = self.normalize_legacy_scope_id(row["scope_id"], account_id=account_id)
             candidate = {
                 "scope_id": scope_id,
                 "account_id": account_id,
@@ -1473,7 +1473,7 @@ class Database:
             if not normalized_group_id:
                 continue
             normalized_account_id = self.normalize_account_scope(row["account_id"])
-            normalized_scope_id = self.normalize_scope_id(row["scope_id"], account_id=normalized_account_id)
+            normalized_scope_id = self.normalize_legacy_scope_id(row["scope_id"], account_id=normalized_account_id)
             self.conn.execute(
                 """
                 INSERT OR REPLACE INTO group_status (scope_id, account_id, group_id, done_at)
@@ -1540,7 +1540,9 @@ class Database:
         if not normalized_group_id:
             return
         normalized_account_id = self.normalize_account_scope(account_id)
-        normalized_scope_id = self.normalize_scope_id(scope_id, account_id=normalized_account_id)
+        normalized_scope_id = self.normalize_scope_id(scope_id)
+        if not normalized_scope_id:
+            return
         done_at = done_at or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.conn.execute(
             """
@@ -1556,8 +1558,9 @@ class Database:
         normalized_group_id = self.normalize_group_id(group_id)
         if not normalized_group_id:
             return False
-        normalized_account_id = self.normalize_account_scope(account_id)
-        normalized_scope_id = self.normalize_scope_id(scope_id, account_id=normalized_account_id)
+        normalized_scope_id = self.normalize_scope_id(scope_id)
+        if not normalized_scope_id:
+            return False
         row = self.conn.execute(
             "SELECT done_at FROM group_status WHERE scope_id = ? AND group_id = ?",
             (normalized_scope_id, normalized_group_id),
@@ -1594,10 +1597,16 @@ class Database:
     def normalize_account_scope(self, account_id):
         return str(account_id or "").strip()
 
-    def normalize_scope_id(self, scope_id=None, account_id=None):
+    def normalize_scope_id(self, scope_id=None):
         raw = str(scope_id or "").strip()
         if raw:
             return raw
+        return None
+
+    def normalize_legacy_scope_id(self, scope_id=None, account_id=None):
+        normalized_scope_id = self.normalize_scope_id(scope_id)
+        if normalized_scope_id:
+            return normalized_scope_id
         return self.normalize_account_scope(account_id)
 
     def normalize_profile_url(self, url):
@@ -1642,11 +1651,10 @@ class Database:
 
     def is_sent(self, group_id, account_id=None, profile_url=None, user_id=None, scope_id=None):
         normalized_group_id = self.normalize_group_id(group_id)
-        normalized_account_id = self.normalize_account_scope(account_id)
-        normalized_scope_id = self.normalize_scope_id(scope_id, account_id=normalized_account_id)
+        normalized_scope_id = self.normalize_scope_id(scope_id)
         normalized_url = self.normalize_profile_url(profile_url) if profile_url else None
         normalized_user_id = user_id or self.extract_user_id(normalized_url)
-        if not normalized_group_id or (not normalized_url and not normalized_user_id):
+        if not normalized_scope_id or not normalized_group_id or (not normalized_url and not normalized_user_id):
             return False
 
         conditions, params = self._build_target_conditions(normalized_url, normalized_user_id)
@@ -1661,10 +1669,10 @@ class Database:
     def try_claim_target(self, group_id, profile_url, account_id, user_id=None, ttl_hours=6, scope_id=None):
         normalized_group_id = self.normalize_group_id(group_id)
         normalized_account_id = self.normalize_account_scope(account_id)
-        normalized_scope_id = self.normalize_scope_id(scope_id, account_id=normalized_account_id)
+        normalized_scope_id = self.normalize_scope_id(scope_id)
         normalized_url = self.normalize_profile_url(profile_url)
         normalized_user_id = user_id or self.extract_user_id(normalized_url)
-        if not normalized_group_id or (not normalized_url and not normalized_user_id):
+        if not normalized_scope_id or not normalized_group_id or (not normalized_url and not normalized_user_id):
             return False
 
         conditions, params = self._build_target_conditions(normalized_url, normalized_user_id)
@@ -1719,12 +1727,11 @@ class Database:
 
     def release_claim(self, group_id, account_id=None, profile_url=None, user_id=None, scope_id=None):
         normalized_group_id = self.normalize_group_id(group_id)
-        normalized_account_id = self.normalize_account_scope(account_id)
-        normalized_scope_id = self.normalize_scope_id(scope_id, account_id=normalized_account_id)
+        normalized_scope_id = self.normalize_scope_id(scope_id)
         normalized_url = self.normalize_profile_url(profile_url) if profile_url else None
         normalized_user_id = user_id or self.extract_user_id(normalized_url)
         conditions, params = self._build_target_conditions(normalized_url, normalized_user_id)
-        if not normalized_group_id or not conditions:
+        if not normalized_scope_id or not normalized_group_id or not conditions:
             return
 
         try:
@@ -1742,9 +1749,9 @@ class Database:
             normalized_url = self.normalize_profile_url(profile_url)
             normalized_user_id = user_id or self.extract_user_id(normalized_url)
             normalized_account_id = self.normalize_account_scope(account_id)
-            normalized_scope_id = self.normalize_scope_id(scope_id, account_id=normalized_account_id)
+            normalized_scope_id = self.normalize_scope_id(scope_id)
             normalized_machine_id = str(machine_id or "").strip() or None
-            if not normalized_group_id or not normalized_url:
+            if not normalized_scope_id or not normalized_group_id or not normalized_url:
                 raise ValueError("invalid_profile_url")
 
             status = 1 if success else 0
@@ -1797,9 +1804,8 @@ class Database:
     def get_cursor(self, group_id, account_id=None, scope_id=None):
         try:
             normalized_group_id = self.normalize_group_id(group_id)
-            normalized_account_id = self.normalize_account_scope(account_id)
-            normalized_scope_id = self.normalize_scope_id(scope_id, account_id=normalized_account_id)
-            if not normalized_group_id:
+            normalized_scope_id = self.normalize_scope_id(scope_id)
+            if not normalized_scope_id or not normalized_group_id:
                 return None
             row = self.conn.execute(
                 """
@@ -1819,10 +1825,10 @@ class Database:
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             normalized_group_id = self.normalize_group_id(group_id)
             normalized_account_id = self.normalize_account_scope(account_id)
-            normalized_scope_id = self.normalize_scope_id(scope_id, account_id=normalized_account_id)
+            normalized_scope_id = self.normalize_scope_id(scope_id)
             profile_url = self.normalize_profile_url(target.get("profile_url"))
             user_id = target.get("user_id") or self.extract_user_id(profile_url)
-            if not normalized_group_id or not profile_url:
+            if not normalized_scope_id or not normalized_group_id or not profile_url:
                 raise ValueError("invalid_cursor_profile_url")
 
             self.conn.execute(

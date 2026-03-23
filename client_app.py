@@ -2099,13 +2099,19 @@ class ClientApp:
             worker_pid = self._read_worker_pid()
             local_worker_alive = self._is_pid_running(worker_pid)
         status = self.refresh_remote_status(silent=True)
-        if status and status.get("agent_online") and local_worker_alive:
-            return True
-        if not local_worker_alive:
-            self._cleanup_stale_worker_process()
-        if self.worker_process and self.worker_process.poll() is None:
+        if local_worker_alive:
+            if status and status.get("agent_online"):
+                return True
             if not wait_online:
                 return True
+            for _ in range(8):
+                time.sleep(1)
+                status = self.refresh_remote_status(silent=True, tolerate_transient=True)
+                if status and status.get("agent_online"):
+                    return True
+            messagebox.showwarning("提示", "worker 已运行，但执行端尚未连上服务器")
+            return False
+        self._cleanup_stale_worker_process()
         worker_cmd = None
         if getattr(sys, "frozen", False):
             exe_dir = Path(sys.executable).resolve().parent
@@ -2250,7 +2256,13 @@ class ClientApp:
             "agent_token": self._current_agent_token(),
             "machine_id": self.machine_id,
         }
-        ok, data = self._post_client_api("/api/client/status", payload, timeout=8)
+        ok, data = self._post_client_api(
+            "/api/client/status",
+            payload,
+            timeout=8,
+            retries=1,
+            retry_delay=0.5,
+        )
         if not ok:
             error_code = str(data.get("error") or "").strip()
             if error_code in CLIENT_REACTIVATION_ERRORS:

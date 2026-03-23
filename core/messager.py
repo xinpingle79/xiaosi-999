@@ -380,9 +380,6 @@ class Messager:
         self.hover_card_wait_timeout_ms = int(
             task_cfg.get("hover_card_wait_timeout_ms", 8000) or 8000
         )
-        self.message_button_wait_timeout_ms = int(
-            task_cfg.get("message_button_wait_timeout_ms", 10000) or 10000
-        )
         self.chat_session_wait_timeout_ms = int(
             task_cfg.get("chat_session_wait_timeout_ms", 12000) or 12000
         )
@@ -2122,68 +2119,50 @@ class Messager:
                 timed_out=False,
             )
 
+        time.sleep(0.15)
         button = self._find_message_button_in_container(hover_card)
         if button:
+            gate_failure = self._classify_message_button_failure(
+                link,
+                name,
+                hover_card=hover_card,
+                timed_out=False,
+            )
+            if gate_failure["status"] in {"skip", "blocked", "limit"}:
+                return None, gate_failure
             return button, None
 
-        failure = self._classify_message_button_failure(
+        return None, self._classify_message_button_failure(
             link,
             name,
             hover_card=hover_card,
             timed_out=False,
         )
-        if failure["reason"] != "message_button_blocked_popup" and not self._should_wait_for_message_button(hover_card):
-            return None, failure
-
-        state["hover_card"] = hover_card
-        state["rehovered"] = False
-
-        def _locate():
-            current_card = state["hover_card"]
-            if current_card is None:
-                current_card = self._find_hover_card_container(state["link_box"])
-                state["hover_card"] = current_card
-            if current_card is not None:
-                current_button = self._find_message_button_in_container(current_card)
-                if current_button:
-                    return current_button
-            if not state["overlay_cleared"] and self._detect_blocking_overlay():
-                self._dismiss_interfering_popups(context="成员资料卡按钮识别阶段")
-                self._dismiss_member_hover_card()
-                state["hover_card"] = None
-                state["overlay_cleared"] = True
-                state["rehovered"] = False
-                return None
-            if not state["rehovered"]:
-                self._trigger_hover_card(link)
-                state["rehovered"] = True
-                return None
-            refreshed_box = self._wait_for_stable_box(link, max_rounds=1, delay=0.04)
-            if refreshed_box:
-                state["link_box"] = refreshed_box
-            current_card = self._find_hover_card_container(state["link_box"])
-            if current_card is None:
-                return None
-            state["hover_card"] = current_card
-            return self._find_message_button_in_container(current_card)
-
-        button = self._wait_for_condition(
-            "发消息按钮",
-            "等待资料卡中的“发消息”按钮可点击",
-            _locate,
-            timeout_ms=min(self.message_button_wait_timeout_ms, self._scale_ms(1600, min_ms=800)),
-            interval=0.12,
-        )
-        if button:
-            return button, None
-        return None, self._classify_message_button_failure(
-            link,
-            name,
-            hover_card=state["hover_card"],
-            timed_out=True,
-        )
 
     def _find_message_button_in_container(self, container):
+        try:
+            action_texts = self._extract_action_texts_from_scope(container)
+        except Exception:
+            action_texts = []
+        normalized_actions = " ".join(
+            self._normalize_text(item) for item in action_texts if item
+        ).strip()
+        if normalized_actions:
+            has_gate_action = (
+                self._matches_any_text(normalized_actions, self.ADD_FRIEND_TEXTS)
+                or self._matches_any_text(normalized_actions, self.FOLLOW_ONLY_TEXTS)
+                or self._matches_any_text(normalized_actions, self.CONNECT_TEXTS)
+                or self._matches_any_text(normalized_actions, self.INVITE_TEXTS)
+            )
+            has_message_action = (
+                self._matches_any_text(normalized_actions, self.MEMBER_CARD_MESSAGE_TEXTS)
+                or any(
+                    keyword in normalized_actions.lower()
+                    for keyword in ["message", "mensaje", "mensagem", "messaggio"]
+                )
+            )
+            if has_gate_action and not has_message_action:
+                return None
         for selector in self.MEMBER_CARD_MESSAGE_SELECTORS:
             try:
                 locator = container.locator(selector)
@@ -2233,43 +2212,21 @@ class Messager:
                 return True
         return False
 
-    def _should_wait_for_message_button(self, hover_card):
-        if hover_card is None:
-            return False
-        try:
-            texts = self._extract_action_texts_from_scope(hover_card)
-        except Exception:
-            texts = []
-        normalized = " ".join(self._normalize_text(item) for item in texts if item).strip()
-        if not normalized:
-            return False
-        if self._matches_any_text(normalized, self.ADD_FRIEND_TEXTS):
-            return False
-        if self._matches_any_text(normalized, self.FOLLOW_ONLY_TEXTS):
-            return False
-        if self._matches_any_text(normalized, self.CONNECT_TEXTS):
-            return False
-        if self._matches_any_text(normalized, self.INVITE_TEXTS):
-            return False
-        if self._matches_any_text(normalized, self.STRANGER_LIMIT_TEXTS):
-            return False
-        if self._matches_any_text(normalized, self.MESSAGE_REQUEST_LIMIT_TEXTS):
-            return False
-        if self._matches_any_text(normalized, self.ACCOUNT_CANNOT_MESSAGE_TEXTS):
-            return False
-        if self._matches_any_text(normalized, self.SEND_RESTRICTED_TEXTS):
-            return False
-        if self._matches_any_text(normalized, self.DELIVERY_FAILURE_TEXTS):
-            return False
-        if self._matches_any_text(normalized, self.MEMBER_CARD_MESSAGE_TEXTS):
-            return True
-        return any(keyword in normalized.lower() for keyword in ["message", "mensaje", "mensagem", "messaggio"])
-
     def _find_hover_card_container(self, link_box):
         if not link_box:
             return None
         link_cx = link_box["x"] + (link_box["width"] / 2)
         link_cy = link_box["y"] + (link_box["height"] / 2)
+        viewport_size = getattr(self.page, "viewport_size", None) or {}
+        viewport_w = viewport_size.get("width")
+        viewport_h = viewport_size.get("height")
+        if viewport_w is None or viewport_h is None:
+            try:
+                viewport_w = self.page.evaluate("window.innerWidth")
+                viewport_h = self.page.evaluate("window.innerHeight")
+            except Exception:
+                viewport_w = None
+                viewport_h = None
         candidates = []
         for selector in ('div[role="dialog"]', 'div[role="presentation"]', 'div[aria-modal="true"]'):
             locator = self.page.locator(selector)
@@ -2284,6 +2241,13 @@ class Messager:
                         continue
                     if box["width"] < 120 or box["height"] < 60:
                         continue
+                    if viewport_w and box["width"] > viewport_w * 0.78:
+                        continue
+                    if viewport_h and box["height"] > viewport_h * 0.72:
+                        continue
+                    if viewport_w and viewport_h:
+                        if (box["width"] * box["height"]) > (viewport_w * viewport_h * 0.36):
+                            continue
                     card_cx = box["x"] + (box["width"] / 2)
                     card_cy = box["y"] + (box["height"] / 2)
                     dist = abs(card_cy - link_cy) + abs(card_cx - link_cx)

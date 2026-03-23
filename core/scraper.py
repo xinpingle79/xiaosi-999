@@ -698,17 +698,20 @@ class Scraper:
 
                     const path = location.pathname || '';
                     const onGroupsSurface = path === '/groups' || path === '/groups/' || path.startsWith('/groups/feed') || path.startsWith('/groups/joins');
+                    const minimumItems = path.startsWith('/groups/joins') ? 1 : 2;
 
-                    const containerCandidates = Array.from(document.querySelectorAll('div, section, ul, aside'))
+                    const containerCandidates = Array.from(document.querySelectorAll('main, [role="main"], div, section, ul, aside'))
                         .map((el) => {
                             if (el.offsetParent === null) return null;
                             const rect = el.getBoundingClientRect();
                             if (!rect.width || !rect.height) return null;
                             if (rect.left > window.innerWidth * 0.72) return null;
                             if (rect.top > window.innerHeight * 0.82) return null;
+                            if (rect.width < 220 || rect.height < 120) return null;
                             const items = collectFromContainer(el);
-                            if (items.length < 3) return null;
-                            return { rect, items };
+                            if (items.length < minimumItems) return null;
+                            const inMain = (el.matches && el.matches('main, [role="main"]')) || !!(el.closest && el.closest('main, [role="main"]'));
+                            return { rect, items, inMain };
                         })
                         .filter(Boolean);
                     if (!containerCandidates.length || !onGroupsSurface) {
@@ -717,6 +720,8 @@ class Scraper:
                     containerCandidates.sort((a, b) => {
                         const countDiff = b.items.length - a.items.length;
                         if (countDiff !== 0) return countDiff;
+                        const mainDiff = Number(b.inMain) - Number(a.inMain);
+                        if (mainDiff !== 0) return mainDiff;
                         return (a.rect.width * a.rect.height) - (b.rect.width * b.rect.height);
                     });
                     return {
@@ -787,13 +792,13 @@ class Scraper:
             return []
         if not self._open_joined_groups_listing():
             return []
-        self._wait_for_groups_list_ready(timeout=6.0, step_name="已加入小组列表")
         self._scroll_joined_groups_container(to_top=True)
 
         group_urls = []
         seen_urls = set()
         idle_rounds = 0
         round_idx = 0
+        recovered_once = False
         unlimited = not max_scrolls or int(max_scrolls) <= 0
 
         while unlimited or round_idx < int(max_scrolls):
@@ -816,6 +821,14 @@ class Scraper:
             )
 
             idle_rounds = idle_rounds + 1 if added == 0 else 0
+            if added == 0 and idle_rounds >= 2 and not recovered_once:
+                log.info(f"{self._prefix()}已加入小组列表连续为空，尝试重新进入“你的小组”恢复列表。")
+                recovered_once = True
+                if self._open_joined_groups_listing():
+                    self._scroll_joined_groups_container(to_top=True)
+                    idle_rounds = 0
+                    round_idx += 1
+                    continue
             moved = self._scroll_joined_groups_container()
             if moved is None:
                 moved = self.scroll_page()
@@ -1263,9 +1276,13 @@ class Scraper:
 
     def _open_joined_groups_listing(self):
         try:
-            if self._is_joined_groups_surface(self.page.url) or self._has_groups_list_ready():
-                self._wait_for_groups_list_ready(timeout=6.0, step_name="已加入小组列表")
+            if self._has_groups_list_ready():
                 return True
+            if self._is_joined_groups_surface(self.page.url):
+                self.scroll_to_top()
+                self._scroll_joined_groups_container(to_top=True)
+                if self._wait_for_groups_list_ready(timeout=6.0, step_name="已加入小组列表"):
+                    return True
             for _ in range(3):
                 clicked = self.page.evaluate(
                     """(payload) => {
@@ -1339,12 +1356,33 @@ class Scraper:
                         interval=0.3,
                     )
                     if entered:
-                        self._wait_for_groups_list_ready(timeout=6.0, step_name="已加入小组列表")
+                        self.scroll_to_top()
+                        self._scroll_joined_groups_container(to_top=True)
+                        if self._wait_for_groups_list_ready(timeout=6.0, step_name="已加入小组列表"):
+                            return True
+                if self._is_joined_groups_surface(self.page.url):
+                    self.scroll_to_top()
+                    self._scroll_joined_groups_container(to_top=True)
+                    if self._wait_for_groups_list_ready(timeout=4.0, step_name="已加入小组列表"):
                         return True
+                try:
+                    log.info(f"{self._prefix()}已加入小组列表尚未稳定，尝试直接进入 joins 页面恢复列表。")
+                    self.page.goto("https://www.facebook.com/groups/joins/", wait_until="domcontentloaded", timeout=30000)
+                    try:
+                        self.page.wait_for_load_state("domcontentloaded", timeout=3000)
+                    except Exception:
+                        pass
+                    if self._wait_for_groups_surface(timeout=10.0, step_name="已加入小组列表"):
+                        self.scroll_to_top()
+                        self._scroll_joined_groups_container(to_top=True)
+                        if self._wait_for_groups_list_ready(timeout=6.0, step_name="已加入小组列表"):
+                            return True
+                except Exception:
+                    pass
                 time.sleep(0.35)
         except Exception:
             return False
-        return self._is_joined_groups_surface(self.page.url) or self._has_groups_list_ready()
+        return self._has_groups_list_ready()
 
     def _ensure_facebook_home_surface(self):
         self._adopt_existing_facebook_page()
