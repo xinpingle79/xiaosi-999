@@ -580,7 +580,7 @@ class Worker:
         else:
             command = [sys.executable, str(ROOT_DIR / "main.py")]
         if window_token:
-            command.extend(["--window-token", str(window_token)])
+            command.append(f"--window-token={window_token}")
         env = self._build_env(owner, payload)
         if owner:
             stop_flag = _stop_flag_path(owner)
