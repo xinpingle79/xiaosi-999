@@ -570,6 +570,21 @@ class ClientApp:
         self._remove_runtime_marker(_stop_flag_path(owner))
         self._remove_runtime_marker(_pause_flag_path(owner))
 
+    def _set_runtime_stop_flag(self):
+        owner = self._runtime_owner()
+        stop_flag = _stop_flag_path(owner)
+        pause_flag = _pause_flag_path(owner)
+        try:
+            stop_flag.parent.mkdir(parents=True, exist_ok=True)
+            stop_flag.write_text("stop\n", encoding="utf-8")
+        except Exception:
+            pass
+        try:
+            if pause_flag.exists():
+                pause_flag.unlink()
+        except Exception:
+            pass
+
     def _read_worker_pid(self):
         path = _worker_pid_path()
         if not path.exists():
@@ -668,21 +683,23 @@ class ClientApp:
         return False
 
     def _shutdown_worker_runtime(self, send_stop=True):
+        self._set_runtime_stop_flag()
         target_pids = []
         if self.worker_process and self.worker_process.poll() is None:
             target_pids.append(self.worker_process.pid)
         worker_pid = self._read_worker_pid()
         if worker_pid and worker_pid not in target_pids:
             target_pids.append(worker_pid)
-        local_worker_alive = any(self._is_pid_running(pid) for pid in target_pids)
         stop_sent = False
-        if send_stop and local_worker_alive and self.verified and self._current_agent_token():
+        if send_stop and self.verified and self._current_agent_token():
             payload = {
                 "agent_token": self._current_agent_token(),
                 "machine_id": self.machine_id,
             }
             ok, _data = self._post_client_api("/api/client/stop", payload, timeout=10)
             stop_sent = bool(ok)
+        if not stop_sent:
+            time.sleep(0.8)
         if stop_sent:
             self._wait_for_remote_task_clear(timeout=8.0)
             deadline = time.time() + 4.0
@@ -692,10 +709,47 @@ class ClientApp:
                 time.sleep(0.2)
         for pid in target_pids:
             self._terminate_pid(pid)
+        self._kill_residual_runtime_processes()
         self.worker_process = None
         self._clear_worker_pid()
         self._clear_runtime_control_flags()
         self._apply_button_state(agent_online=False, task_running=False, task_pending=False)
+
+    def _kill_residual_runtime_processes(self):
+        if sys.platform.startswith("win"):
+            for image_name in ("FB_RPA_Worker.exe", "FB_RPA_Main.exe"):
+                try:
+                    subprocess.run(
+                        ["taskkill", "/IM", image_name, "/T", "/F"],
+                        check=False,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000),
+                    )
+                except Exception:
+                    pass
+            return
+        for pattern in (str(ROOT_DIR / "agent" / "worker.py"), str(ROOT_DIR / "main.py")):
+            try:
+                subprocess.run(
+                    ["pkill", "-f", pattern],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            except Exception:
+                pass
+
+    def _force_exit_application(self):
+        try:
+            self.root.quit()
+        except Exception:
+            pass
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
+        os._exit(0)
 
     def _centered_geometry(self, width, height):
         self.root.update_idletasks()
@@ -1896,16 +1950,23 @@ class ClientApp:
             self._clear_local_auth(preserve_license=True)
             self._show_activation_screen(self.SESSION_NOTICE_TEXT, error=True)
         elif self.verified:
-            info = self.refresh_remote_status(silent=True)
-            if self.verified:
-                self._show_operation_screen()
-            if not info:
-                self._apply_button_state(agent_online=False, task_running=False, task_pending=False)
+            self._show_operation_screen()
+            self.root.after(0, self._restore_verified_session)
         else:
             self._show_activation_screen(
                 "验证成功后自动进入操作界面",
                 error=False,
             )
+            self._apply_button_state(agent_online=False, task_running=False, task_pending=False)
+
+    def _restore_verified_session(self):
+        if not self.verified:
+            return
+        restored = self._ensure_worker_ready_after_config(wait_remote_ready=False, skip_sync=True)
+        if restored:
+            return
+        info = self.refresh_remote_status(silent=True)
+        if not info:
             self._apply_button_state(agent_online=False, task_running=False, task_pending=False)
 
     def _current_agent_token(self):
@@ -2455,23 +2516,34 @@ class ClientApp:
         if not self._save_local_config(require_connection_fields=False):
             return
         self._show_operation_screen()
-        local_bit_api = _normalize_bit_api(self.bit_api.get())
-        local_api_token = str(self.api_token.get() or "").strip()
-        if local_bit_api and local_api_token:
-            self._sync_config_to_server(show_error=False)
-            self._ensure_worker_running(wait_online=False)
-            self._wait_for_remote_start_ready(timeout=8.0)
-            self.refresh_remote_status(silent=True)
+        self._ensure_worker_ready_after_config(wait_remote_ready=True, skip_sync=False)
         messagebox.showinfo("提示", "激活成功，已进入操作界面")
 
     def on_save_settings(self):
         if not self._save_local_config(require_connection_fields=False):
             return
         synced = self._sync_config_to_server(show_error=False)
+        self._ensure_worker_ready_after_config(wait_remote_ready=False, skip_sync=True)
         if self.verified and not synced:
-            messagebox.showwarning("提示", "本地配置已保存，但尚未同步到服务器")
+            messagebox.showwarning("提示", "本地配置已保存，执行端将继续按本地配置运行，服务器同步稍后重试")
             return
         messagebox.showinfo("提示", "本地配置已保存")
+
+    def _ensure_worker_ready_after_config(self, wait_remote_ready=False, skip_sync=False):
+        if not self.verified:
+            return False
+        local_bit_api = _normalize_bit_api(self.bit_api.get())
+        local_api_token = str(self.api_token.get() or "").strip()
+        if not local_bit_api or not local_api_token:
+            return False
+        if not skip_sync:
+            self._sync_config_to_server(show_error=False)
+        if not self._ensure_worker_running(wait_online=False):
+            return False
+        if wait_remote_ready:
+            self._wait_for_remote_start_ready(timeout=8.0)
+        self.refresh_remote_status(silent=True)
+        return True
 
     def _send_control(self, action):
         if not self.verified:
@@ -2579,7 +2651,7 @@ class ClientApp:
             self._shutdown_worker_runtime(send_stop=True)
         except Exception:
             pass
-        self.root.destroy()
+        self._force_exit_application()
 
 def main():
     root = tk.Tk()

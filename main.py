@@ -1,5 +1,4 @@
 import argparse
-import hashlib
 import os
 import random
 import re
@@ -305,12 +304,6 @@ def run_bitbrowser_batch(config, msgs, browser_settings):
     total_sent = 0
     finished_groups = 0
     profile_index = build_profile_index(profiles)
-    partition_total = len(profiles)
-    profile_partition_index = {
-        str(profile.get("id") or "").strip(): index
-        for index, profile in enumerate(profiles)
-        if str(profile.get("id") or "").strip()
-    }
 
     with ThreadPoolExecutor(
         max_workers=max(1, len(profiles)),
@@ -319,8 +312,6 @@ def run_bitbrowser_batch(config, msgs, browser_settings):
         future_map = {}
 
         def submit_profile(profile, startup_ready_event=None):
-            profile_id = str(profile.get("id") or "").strip()
-            partition_index = profile_partition_index.get(profile_id, 0)
             future = executor.submit(
                 run_single_session,
                 config,
@@ -328,10 +319,6 @@ def run_bitbrowser_batch(config, msgs, browser_settings):
                 browser_settings,
                 profile,
                 None,
-                {
-                    "index": partition_index,
-                    "count": partition_total,
-                },
                 startup_ready_event,
             )
             future_map[future] = profile
@@ -423,7 +410,6 @@ def run_single_session(
     browser_settings,
     profile=None,
     window_token=None,
-    window_partition=None,
     startup_ready_event=None,
 ):
     db = Database()
@@ -534,31 +520,6 @@ def run_single_session(
                         "finished_groups": 0,
                         "reason": "no_groups",
                     }
-                partition_count = int((window_partition or {}).get("count") or 0)
-                partition_index = int((window_partition or {}).get("index") or 0)
-                if partition_count > 1:
-                    total_group_count = len(group_urls)
-                    group_urls = partition_group_urls(
-                        group_urls,
-                        partition_index,
-                        partition_count,
-                    )
-                    if not group_urls:
-                        release_startup_gate()
-                        log.info(
-                            f"[{alert_account_id}] 小组分片已启用：窗口 {partition_index + 1}/{partition_count}，"
-                            "当前窗口本轮未分配到小组。"
-                        )
-                        return {
-                            "account_id": alert_account_id,
-                            "messages_sent": 0,
-                            "finished_groups": 0,
-                            "reason": "no_partition_groups",
-                        }
-                    log.info(
-                        f"[{alert_account_id}] 小组分片已启用：窗口 {partition_index + 1}/{partition_count}，"
-                        f"分配 {len(group_urls)}/{total_group_count} 个小组。"
-                    )
 
                 total_sent = 0
                 finished_groups = 0
@@ -801,24 +762,6 @@ def resolve_window_scope_id(profile=None, browser_id=None, window_token=None, ac
         if value:
             return value
     return "global"
-
-
-def stable_partition_slot(value, partition_count):
-    normalized = str(value or "").strip()
-    if partition_count <= 1 or not normalized:
-        return 0
-    digest = hashlib.sha1(normalized.encode("utf-8")).digest()
-    return int.from_bytes(digest[:8], "big") % partition_count
-
-
-def partition_group_urls(group_urls, partition_index, partition_count):
-    if partition_count <= 1:
-        return list(group_urls or [])
-    return [
-        url
-        for url in (group_urls or [])
-        if stable_partition_slot(url, partition_count) == partition_index
-    ]
 
 
 def collect_target_groups(scraper, task_cfg):
