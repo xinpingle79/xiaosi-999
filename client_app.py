@@ -481,6 +481,8 @@ class ClientApp:
         self.root.resizable(False, False)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.bind("<Map>", self._handle_window_map)
+        self.root.bind_all("<B1-Motion>", self._drag_window, add="+")
+        self.root.bind_all("<ButtonRelease-1>", self._stop_window_drag, add="+")
 
         self.client_config = load_client_config()
         self.license_data = load_license()
@@ -989,6 +991,9 @@ class ClientApp:
         offset_x, offset_y = self._drag_origin
         self.root.geometry(f"+{event.x_root - offset_x}+{event.y_root - offset_y}")
 
+    def _stop_window_drag(self, _event=None):
+        self._drag_origin = None
+
     def _handle_window_map(self, _event=None):
         if self._taskbar_shell_refresh_pending:
             return
@@ -1003,6 +1008,7 @@ class ClientApp:
         self._ensure_taskbar_window(refresh_shell=False)
 
     def _minimize_window(self):
+        self._stop_window_drag()
         self._is_minimizing = True
         if not sys.platform.startswith("win"):
             self.root.iconify()
@@ -1017,6 +1023,7 @@ class ClientApp:
             self._maximize_window()
 
     def _maximize_window(self):
+        self._stop_window_drag()
         self._normal_geometry = self.root.geometry()
         screen_w = self.root.winfo_screenwidth()
         screen_h = self.root.winfo_screenheight()
@@ -1025,6 +1032,7 @@ class ClientApp:
         self.maximize_button_text.set("❐")
 
     def _restore_window(self):
+        self._stop_window_drag()
         self.root.geometry(self._normal_geometry)
         self._is_maximized = False
         self.maximize_button_text.set("□")

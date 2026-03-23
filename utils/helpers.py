@@ -1621,7 +1621,8 @@ class Database:
         conditions, params = self._build_target_conditions(normalized_url, normalized_user_id)
         query = (
             "SELECT 1 FROM sent_history "
-            f"WHERE account_id = ? AND group_id = ? AND ({' OR '.join(conditions)}) LIMIT 1"
+            f"WHERE account_id = ? AND group_id = ? AND status = 1 "
+            f"AND ({' OR '.join(conditions)}) LIMIT 1"
         )
         row = self.conn.execute(query, tuple([normalized_account_id, normalized_group_id] + params)).fetchone()
         return row is not None
@@ -1651,7 +1652,9 @@ class Database:
                 (expire_before,),
             )
             already_sent = self.conn.execute(
-                f"SELECT 1 FROM sent_history WHERE account_id = ? AND group_id = ? AND ({' OR '.join(conditions)}) LIMIT 1",
+                "SELECT 1 FROM sent_history "
+                f"WHERE account_id = ? AND group_id = ? AND status = 1 "
+                f"AND ({' OR '.join(conditions)}) LIMIT 1",
                 tuple([normalized_account_id, normalized_group_id] + params),
             ).fetchone()
             if already_sent:
@@ -1718,6 +1721,17 @@ class Database:
                 user_id=normalized_user_id,
             )
             conditions, params = self._build_target_conditions(normalized_url, normalized_user_id)
+            existing_success = self.conn.execute(
+                "SELECT 1 FROM sent_history "
+                f"WHERE account_id = ? AND group_id = ? AND status = 1 "
+                f"AND ({' OR '.join(conditions)}) LIMIT 1",
+                tuple([normalized_account_id, normalized_group_id] + params),
+            ).fetchone()
+            if existing_success and not success:
+                log.debug(
+                    f"保留已有成功记录，不用失败状态覆盖: {normalized_group_id} -> {normalized_url}"
+                )
+                return
             self.conn.execute(
                 f"DELETE FROM sent_history WHERE account_id = ? AND group_id = ? AND ({' OR '.join(conditions)})",
                 tuple([normalized_account_id, normalized_group_id] + params),

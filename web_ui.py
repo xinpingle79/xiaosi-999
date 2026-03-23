@@ -3061,11 +3061,31 @@ def handle_agent_log(payload):
         return {"ok": False, "error": error}
     machine_id = str(payload.get("machine_id") or "").strip()
     owner = str(payload.get("owner") or "").strip()
+    delivery_event = payload.get("delivery_event")
     lines = payload.get("lines")
     if isinstance(lines, str):
         lines = [lines]
     if not isinstance(lines, list):
         lines = []
+    if isinstance(delivery_event, dict):
+        group_id = str(delivery_event.get("group_id") or "").strip()
+        profile_url = str(delivery_event.get("profile_url") or "").strip()
+        account_id = str(delivery_event.get("account_id") or (_agent or {}).get("owner") or "").strip()
+        user_id = str(delivery_event.get("user_id") or "").strip() or None
+        success = bool(delivery_event.get("success"))
+        if group_id and profile_url and account_id:
+            db = Database()
+            try:
+                db.mark_done(
+                    group_id=group_id,
+                    profile_url=profile_url,
+                    account_id=account_id,
+                    success=success,
+                    user_id=user_id,
+                    machine_id=machine_id,
+                )
+            finally:
+                db.close()
     prefix = ""
     if owner and machine_id:
         prefix = f"[{owner}@{machine_id}] "

@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 
+import requests
 import yaml
 from playwright.sync_api import sync_playwright
 
@@ -109,6 +110,72 @@ def _normalize_message_templates(templates):
         for item in (templates or [])
         if str(item).strip()
     ]
+
+
+def _sync_delivery_event(config, group_id, profile_url, account_id, success, user_id=None, machine_id="", reason=""):
+    server_url = str(config.get("server_url") or "").strip().rstrip("/")
+    agent_token = str(config.get("agent_token") or "").strip()
+    resolved_machine_id = str(machine_id or config.get("machine_id") or "").strip()
+    normalized_group_id = str(group_id or "").strip()
+    normalized_profile_url = str(profile_url or "").strip()
+    normalized_account_id = str(account_id or "").strip()
+    normalized_reason = str(reason or "").strip()
+    if not (
+        server_url
+        and agent_token
+        and resolved_machine_id
+        and normalized_group_id
+        and normalized_profile_url
+        and normalized_account_id
+    ):
+        return False
+    try:
+        response = requests.post(
+            f"{server_url}/api/agent/log",
+            json={
+                "machine_id": resolved_machine_id,
+                "agent_token": agent_token,
+                "delivery_event": {
+                    "group_id": normalized_group_id,
+                    "profile_url": normalized_profile_url,
+                    "account_id": normalized_account_id,
+                    "user_id": str(user_id or "").strip(),
+                    "success": bool(success),
+                    "reason": normalized_reason,
+                    "machine_id": resolved_machine_id,
+                },
+            },
+            timeout=5,
+        )
+        return response.ok
+    except Exception as exc:
+        log.warning(f"发送结果同步服务器失败: {exc}")
+        return False
+
+
+def _record_delivery_result(db, config, group_id, target, account_id, machine_id, success, reason=""):
+    profile_url = str(target.get("profile_url") or target.get("group_user_url") or "").strip()
+    if not profile_url:
+        return
+    user_id = target.get("user_id")
+    db.mark_done(
+        group_id=group_id,
+        profile_url=profile_url,
+        account_id=account_id,
+        user_id=user_id,
+        machine_id=machine_id,
+        success=success,
+    )
+    _sync_delivery_event(
+        config=config,
+        group_id=group_id,
+        profile_url=profile_url,
+        account_id=account_id,
+        success=success,
+        user_id=user_id,
+        machine_id=machine_id,
+        reason=reason,
+    )
 
 
 def resolve_message_templates(local_messages, account_messages=None):
@@ -1128,12 +1195,14 @@ def process_member_targets(
                 )
 
         if result["status"] == "sent":
-            db.mark_done(
+            _record_delivery_result(
+                db=db,
+                config=config,
                 group_id=group_id,
-                profile_url=profile_url,
+                target=target,
                 account_id=account_id,
-                user_id=target.get("user_id"),
                 machine_id=machine_id,
+                success=True,
             )
             messages_sent += 1
             db.save_cursor(group_id, target, account_id=account_id)
@@ -1169,6 +1238,16 @@ def process_member_targets(
                 log.warning(f"断点保留：成员 {target['name']} 属于暂时性失败，当前不推进 cursor。")
             ui_settle_sleep(task_cfg)
         elif result["status"] == "blocked":
+            _record_delivery_result(
+                db=db,
+                config=config,
+                group_id=group_id,
+                target=target,
+                account_id=account_id,
+                machine_id=machine_id,
+                success=False,
+                reason=result.get("reason") or "blocked",
+            )
             reason = result.get("reason") or "account_restricted"
             window_block_reasons = {
                 "message_request_limit_reached",
@@ -1209,6 +1288,16 @@ def process_member_targets(
                 "silent_targets": silent_targets,
             }
         elif result["status"] == "limit":
+            _record_delivery_result(
+                db=db,
+                config=config,
+                group_id=group_id,
+                target=target,
+                account_id=account_id,
+                machine_id=machine_id,
+                success=False,
+                reason=result.get("reason") or "stranger_message_limit_reached",
+            )
             return {
                 "found_cursor": found_cursor,
                 "messages_sent": messages_sent,
@@ -1216,6 +1305,16 @@ def process_member_targets(
                 "alert_text": result.get("alert_text"),
             }
         else:
+            _record_delivery_result(
+                db=db,
+                config=config,
+                group_id=group_id,
+                target=target,
+                account_id=account_id,
+                machine_id=machine_id,
+                success=False,
+                reason=result.get("reason") or "error",
+            )
             log.warning(
                 f"处理成员失败，保留原断点等待下次重试: {target['name']} - {result['reason']}"
             )
