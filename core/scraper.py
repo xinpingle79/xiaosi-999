@@ -765,16 +765,22 @@ class Scraper:
         if not self._adopt_existing_facebook_page():
             log.warning(f"{self._prefix()}未找到可复用的 Facebook 页面，无法按手动路径进入小组。")
             return False
-        if not self._is_groups_surface(self.page.url):
-            if not self._open_home_surface_for_groups_entry():
+        if self._is_joined_groups_surface(self.page.url):
+            self._wait_for_groups_list_ready(timeout=6.0, step_name="已加入小组列表")
+            return True
+        if self._is_groups_surface(self.page.url):
+            return True
+
+        entered_groups_surface = False
+        if self._open_home_surface_for_groups_entry():
+            click_info = self._click_groups_entry()
+            if click_info:
+                entered_groups_surface = self._wait_for_groups_surface(timeout=12.0, step_name="小组首页")
+        if not entered_groups_surface:
+            if not self._open_groups_surface_by_direct_navigation():
                 log.warning(f"{self._prefix()}未能回到 Facebook 首页，无法按手动路径进入小组。")
                 return False
-            click_info = self._click_groups_entry()
-            if not click_info:
-                log.warning(f"{self._prefix()}未找到“小组”入口，无法进入小组页面。")
-                return False
-            self._wait_for_groups_list_ready(timeout=12.0, step_name="小组首页")
-        return self._has_groups_list_ready()
+        return self._is_groups_surface(self.page.url)
 
     def collect_joined_group_urls(self, max_scrolls=8):
         if not self.open_groups_feed():
@@ -1879,6 +1885,15 @@ class Scraper:
         path = parsed.path or ""
         return path.startswith("/groups/joins")
 
+    def _wait_for_groups_surface(self, timeout=12.0, step_name="小组首页"):
+        return self._wait_for_condition(
+            step_name,
+            "等待进入小组页面",
+            lambda: self._is_groups_surface(self.page.url),
+            timeout=timeout,
+            interval=0.3,
+        )
+
     def _wait_for_groups_list_ready(self, timeout=4.0, step_name="小组列表"):
         return self._wait_for_condition(
             step_name,
@@ -1924,6 +1939,26 @@ class Scraper:
             return bool(snapshot.get("ready")) and bool(snapshot.get("items"))
         except Exception:
             return False
+
+    def _open_groups_surface_by_direct_navigation(self):
+        direct_urls = (
+            "https://www.facebook.com/groups/joins/",
+            "https://www.facebook.com/groups/feed/",
+        )
+        for direct_url in direct_urls:
+            try:
+                log.warning(f"{self._prefix()}左侧“小组”入口识别失败，尝试直接进入: {direct_url}")
+                self.page.goto(direct_url, wait_until="domcontentloaded", timeout=30000)
+                try:
+                    self.page.wait_for_load_state("domcontentloaded", timeout=3000)
+                except Exception:
+                    pass
+                self._wait_for_groups_surface(timeout=12.0, step_name="小组首页")
+                if self._is_groups_surface(self.page.url):
+                    return True
+            except Exception:
+                pass
+        return False
 
     def _has_group_page_ready(self):
         try:

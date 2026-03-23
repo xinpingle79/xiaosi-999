@@ -324,12 +324,19 @@ def run_bitbrowser_batch(config, msgs, browser_settings):
             future_map[future] = profile
 
         previous_startup_ready_event = None
+        previous_profile = None
         for profile in profiles:
             if previous_startup_ready_event is not None:
-                previous_startup_ready_event.wait()
+                released = previous_startup_ready_event.wait(timeout=5.0)
+                if not released:
+                    log.warning(
+                        f"[{format_account_label(previous_profile)}] 顺序接入等待超过 5 秒，"
+                        f"为避免后续窗口被阻塞，继续放行下一个窗口。"
+                    )
             current_startup_ready_event = threading.Event()
             submit_profile(profile, startup_ready_event=current_startup_ready_event)
             previous_startup_ready_event = current_startup_ready_event
+            previous_profile = profile
 
         while future_map:
             done, _ = wait(
