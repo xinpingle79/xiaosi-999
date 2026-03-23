@@ -1,5 +1,3 @@
 probe_templates:
 - 你好
-templates:
-- Hello
-- Hello, nice to meet you
+templates: []
