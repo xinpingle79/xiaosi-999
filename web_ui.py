@@ -1923,14 +1923,18 @@ def _load_owner_device_summary(owner, db=None):
     owns_db = db is None
     db = db or Database()
     try:
+        settings = _load_agent_settings()
+        heartbeat_ttl = max(float(settings.get("heartbeat_ttl", 180) or 180), 0.0)
+        cutoff = time.time() - heartbeat_ttl
         row = db.conn.execute(
             """
             SELECT COUNT(1) AS total
             FROM agent_registry
             WHERE owner = ?
               AND status = 1
+              AND COALESCE(last_seen, 0) >= ?
             """,
-            (owner,),
+            (owner, cutoff),
         ).fetchone()
         online_devices = int(row["total"] or 0) if row else 0
 
@@ -2066,8 +2070,8 @@ def _load_db_stats(account_id=None, machine_id=None):
             return int(row["total"] or 0) if row else 0
 
         def count_user_accounts(start=None, end=None):
-            clauses = []
-            params = []
+            clauses = ["role = ?"]
+            params = ["user"]
             if account_filter:
                 clauses.append("username = ?")
                 params.append(account_filter)
