@@ -63,6 +63,8 @@ def _client_config_path():
 
 
 def _messages_config_path():
+    if IS_FROZEN:
+        return _user_data_root() / "config" / "messages.yaml"
     return BASE_DIR / "config" / "messages.yaml"
 
 
@@ -205,10 +207,9 @@ def run_bitbrowser_batch(config, msgs, browser_settings):
         log.error("未获取到任何可用的比特浏览器窗口，任务结束。")
         return
 
-    log.info(f"已自动识别 {len(profiles)} 个比特浏览器窗口，将按顺序启动后并发执行。")
+    log.info(f"已自动识别 {len(profiles)} 个比特浏览器窗口，将并发启动并执行。")
     total_sent = 0
     finished_groups = 0
-    startup_lock = threading.Lock()
     profile_index = build_profile_index(profiles)
 
     with ThreadPoolExecutor(
@@ -224,7 +225,6 @@ def run_bitbrowser_batch(config, msgs, browser_settings):
                 msgs,
                 browser_settings,
                 profile,
-                startup_lock,
             )
             future_map[future] = profile
 
@@ -298,7 +298,7 @@ def run_single_bitbrowser_window(config, msgs, browser_settings, window_token):
     )
 
 
-def run_single_session(config, msgs, browser_settings, profile=None, startup_lock=None, window_token=None):
+def run_single_session(config, msgs, browser_settings, profile=None, window_token=None):
     db = Database()
     task_cfg = config["task_settings"]
     bm = BrowserManager(browser_settings)
@@ -320,13 +320,7 @@ def run_single_session(config, msgs, browser_settings, profile=None, startup_loc
         with sync_playwright() as p:
             try:
                 browser_id = profile.get("id") if profile else None
-                if startup_lock is not None:
-                    with startup_lock:
-                        if label:
-                            log.info(f"[{label}] 正在排队启动浏览器连接...")
-                        session = bm.open_for_browser(p, browser_id=browser_id)
-                else:
-                    session = bm.open_for_browser(p, browser_id=browser_id)
+                session = bm.open_for_browser(p, browser_id=browser_id)
                 if not session:
                     log.error(f"[{label or '默认窗口'}] 连接浏览器失败，跳过当前窗口。")
                     return {

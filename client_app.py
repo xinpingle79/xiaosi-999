@@ -83,10 +83,6 @@ def _messages_config_path() -> Path:
 MESSAGES_CONFIG_PATH = _messages_config_path()
 
 
-def _bundled_messages_config_path() -> Path:
-    return ROOT_DIR / "config" / "messages.yaml"
-
-
 def _default_machine_id() -> str:
     hostname = socket.gethostname()
     node = uuid.getnode()
@@ -187,25 +183,6 @@ def _normalize_message_templates(templates) -> list:
 
 
 def load_messages_config() -> dict:
-    if not MESSAGES_CONFIG_PATH.exists() and getattr(sys, "frozen", False):
-        bundled_path = _bundled_messages_config_path()
-        if bundled_path.exists():
-            try:
-                bundled_loaded = yaml.safe_load(bundled_path.read_text(encoding="utf-8")) or {}
-            except Exception:
-                bundled_loaded = {}
-            payload = {
-                "probe_templates": _normalize_message_templates(bundled_loaded.get("probe_templates") or []),
-                "templates": _normalize_message_templates(bundled_loaded.get("templates") or []),
-            }
-            try:
-                MESSAGES_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-                MESSAGES_CONFIG_PATH.write_text(
-                    yaml.safe_dump(payload, allow_unicode=True, sort_keys=False),
-                    encoding="utf-8",
-                )
-            except Exception:
-                pass
     if not MESSAGES_CONFIG_PATH.exists():
         return {}
     try:
