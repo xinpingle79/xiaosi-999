@@ -312,8 +312,12 @@ async function loadConfig() {
   const account = response.data.account || {};
   const task = settings.task_settings || {};
 
-  fields.maxWindows.value = task.max_windows ?? 0;
-  fields.templates.value = (messages.templates || []).join("\n");
+  if (fields.maxWindows) {
+    fields.maxWindows.value = task.max_windows ?? 0;
+  }
+  if (fields.templates) {
+    fields.templates.value = (messages.templates || []).join("\n");
+  }
 
   if (IS_SUB) {
     updateExpiryInfo(account);
@@ -705,9 +709,11 @@ async function saveConfigSilently() {
   settings.browser = { auto_discover_bitbrowser: true };
 
   settings.task_settings = settings.task_settings || {};
-  settings.task_settings.max_windows = toInt(fields.maxWindows.value, 0);
+  if (fields.maxWindows) {
+    settings.task_settings.max_windows = toInt(fields.maxWindows.value, 0);
+  }
 
-  messages.templates = splitLines(fields.templates.value);
+  messages.templates = splitLines(fields.templates ? fields.templates.value : "");
   if (!messages.templates.length) {
     showAlert("正式打招呼文案不能为空");
     return false;
