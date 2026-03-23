@@ -1948,25 +1948,17 @@ class ClientApp:
         token_expires_at = self.client_config.get("token_expires_at")
 
         worker_cmd.extend([
-            "--server",
-            self.server_url,
-            "--bit-api",
-            bit_api,
-            "--api-token",
-            api_token,
-            "--owner",
-            owner,
-            "--machine-id",
-            self.machine_id,
-            "--agent-token",
-            agent_token,
-            "--runtime-dir",
-            runtime_dir,
-            "--client-version",
-            client_version,
+            f"--server={self.server_url}",
+            f"--bit-api={bit_api}",
+            f"--api-token={api_token}",
+            f"--owner={owner}",
+            f"--machine-id={self.machine_id}",
+            f"--agent-token={agent_token}",
+            f"--runtime-dir={runtime_dir}",
+            f"--client-version={client_version}",
         ])
         if token_expires_at not in (None, ""):
-            worker_cmd.extend(["--token-expires-at", str(token_expires_at)])
+            worker_cmd.append(f"--token-expires-at={token_expires_at}")
 
         log_path = _runtime_path("logs", "worker.log")
         log_path.parent.mkdir(parents=True, exist_ok=True)

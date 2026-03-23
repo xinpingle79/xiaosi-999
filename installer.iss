@@ -14,7 +14,7 @@ WizardStyle=modern
 SetupIconFile=assets\fb_chat_helper.ico
 UninstallDisplayIcon={app}\FB_RPA_Client.exe
 CloseApplications=yes
-CloseApplicationsFilter=FB_RPA_Client.exe
+CloseApplicationsFilter=FB_RPA_Client.exe,FB_RPA_Worker.exe,FB_RPA_Main.exe
 RestartApplications=no
 
 [Tasks]
