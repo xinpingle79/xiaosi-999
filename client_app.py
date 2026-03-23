@@ -17,6 +17,8 @@ import yaml
 from tkinter import font as tkfont
 from tkinter import messagebox, ttk
 
+from utils.logger import log
+
 APP_NAME = "小四客户端"
 DEFAULT_SERVER_URL = "http://154.64.255.139:43090"
 CLIENT_ERROR_I18N = {
@@ -24,7 +26,6 @@ CLIENT_ERROR_I18N = {
     "missing_activation_code": "请输入激活码后再验证。",
     "missing_agent_token": "本地凭证不存在，请重新输入激活码完成验证。",
     "invalid_token": "本地凭证已失效，请重新输入激活码完成验证。",
-    "token_expired": "本地凭证已过期，请重新输入激活码完成验证。",
     "account_expired": "账户已到期，请联系管理员续费或更换有效激活码。",
     "account_disabled": "账户已禁用，请联系管理员处理。",
     "device_limit_reached": "设备数量已达上限，请联系管理员处理。",
@@ -35,7 +36,6 @@ CLIENT_REACTIVATION_ERRORS = {
     "account_expired",
     "account_disabled",
     "invalid_token",
-    "token_expired",
     "missing_agent_token",
     "agent_not_registered",
     "unauthorized",
@@ -409,16 +409,9 @@ def _license_is_expired(license_data):
     return ts is not None and time.time() >= ts
 
 
-def _token_is_expired(value):
-    ts = _parse_expire_at(value)
-    return ts is not None and time.time() >= ts
-
-
 def _client_can_use_token(client_config, license_data):
     agent_token = str((client_config or {}).get("agent_token") or "").strip()
     if not agent_token:
-        return False
-    if _token_is_expired((client_config or {}).get("token_expires_at")):
         return False
     if _license_is_expired(license_data):
         return False
@@ -676,7 +669,7 @@ class ClientApp:
             return False
         deadline = time.time() + max(timeout, 0.5)
         while time.time() < deadline:
-            info = self.refresh_remote_status(silent=True)
+            info = self.refresh_remote_status(silent=True, tolerate_transient=True)
             if info and not info.get("task_running") and not info.get("task_pending"):
                 return True
             time.sleep(0.5)
@@ -1941,12 +1934,8 @@ class ClientApp:
         self.window_no_text.set(str(self.client_config.get("window_no") or "").strip())
         owner = str(self.license_data.get("owner") or "").strip()
         license_expired = _license_is_expired(self.license_data)
-        token_expired = _token_is_expired(self.client_config.get("token_expires_at"))
         self.verified = _client_can_use_token(self.client_config, self.license_data)
         if license_expired:
-            self._clear_local_auth(preserve_license=True)
-            self._show_activation_screen(self.SESSION_NOTICE_TEXT, error=True)
-        elif token_expired:
             self._clear_local_auth(preserve_license=True)
             self._show_activation_screen(self.SESSION_NOTICE_TEXT, error=True)
         elif self.verified:
@@ -1965,7 +1954,7 @@ class ClientApp:
         restored = self._ensure_worker_ready_after_config(wait_remote_ready=False, skip_sync=True)
         if restored:
             return
-        info = self.refresh_remote_status(silent=True)
+        info = self.refresh_remote_status(silent=True, tolerate_transient=True)
         if not info:
             self._apply_button_state(agent_online=False, task_running=False, task_pending=False)
 
@@ -2098,7 +2087,7 @@ class ClientApp:
                 self.worker_process = None
             worker_pid = self._read_worker_pid()
             local_worker_alive = self._is_pid_running(worker_pid)
-        status = self.refresh_remote_status(silent=True)
+        status = self.refresh_remote_status(silent=True, tolerate_transient=True)
         if local_worker_alive:
             if status and status.get("agent_online"):
                 return True
@@ -2138,7 +2127,6 @@ class ClientApp:
         owner = str(self.license_data.get("owner") or "").strip()
         runtime_dir = str(_runtime_dir())
         client_version = str(self.client_config.get("client_version") or "").strip()
-        token_expires_at = self.client_config.get("token_expires_at")
 
         worker_cmd.extend([
             f"--server={self.server_url}",
@@ -2150,8 +2138,6 @@ class ClientApp:
             f"--runtime-dir={runtime_dir}",
             f"--client-version={client_version}",
         ])
-        if token_expires_at not in (None, ""):
-            worker_cmd.append(f"--token-expires-at={token_expires_at}")
 
         log_path = _runtime_path("logs", "worker.log")
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2194,7 +2180,7 @@ class ClientApp:
             return True
         for _ in range(8):
             time.sleep(1)
-            status = self.refresh_remote_status(silent=True)
+            status = self.refresh_remote_status(silent=True, tolerate_transient=True)
             if status and status.get("agent_online"):
                 return True
         messagebox.showwarning("提示", "worker 已启动，但执行端尚未连上服务器")
@@ -2260,8 +2246,8 @@ class ClientApp:
             "/api/client/status",
             payload,
             timeout=8,
-            retries=1,
-            retry_delay=0.5,
+            retries=2,
+            retry_delay=0.4,
         )
         if not ok:
             error_code = str(data.get("error") or "").strip()
@@ -2388,7 +2374,7 @@ class ClientApp:
         deadline = time.time() + max(timeout, 0.5)
         last_info = None
         while time.time() < deadline:
-            info = self.refresh_remote_status(silent=True)
+            info = self.refresh_remote_status(silent=True, tolerate_transient=True)
             if info and info.get("start_ready"):
                 return info
             last_info = info or last_info
@@ -2413,7 +2399,7 @@ class ClientApp:
         synced = self._sync_config_to_server(show_error=False)
         if synced:
             return True
-        info = self.refresh_remote_status(silent=True)
+        info = self.refresh_remote_status(silent=True, tolerate_transient=True)
         if self._is_remote_config_usable(info):
             log.warning(f"{action_label} 前配置同步超时，已复用服务器现有同机配置继续执行。")
             return True
@@ -2554,7 +2540,7 @@ class ClientApp:
             return False
         if wait_remote_ready:
             self._wait_for_remote_start_ready(timeout=8.0)
-        self.refresh_remote_status(silent=True)
+        self.refresh_remote_status(silent=True, tolerate_transient=True)
         return True
 
     def _send_control(self, action):
@@ -2594,7 +2580,7 @@ class ClientApp:
             self._lock_action(action_key)
         else:
             self._unlock_action(action_key)
-        self.refresh_remote_status(silent=True)
+        self.refresh_remote_status(silent=True, tolerate_transient=True)
         self._present_control_result(action, data)
         return result == "accepted"
 
@@ -2640,7 +2626,7 @@ class ClientApp:
             self._lock_action("single")
         else:
             self._unlock_action("single")
-        self.refresh_remote_status(silent=True)
+        self.refresh_remote_status(silent=True, tolerate_transient=True)
         self._present_control_result("restart_window", data)
 
     def on_stop(self):

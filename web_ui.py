@@ -858,11 +858,9 @@ def _load_agent_settings():
 def _load_agent_security():
     settings = read_yaml(SETTINGS_PATH)
     security_cfg = settings.get("agent_security", {}) or {}
-    token_ttl = int(security_cfg.get("token_ttl_seconds", 3600) or 3600)
     max_devices = int(security_cfg.get("max_devices_per_account", 1) or 1)
     allow_rebind = bool(security_cfg.get("allow_rebind", False))
     return {
-        "token_ttl_seconds": token_ttl,
         "max_devices_per_account": max_devices,
         "allow_rebind": allow_rebind,
     }
@@ -2280,9 +2278,6 @@ def _verify_agent_request(payload):
         stored_token = str(agent.get("token") or "").strip()
         if not stored_token or stored_token != agent_token:
             return False, "invalid_token", None
-        expires_at = agent.get("token_expires_at")
-        if expires_at and time.time() > float(expires_at):
-            return False, "token_expired", None
         return True, None, agent
     finally:
         db.close()
@@ -2445,7 +2440,6 @@ def handle_client_activate(payload, request_host=""):
     security = _load_agent_security()
     max_devices_default = int(security.get("max_devices_per_account", 1) or 1)
     allow_rebind = bool(security.get("allow_rebind", False))
-    token_ttl = int(security.get("token_ttl_seconds", 3600) or 3600)
 
     db = Database()
     try:
@@ -2484,7 +2478,6 @@ def handle_client_activate(payload, request_host=""):
                 return {"ok": False, "error": "device_limit_reached"}
 
         agent_token = secrets.token_urlsafe(32)
-        token_expires_at = time.time() + token_ttl
         existing_last_seen = None
         existing_label = ""
         existing_status = 1
@@ -2501,7 +2494,7 @@ def handle_client_activate(payload, request_host=""):
             owner=owner,
             status=existing_status,
             token=agent_token,
-            token_expires_at=token_expires_at,
+            token_expires_at=None,
             client_version=client_version or None,
         )
 
@@ -2514,7 +2507,7 @@ def handle_client_activate(payload, request_host=""):
                 "expire_at": expire_at,
                 "max_devices": max_devices,
                 "agent_token": agent_token,
-                "token_expires_at": token_expires_at,
+                "token_expires_at": None,
                 "client_version": client_version or "",
             },
         }
@@ -3075,19 +3068,26 @@ def handle_agent_log(payload):
         user_id = str(delivery_event.get("user_id") or "").strip() or None
         success = bool(delivery_event.get("success"))
         if group_id and profile_url and account_id:
-            db = Database()
-            try:
-                db.mark_done(
-                    group_id=group_id,
-                    profile_url=profile_url,
-                    account_id=account_id,
-                    success=success,
-                    user_id=user_id,
-                    machine_id=machine_id,
-                    scope_id=scope_id,
+            if not scope_id:
+                log.warning(
+                    f"[delivery_event] 缺少 scope_id，已跳过运行时入库："
+                    f"machine_id={machine_id or '-'} account_id={account_id or '-'} "
+                    f"group_id={group_id or '-'} profile_url={profile_url or '-'}"
                 )
-            finally:
-                db.close()
+            else:
+                db = Database()
+                try:
+                    db.mark_done(
+                        group_id=group_id,
+                        profile_url=profile_url,
+                        account_id=account_id,
+                        success=success,
+                        user_id=user_id,
+                        machine_id=machine_id,
+                        scope_id=scope_id,
+                    )
+                finally:
+                    db.close()
     prefix = ""
     if owner and machine_id:
         prefix = f"[{owner}@{machine_id}] "

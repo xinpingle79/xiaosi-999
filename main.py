@@ -299,7 +299,8 @@ def run_bitbrowser_batch(config, msgs, browser_settings):
         return
 
     log.info(
-        f"已自动识别 {len(profiles)} 个比特浏览器窗口，将顺序接入：前一窗口进入小组成员页后再放行下一窗口，并发执行。"
+        f"已自动识别 {len(profiles)} 个比特浏览器窗口，将顺序接入：前一窗口优先进入小组成员页，"
+        f"最多等待 5 秒后放行下一窗口，并发执行。"
     )
     total_sent = 0
     finished_groups = 0
@@ -470,6 +471,15 @@ def run_single_session(
                     account_id=profile_account_id,
                     machine_id=machine_id,
                 )
+                if not scope_id:
+                    release_startup_gate()
+                    log.error(f"[{alert_account_id}] 未能生成窗口级 scope_id，跳过当前窗口。")
+                    return {
+                        "account_id": alert_account_id,
+                        "messages_sent": 0,
+                        "finished_groups": 0,
+                        "reason": "window_scope_unresolved",
+                    }
                 scraper = Scraper(page, window_label=alert_account_id)
                 sender = Messager(page, task_cfg, window_label=alert_account_id)
                 max_messages = normalize_message_limit(task_cfg.get("max_messages_per_account", 0))
@@ -762,13 +772,11 @@ def resolve_window_scope_id(profile=None, browser_id=None, window_token=None, ac
         str(browser_id or "").strip(),
         str((profile or {}).get("id") or "").strip(),
         str(window_token or "").strip(),
-        str(account_id or "").strip(),
-        str(machine_id or "").strip(),
     ]
     for value in candidates:
         if value:
             return value
-    return "global"
+    return ""
 
 
 def collect_target_groups(scraper, task_cfg):

@@ -771,7 +771,7 @@ class Scraper:
             log.warning(f"{self._prefix()}未找到可复用的 Facebook 页面，无法按手动路径进入小组。")
             return False
         if self._is_joined_groups_surface(self.page.url):
-            self._wait_for_groups_list_ready(timeout=6.0, step_name="已加入小组列表")
+            self._wait_for_groups_list_ready(timeout=1.5, step_name="已加入小组列表")
             return True
         if self._is_groups_surface(self.page.url):
             return True
@@ -780,7 +780,7 @@ class Scraper:
         if self._open_home_surface_for_groups_entry():
             click_info = self._click_groups_entry()
             if click_info:
-                entered_groups_surface = self._wait_for_groups_surface(timeout=12.0, step_name="小组首页")
+                entered_groups_surface = self._wait_for_groups_surface(timeout=1.5, step_name="小组首页")
         if not entered_groups_surface:
             if not self._open_groups_surface_by_direct_navigation():
                 log.warning(f"{self._prefix()}未能回到 Facebook 首页，无法按手动路径进入小组。")
@@ -798,7 +798,8 @@ class Scraper:
         seen_urls = set()
         idle_rounds = 0
         round_idx = 0
-        recovered_once = False
+        recovery_attempts = 0
+        max_recovery_attempts = 2
         unlimited = not max_scrolls or int(max_scrolls) <= 0
 
         while unlimited or round_idx < int(max_scrolls):
@@ -821,9 +822,13 @@ class Scraper:
             )
 
             idle_rounds = idle_rounds + 1 if added == 0 else 0
-            if added == 0 and idle_rounds >= 2 and not recovered_once:
-                log.info(f"{self._prefix()}已加入小组列表连续为空，尝试重新进入“你的小组”恢复列表。")
-                recovered_once = True
+            list_ready = bool(batch) or self._has_groups_list_ready()
+            if added == 0 and idle_rounds >= 2 and not list_ready and recovery_attempts < max_recovery_attempts:
+                recovery_attempts += 1
+                log.info(
+                    f"{self._prefix()}已加入小组列表连续为空且列表未稳定，"
+                    f"尝试重新进入“你的小组”恢复列表 ({recovery_attempts}/{max_recovery_attempts})。"
+                )
                 if self._open_joined_groups_listing():
                     self._scroll_joined_groups_container(to_top=True)
                     idle_rounds = 0
@@ -1281,7 +1286,7 @@ class Scraper:
             if self._is_joined_groups_surface(self.page.url):
                 self.scroll_to_top()
                 self._scroll_joined_groups_container(to_top=True)
-                if self._wait_for_groups_list_ready(timeout=6.0, step_name="已加入小组列表"):
+                if self._wait_for_groups_list_ready(timeout=2.5, step_name="已加入小组列表"):
                     return True
             for _ in range(3):
                 clicked = self.page.evaluate(
@@ -1352,18 +1357,18 @@ class Scraper:
                         "已加入小组列表",
                         "等待进入“你的小组”页面",
                         lambda: self._is_joined_groups_surface(self.page.url) or self._has_groups_list_ready(),
-                        timeout=10.0,
+                        timeout=4.0,
                         interval=0.3,
                     )
                     if entered:
                         self.scroll_to_top()
                         self._scroll_joined_groups_container(to_top=True)
-                        if self._wait_for_groups_list_ready(timeout=6.0, step_name="已加入小组列表"):
+                        if self._wait_for_groups_list_ready(timeout=2.5, step_name="已加入小组列表"):
                             return True
                 if self._is_joined_groups_surface(self.page.url):
                     self.scroll_to_top()
                     self._scroll_joined_groups_container(to_top=True)
-                    if self._wait_for_groups_list_ready(timeout=4.0, step_name="已加入小组列表"):
+                    if self._wait_for_groups_list_ready(timeout=1.5, step_name="已加入小组列表"):
                         return True
                 try:
                     log.info(f"{self._prefix()}已加入小组列表尚未稳定，尝试直接进入 joins 页面恢复列表。")
@@ -1372,10 +1377,10 @@ class Scraper:
                         self.page.wait_for_load_state("domcontentloaded", timeout=3000)
                     except Exception:
                         pass
-                    if self._wait_for_groups_surface(timeout=10.0, step_name="已加入小组列表"):
+                    if self._wait_for_groups_surface(timeout=2.5, step_name="已加入小组列表"):
                         self.scroll_to_top()
                         self._scroll_joined_groups_container(to_top=True)
-                        if self._wait_for_groups_list_ready(timeout=6.0, step_name="已加入小组列表"):
+                        if self._wait_for_groups_list_ready(timeout=2.0, step_name="已加入小组列表"):
                             return True
                 except Exception:
                     pass
@@ -1777,7 +1782,7 @@ class Scraper:
                         f"type={clicked.get('clickedType') or ''} "
                         f"text={clicked.get('clickedText') or ''}"
                     )
-                    self._wait_for_url_change(before_url, timeout=15.0)
+                    self._wait_for_group_navigation(before_url, group_root, timeout=2.5)
                     current_url = str(self.page.url or "").strip()
                     if self._is_group_root_url(current_url, expected_root=group_root):
                         return True
@@ -1791,7 +1796,7 @@ class Scraper:
                         self.page.go_back(wait_until="domcontentloaded", timeout=15000)
                     except Exception:
                         pass
-                    self._wait_for_groups_list_ready(timeout=6.0, step_name="已加入小组列表")
+                    self._wait_for_groups_list_ready(timeout=2.0, step_name="已加入小组列表")
                 snapshot = self._joined_groups_snapshot()
                 fingerprint = "|".join(item.get("href") or "" for item in (snapshot.get("items") or [])[:12])
                 idle_rounds = idle_rounds + 1 if fingerprint == last_fingerprint else 0
@@ -1901,13 +1906,18 @@ class Scraper:
             time.sleep(interval)
         return False
 
-    def _wait_for_url_change(self, previous_url, timeout=15.0, interval=0.2):
+    def _wait_for_group_navigation(self, previous_url, group_root, timeout=2.5, interval=0.15):
         previous = str(previous_url or "").strip()
+        target_root = str(group_root or "").strip().rstrip("/")
         end_time = time.time() + max(0.5, float(timeout or 0.5))
-        last_url = self.page.url
+        last_url = str(self.page.url or "").strip()
         while time.time() < end_time:
-            current_url = self.page.url
+            current_url = str(self.page.url or "").strip()
             if current_url != previous:
+                return current_url
+            if target_root and (
+                current_url == target_root or current_url.startswith(target_root + "/")
+            ):
                 return current_url
             last_url = current_url
             time.sleep(interval)
@@ -1991,7 +2001,7 @@ class Scraper:
                     self.page.wait_for_load_state("domcontentloaded", timeout=3000)
                 except Exception:
                     pass
-                self._wait_for_groups_surface(timeout=12.0, step_name="小组首页")
+                self._wait_for_groups_surface(timeout=2.5, step_name="小组首页")
                 if self._is_groups_surface(self.page.url):
                     return True
             except Exception:

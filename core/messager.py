@@ -366,10 +366,10 @@ class Messager:
         self._last_limit_check_ts = 0.0
         self._last_limit_check_result = False
         self.delivery_confirm_timeout_ms = int(
-            task_cfg.get("delivery_confirm_timeout_ms", 5000) or 5000
+            task_cfg.get("delivery_confirm_timeout_ms", 2600) or 2600
         )
         self.delivery_settle_ms = int(
-            task_cfg.get("delivery_settle_ms", 2200) or 2200
+            task_cfg.get("delivery_settle_ms", 900) or 900
         )
         self.success_close_delay_ms = int(
             task_cfg.get("success_close_delay_ms", 200) or 200
@@ -961,25 +961,38 @@ class Messager:
             return False
 
     def _paste_and_send(self, editor, text):
-        before_hits = self._count_message_hits(editor, text)
+        before_state = self._normalize_delivery_state(self._get_delivery_state(editor, text))
         if not self._paste_text_into_editor(editor, text):
             return "paste_failed"
         self._sleep(0.04, min_seconds=0.01)
         self.page.keyboard.press("Enter")
-        return self._wait_for_delivery(editor, text, before_hits)
+        return self._wait_for_delivery(editor, text, before_state)
 
-    def _wait_for_delivery(self, editor, text, before_hits, timeout_ms=None):
+    def _wait_for_delivery(self, editor, text, before_state, timeout_ms=None):
         timeout_ms = timeout_ms or self.delivery_confirm_timeout_ms
+        before_state = self._normalize_delivery_state(before_state)
+        before_hits = before_state["message_hits"]
+        before_fingerprint = before_state["window_fingerprint"]
+        fast_settle_ms = min(self.delivery_settle_ms, 350)
+        commit_settle_ms = min(self.delivery_settle_ms, 220)
         deadline = time.time() + timeout_ms / 1000
         success_seen_at = None
+        success_mode = None
         while time.time() < deadline:
             self._wait_if_paused()
-            state = self._get_delivery_state(editor, text)
-            if not state:
+            state = self._normalize_delivery_state(self._get_delivery_state(editor, text))
+            if not state["state_ready"]:
                 if self._check_stranger_limit_global():
                     return "limit_reached"
                 self._sleep(0.12)
                 continue
+
+            editor_empty = self._editor_empty(editor)
+            fingerprint_changed = (
+                bool(before_fingerprint)
+                and bool(state["window_fingerprint"])
+                and state["window_fingerprint"] != before_fingerprint
+            )
 
             if state["has_stranger_limit"]:
                 return "limit_reached"
@@ -991,25 +1004,78 @@ class Messager:
             if state["has_failure"]:
                 return state.get("failure_reason") or "failed"
 
-            delivered = (
-                state["message_hits"] > before_hits
-                or state["has_status"]
-                or state["has_sent_time"]
-            )
-            if delivered:
-                if state["has_status"] or state["has_sent_time"]:
-                    return "sent"
+            if state["has_status"] or state["has_sent_time"]:
+                return "sent"
 
-                if success_seen_at is None:
+            if state["message_hits"] > before_hits:
+                strong_increment = (
+                    (not before_fingerprint or fingerprint_changed or not state["window_fingerprint"])
+                    and editor_empty
+                )
+                settle_ms = fast_settle_ms if strong_increment else self.delivery_settle_ms
+                current_mode = "strong_increment" if strong_increment else "increment"
+                if success_seen_at is None or success_mode != current_mode:
                     success_seen_at = time.time()
-                elif (time.time() - success_seen_at) * 1000 >= self.delivery_settle_ms:
+                    success_mode = current_mode
+                elif (time.time() - success_seen_at) * 1000 >= settle_ms:
+                    return "sent"
+            elif editor_empty and fingerprint_changed:
+                current_mode = "editor_commit"
+                if success_seen_at is None or success_mode != current_mode:
+                    success_seen_at = time.time()
+                    success_mode = current_mode
+                elif (time.time() - success_seen_at) * 1000 >= commit_settle_ms:
                     return "sent"
             else:
                 success_seen_at = None
+                success_mode = None
             self._sleep(0.12)
         if self._check_stranger_limit_global():
             return "limit_reached"
         return "timeout"
+
+    def _normalize_delivery_state(self, state):
+        if not isinstance(state, dict):
+            return {
+                "state_ready": False,
+                "message_hits": 0,
+                "has_status": False,
+                "has_failure": False,
+                "has_stranger_limit": False,
+                "has_message_request_limit": False,
+                "has_sent_time": False,
+                "window_fingerprint": "",
+                "failure_reason": "",
+            }
+        return {
+            "state_ready": True,
+            "message_hits": int(state.get("message_hits") or 0),
+            "has_status": bool(state.get("has_status")),
+            "has_failure": bool(state.get("has_failure")),
+            "has_stranger_limit": bool(state.get("has_stranger_limit")),
+            "has_message_request_limit": bool(state.get("has_message_request_limit")),
+            "has_sent_time": bool(state.get("has_sent_time")),
+            "window_fingerprint": self._normalize_text(state.get("window_fingerprint") or ""),
+            "failure_reason": self._normalize_text(state.get("failure_reason") or ""),
+        }
+
+    def _editor_empty(self, editor):
+        try:
+            content = editor.evaluate(
+                """(el) => {
+                    if (!el) return '';
+                    if (el.isContentEditable || el.getAttribute('contenteditable') === 'true') {
+                        return (el.innerText || el.textContent || '');
+                    }
+                    if ('value' in el) {
+                        return el.value || '';
+                    }
+                    return el.textContent || '';
+                }"""
+            )
+            return not self._normalize_text(content)
+        except Exception:
+            return False
 
     def _detect_profile_message_gate(self, link, hover_card=None):
         if hover_card is not None:

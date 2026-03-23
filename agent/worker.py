@@ -181,9 +181,6 @@ def _load_client_config(config_path=None):
             changed = True
     if "agent_token" in config:
         config["agent_token"] = str(config.get("agent_token") or "").strip()
-    if config.get("token_expires_at") in ("", []):
-        config["token_expires_at"] = None
-        changed = True
     if changed:
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -224,12 +221,6 @@ def _refresh_runtime_config(cfg, config_path=None):
         agent_token = str(config.get("agent_token") or "").strip()
         if agent_token or not cfg.get("agent_token"):
             cfg["agent_token"] = agent_token
-    if "token_expires_at" not in locked_fields:
-        token_expires_at = config.get("token_expires_at")
-        if token_expires_at not in (None, "", []):
-            cfg["token_expires_at"] = token_expires_at
-        elif not cfg.get("agent_token"):
-            cfg["token_expires_at"] = None
     client_version = str(config.get("client_version") or "").strip()
     if "client_version" not in locked_fields and client_version:
         cfg["client_version"] = client_version
@@ -306,7 +297,6 @@ def _build_config(args):
     if license_data.get("max_devices") is not None:
         config["max_devices"] = license_data.get("max_devices")
     agent_token = str(args.agent_token or config.get("agent_token") or "").strip()
-    token_expires_at = args.token_expires_at if args.token_expires_at not in (None, "") else config.get("token_expires_at")
     locked_fields = {
         key
         for key, value in {
@@ -318,7 +308,6 @@ def _build_config(args):
             "runtime_dir": args.runtime_dir,
             "client_version": args.client_version,
             "agent_token": args.agent_token,
-            "token_expires_at": args.token_expires_at,
         }.items()
         if value not in (None, "")
     }
@@ -333,7 +322,6 @@ def _build_config(args):
         "runtime_dir": runtime_dir,
         "client_version": client_version,
         "agent_token": agent_token,
-        "token_expires_at": token_expires_at,
         "expire_at": config.get("expire_at"),
         "max_devices": config.get("max_devices"),
         "_locked_fields": locked_fields,
@@ -356,13 +344,13 @@ def _post_agent_json(cfg, url, payload, timeout=10):
     return _post_json(url, base, timeout=timeout)
 
 
-def _persist_client_auth(config_path=None, agent_token="", token_expires_at=None):
+def _persist_client_auth(config_path=None, agent_token=""):
     target = Path(config_path) if config_path else CLIENT_CONFIG_PATH
     config = _load_client_config(target)
     if not config:
         config = {}
     config["agent_token"] = str(agent_token or "").strip()
-    config["token_expires_at"] = token_expires_at
+    config.pop("token_expires_at", None)
     for key in ("activation_code", "register_token", "owner", "expire_at", "max_devices"):
         config.pop(key, None)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -374,8 +362,8 @@ def _persist_client_auth(config_path=None, agent_token="", token_expires_at=None
 
 def _clear_runtime_auth(cfg, config_path=None):
     cfg["agent_token"] = ""
-    cfg["token_expires_at"] = None
-    _persist_client_auth(config_path=config_path, agent_token="", token_expires_at=None)
+    cfg.pop("token_expires_at", None)
+    _persist_client_auth(config_path=config_path, agent_token="")
 
 
 def _license_expired(expire_at):
@@ -396,27 +384,12 @@ def _ensure_runtime_token(cfg, config_path=None):
     if not agent_token:
         print("缺少有效凭证，请先在客户端输入激活码完成激活")
         return False
-    if _token_expired(cfg):
-        _clear_runtime_auth(cfg, config_path=config_path)
-        print("本地凭证已过期，请先在客户端重新激活")
-        return False
     return True
-
-
-def _token_expired(cfg):
-    expires_at = cfg.get("token_expires_at")
-    if not expires_at:
-        return False
-    try:
-        return time.time() >= float(expires_at)
-    except Exception:
-        return False
 
 
 def _runtime_auth_message(error_code):
     mapping = {
         "invalid_token": "执行端认证失效（invalid_token），请回到客户端重新激活。",
-        "token_expired": "执行端本地凭证已过期，请回到客户端重新激活。",
         "account_expired": "账号已到期，请回到客户端重新激活。",
         "account_disabled": "账号已禁用，请回到客户端重新激活。",
     }
@@ -451,7 +424,7 @@ def _heartbeat_loop(cfg, stop_event, worker, config_path=None):
             },
         )
         if isinstance(result, dict):
-            if result.get("error") in ("token_expired", "invalid_token"):
+            if result.get("error") == "invalid_token":
                 _handle_runtime_auth_failure(
                     worker,
                     cfg,
@@ -776,7 +749,6 @@ def main():
     parser.add_argument("--poll-interval", dest="poll_interval")
     parser.add_argument("--config", dest="config")
     parser.add_argument("--agent-token", dest="agent_token")
-    parser.add_argument("--token-expires-at", dest="token_expires_at")
     parser.add_argument("--runtime-dir", dest="runtime_dir")
     parser.add_argument("--client-version", dest="client_version")
     args = parser.parse_args()
@@ -822,7 +794,7 @@ def main():
                 timeout=15,
             )
             if isinstance(result, dict):
-                if result.get("error") in ("token_expired", "invalid_token"):
+                if result.get("error") == "invalid_token":
                     _handle_runtime_auth_failure(
                         worker,
                         cfg,

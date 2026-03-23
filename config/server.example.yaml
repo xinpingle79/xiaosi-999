@@ -4,7 +4,6 @@ web_ui:
   host: 0.0.0.0
   port: 43090
 agent_security:
-  token_ttl_seconds: 3600
   heartbeat_ttl_seconds: 180
   max_devices_per_account: 1
   allow_rebind: false
