@@ -280,16 +280,6 @@ class Messager:
     MESSAGE_REQUEST_LIMIT_ALERT_TEXT = (
         "你已达到消息请求发送上限\n24 小时内可发起的新对话数量有限，请稍后再试。"
     )
-    LIKE_BUTTON_SELECTORS = [
-        'div[aria-label="发个赞"]',
-        'div[aria-label="發個讚"]',
-        'div[aria-label="Like"]',
-        'div[aria-label="Send a like"]',
-        'div[aria-label="Me gusta"]',
-        'div[aria-label="Curtir"]',
-        'div[aria-label="J’aime"]',
-        'div[aria-label="Gefällt mir"]',
-    ]
     ADD_FRIEND_TEXTS = [
         "Add friend",
         "Add Friend",
@@ -377,9 +367,6 @@ class Messager:
         self._last_limit_check_result = False
         self.delivery_confirm_timeout_ms = int(
             task_cfg.get("delivery_confirm_timeout_ms", 5000) or 5000
-        )
-        self.like_probe_timeout_ms = int(
-            task_cfg.get("like_probe_timeout_ms", 4000) or 4000
         )
         self.delivery_settle_ms = int(
             task_cfg.get("delivery_settle_ms", 2200) or 2200
@@ -853,51 +840,8 @@ class Messager:
                     return {"status": "sent"}
 
                 if delivery_state == "timeout":
-                    log.warning(f"发送消息未拿到明确状态，尝试发送点赞探针: {name}")
-                    delivery_state = self._send_like_probe(chat_session["editor"])
-
-                if delivery_state == "limit_reached":
-                    log.warning(f"点赞探针后确认陌生消息数量已达上限: {name}")
-                    return {
-                        "status": "limit",
-                        "reason": "stranger_message_limit_reached",
-                        "alert_text": self.STRANGER_LIMIT_ALERT_TEXT,
-                    }
-
-                if delivery_state == "message_request_limit_reached":
-                    log.warning(f"点赞探针后确认消息请求发送达到上限: {name}")
-                    return {
-                        "status": "blocked",
-                        "reason": "message_request_limit_reached",
-                        "alert_text": self.MESSAGE_REQUEST_LIMIT_ALERT_TEXT,
-                    }
-
-                if delivery_state == "account_cannot_message":
-                    log.warning(f"点赞探针后确认当前账号无法继续联系用户: {name}")
-                    return {
-                        "status": "blocked",
-                        "reason": "account_cannot_message",
-                        "alert_text": "当前账号已被限制继续向该类用户发起消息。",
-                    }
-
-                if delivery_state in ("failed", "send_failed_ui"):
-                    log.warning(f"点赞探针后确认发送失败，保留当前目标待后续重试: {name}")
-                    return {
-                        "status": "error",
-                        "reason": "send_failed_ui",
-                    }
-
-                if delivery_state == "send_restricted_ui":
-                    log.warning(f"点赞探针后确认无法发送: {name}")
-                    return {
-                        "status": "blocked",
-                        "reason": "send_restricted_ui",
-                        "alert_text": "当前窗口已被系统限制继续发送消息，请更换账户。",
-                    }
-
-                if delivery_state == "sent":
-                    log.success(f"✅ 成员页消息已发送: {name}")
-                    return {"status": "sent"}
+                    log.warning(f"发送消息确认超时，当前不再执行点赞探针: {name}")
+                    return {"status": "error", "reason": "delivery_not_confirmed"}
 
                 log.warning(f"发送状态未确认，不写入历史，等待下次重试: {name}")
                 return {"status": "error", "reason": "delivery_not_confirmed"}
@@ -1066,65 +1010,6 @@ class Messager:
             else:
                 success_seen_at = None
             self._sleep(0.12)
-        if self._check_stranger_limit_global():
-            return "limit_reached"
-        return "timeout"
-
-    def _send_like_probe(self, editor, timeout_ms=None):
-        timeout_ms = timeout_ms or self.like_probe_timeout_ms
-        like_button = self._find_like_button(editor)
-        if not like_button:
-            return "timeout"
-
-        before_state = self._get_delivery_state(editor, "")
-        before_fingerprint = before_state["window_fingerprint"] if before_state else ""
-        before_media_count = before_state["media_count"] if before_state else 0
-
-        try:
-            like_button.click(timeout=2000)
-        except Exception:
-            return "timeout"
-
-        deadline = time.time() + timeout_ms / 1000
-        success_seen_at = None
-        while time.time() < deadline:
-            self._wait_if_paused()
-            state = self._get_delivery_state(editor, "")
-            if not state:
-                if self._check_stranger_limit_global():
-                    return "limit_reached"
-                self._sleep(0.12)
-                continue
-
-            if state["has_stranger_limit"]:
-                return "limit_reached"
-            if state.get("has_message_request_limit"):
-                return "message_request_limit_reached"
-            if self._check_stranger_limit_global():
-                return "limit_reached"
-
-            if state["has_failure"]:
-                return state.get("failure_reason") or "failed"
-
-            delivered = (
-                state["has_status"]
-                or state["has_sent_time"]
-                or state["window_fingerprint"] != before_fingerprint
-                or state["media_count"] > before_media_count
-            )
-            if delivered:
-                if state["has_status"] or state["has_sent_time"]:
-                    return "sent"
-
-                if success_seen_at is None:
-                    success_seen_at = time.time()
-                elif (time.time() - success_seen_at) * 1000 >= self.delivery_settle_ms:
-                    return "sent"
-            else:
-                success_seen_at = None
-
-            self._sleep(0.12)
-
         if self._check_stranger_limit_global():
             return "limit_reached"
         return "timeout"
@@ -2454,36 +2339,6 @@ class Messager:
             )
         except Exception:
             return None
-
-    def _find_like_button(self, editor):
-        editor_box = editor.bounding_box()
-        if not editor_box:
-            return None
-
-        candidates = []
-        for selector in self.LIKE_BUTTON_SELECTORS:
-            locator = self.page.locator(selector)
-            count = locator.count()
-            for idx in range(count):
-                button = locator.nth(idx)
-                try:
-                    if not button.is_visible(timeout=self._scale_ms(200, min_ms=80)):
-                        continue
-                    box = button.bounding_box()
-                    if not box:
-                        continue
-                    if abs(box["y"] - editor_box["y"]) > 80:
-                        continue
-                    if box["x"] + box["width"] < editor_box["x"] + editor_box["width"] - 20:
-                        continue
-                    candidates.append((abs(box["y"] - editor_box["y"]), box["x"], button))
-                except Exception:
-                    continue
-
-        if not candidates:
-            return None
-        candidates.sort(key=lambda item: (item[0], item[1]))
-        return candidates[0][2]
 
     def _wait_for_chat_session(self, expected_name=None, timeout_ms=10000):
         timeout_ms = self._scale_ms(timeout_ms, min_ms=2000)

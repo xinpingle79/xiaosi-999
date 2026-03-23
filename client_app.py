@@ -56,6 +56,7 @@ ROOT_DIR = _find_root_dir()
 ENV_RUNTIME_DIR = "FB_RPA_RUNTIME_DIR"
 DEFAULT_BIT_API = ""
 STATUS_REFRESH_MS = 3000
+STATUS_FAILURE_TOLERANCE = 5
 
 
 def _user_data_root() -> Path:
@@ -524,6 +525,7 @@ class ClientApp:
         self._log_path = _runtime_path("logs", "worker.log")
         self._log_offsets = {}
         self._log_follow_tail = True
+        self._status_failure_streak = 0
 
         self.activation_code = tk.StringVar(value="")
         self.bit_api = tk.StringVar(
@@ -1981,15 +1983,22 @@ class ClientApp:
         self.machine_id = str(config.get("machine_id") or self.machine_id).strip()
         return True
 
-    def _post_client_api(self, path, payload, timeout=12):
-        try:
-            response = requests.post(
-                f"{self.server_url}{path}",
-                json=payload,
-                timeout=timeout,
-            )
-        except Exception as exc:
-            return False, {"error": f"无法连接服务器：{exc}"}
+    def _post_client_api(self, path, payload, timeout=12, retries=0, retry_delay=0.8):
+        last_error = None
+        response = None
+        for attempt in range(max(int(retries or 0), 0) + 1):
+            try:
+                response = requests.post(
+                    f"{self.server_url}{path}",
+                    json=payload,
+                    timeout=timeout,
+                )
+                break
+            except Exception as exc:
+                last_error = exc
+                if attempt >= max(int(retries or 0), 0):
+                    return False, {"error": f"无法连接服务器：{exc}"}
+                time.sleep(max(float(retry_delay or 0), 0.1))
         try:
             data = response.json()
         except Exception:
@@ -2008,7 +2017,13 @@ class ClientApp:
             "api_token": str(self.api_token.get() or "").strip(),
             "name": socket.gethostname(),
         }
-        ok, data = self._post_client_api("/api/client/sync-config", payload)
+        ok, data = self._post_client_api(
+            "/api/client/sync-config",
+            payload,
+            timeout=(8, 35),
+            retries=3,
+            retry_delay=1.5,
+        )
         if not ok and show_error:
             messagebox.showerror("提示", f"同步本地配置失败：{data.get('error')}")
         return ok
@@ -2167,7 +2182,7 @@ class ClientApp:
             )
             self._sync_action_button_visual(self.single_run_btn)
 
-    def refresh_remote_status(self, silent=False):
+    def refresh_remote_status(self, silent=False, tolerate_transient=False):
         if not self.verified:
             return None
         payload = {
@@ -2178,10 +2193,14 @@ class ClientApp:
         if not ok:
             error_code = str(data.get("error") or "").strip()
             if error_code in CLIENT_REACTIVATION_ERRORS:
+                self._status_failure_streak = 0
                 self._clear_local_auth(preserve_license=True)
                 self._reset_status_summary()
                 self._apply_button_state(agent_online=False, task_running=False, task_pending=False)
                 self._show_activation_screen(self.SESSION_NOTICE_TEXT, error=True)
+                return None
+            self._status_failure_streak += 1
+            if tolerate_transient and self._status_failure_streak < STATUS_FAILURE_TOLERANCE:
                 return None
             if not silent:
                 self._set_activation_notice(
@@ -2192,6 +2211,7 @@ class ClientApp:
             self._apply_button_state(agent_online=False, task_running=False, task_pending=False)
             return None
 
+        self._status_failure_streak = 0
         info = data.get("data") or {}
         self._apply_remote_stats(info)
         self._apply_button_state(
@@ -2302,6 +2322,31 @@ class ClientApp:
             time.sleep(0.5)
         return last_info
 
+    def _is_remote_config_usable(self, info):
+        info = info or {}
+        remote_bit_api = _normalize_bit_api(info.get("bit_api") or "")
+        remote_api_token = str(info.get("api_token") or "").strip()
+        local_bit_api = _normalize_bit_api(self.bit_api.get())
+        local_api_token = str(self.api_token.get() or "").strip()
+        if not remote_bit_api or not remote_api_token:
+            return False
+        if remote_bit_api != local_bit_api:
+            return False
+        if remote_api_token != local_api_token:
+            return False
+        return bool(info.get("device_bound"))
+
+    def _sync_config_or_reuse_remote(self, action_label):
+        synced = self._sync_config_to_server(show_error=False)
+        if synced:
+            return True
+        info = self.refresh_remote_status(silent=True)
+        if self._is_remote_config_usable(info):
+            log.warning(f"{action_label} 前配置同步超时，已复用服务器现有同机配置继续执行。")
+            return True
+        messagebox.showerror("提示", "同步本地配置失败，且服务器上没有可复用的同机配置")
+        return False
+
     def _schedule_status_refresh(self, initial=False):
         if self.status_job:
             self.root.after_cancel(self.status_job)
@@ -2311,7 +2356,7 @@ class ClientApp:
 
     def _poll_status(self):
         try:
-            self.refresh_remote_status(silent=True)
+            self.refresh_remote_status(silent=True, tolerate_transient=True)
         finally:
             self._schedule_status_refresh()
 
@@ -2439,7 +2484,7 @@ class ClientApp:
         if not self._save_local_config(require_connection_fields=True):
             return False
         if action == "start":
-            if not self._sync_config_to_server(show_error=True):
+            if not self._sync_config_or_reuse_remote("启动"):
                 return False
             if not self._ensure_worker_running(wait_online=True):
                 return False
@@ -2485,7 +2530,7 @@ class ClientApp:
             return
         if not self._save_local_config(require_connection_fields=True):
             return
-        if not self._sync_config_to_server(show_error=True):
+        if not self._sync_config_or_reuse_remote("单独启动"):
             return
         if not self._ensure_worker_running(wait_online=True):
             return

@@ -1831,12 +1831,31 @@ class Scraper:
                     ["成员", "Members", "People", "成员列表", "成员资料", "用户"],
                 )
                 if clicked:
-                    self._wait_for_url_change(before_url, timeout=15.0)
-                    return True
+                    if self._wait_for_members_tab_activation(before_url, timeout=3.0):
+                        return True
                 time.sleep(0.5)
             return False
         except Exception:
             return False
+
+    def _wait_for_members_tab_activation(self, previous_url, timeout=3.0, interval=0.15):
+        previous = str(previous_url or "").strip()
+        end_time = time.time() + max(0.5, float(timeout or 0.5))
+        while time.time() < end_time:
+            current_url = str(self.page.url or "").strip()
+            if current_url != previous and "/members" in current_url:
+                return True
+            snapshot = self._capture_members_page_ready_snapshot()
+            if snapshot and (
+                bool(snapshot.get("looksLikeMembers"))
+                or (
+                    bool(snapshot.get("hasHeading"))
+                    and int(snapshot.get("visibleCount") or 0) >= 1
+                )
+            ):
+                return True
+            time.sleep(interval)
+        return False
 
     def _wait_for_url_change(self, previous_url, timeout=15.0, interval=0.2):
         previous = str(previous_url or "").strip()
