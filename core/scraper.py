@@ -412,6 +412,67 @@ class Scraper:
     def get_last_member_list_snapshot(self):
         return dict(self._last_member_list_snapshot)
 
+    def _get_last_confirmed_newcomers_scope(self):
+        snapshot = dict(self._last_scope_snapshot or {})
+        if not snapshot.get("confirmed"):
+            return None
+        return snapshot
+
+    def _can_attempt_newcomers_scope_recovery(self, scope):
+        reason = str((scope or {}).get("reason") or "").strip()
+        if reason not in {
+            "newcomers_label_not_found",
+            "newcomers_links_not_found",
+            "newcomers_section_not_found",
+        }:
+            return False
+        if not self.is_group_members_page():
+            return False
+        return self._get_last_confirmed_newcomers_scope() is not None
+
+    def _recover_newcomers_scope_from_last_confirmed(self, failed_scope=None, max_attempts=2):
+        cached_scope = self._get_last_confirmed_newcomers_scope()
+        if not cached_scope or not self.is_group_members_page():
+            return None
+
+        reason = str((failed_scope or {}).get("reason") or "newcomers_scope_unconfirmed").strip()
+        cached_top = int(cached_scope.get("sectionTop") or cached_scope.get("headingTop") or 0)
+        recovery_positions = []
+        if cached_top > 0:
+            recovery_positions.extend(
+                [
+                    max(0, cached_top - 180),
+                    max(0, cached_top - 60),
+                ]
+            )
+        recovery_positions.append(0)
+
+        seen_positions = set()
+        attempt_index = 0
+        for target_y in recovery_positions:
+            if target_y in seen_positions:
+                continue
+            seen_positions.add(target_y)
+            attempt_index += 1
+            if attempt_index > max_attempts:
+                break
+            log.info(
+                f"{self._prefix()}当前 members 页新人区确认暂时丢失({reason})，"
+                f"尝试回到最近一次新人区位置恢复 ({attempt_index}/{max_attempts})。"
+            )
+            try:
+                self.page.evaluate("(y) => window.scrollTo(0, y)", int(target_y))
+            except Exception:
+                continue
+            self._wait_for_scroll_stable(timeout=1.4)
+            self._wait_for_member_list_stable(timeout=1.8 if attempt_index == 1 else 2.2)
+            recovered_scope = self._locate_newcomers_scope_raw()
+            if recovered_scope.get("confirmed"):
+                self._last_scope_snapshot = dict(recovered_scope)
+                log.info(f"{self._prefix()}新人区临时确认失败后恢复成功，继续留在当前小组。")
+                return recovered_scope
+        return None
+
     def _capture_newcomers_search_snapshot(self, scope=None):
         try:
             current_scope = scope if isinstance(scope, dict) else self._locate_newcomers_scope()
@@ -492,7 +553,7 @@ class Scraper:
             "page_min_px": min_px,
         }
 
-    def _locate_newcomers_scope(self):
+    def _locate_newcomers_scope_raw(self):
         try:
             scope = self.page.evaluate(
                 """(payload) => {
@@ -654,15 +715,19 @@ class Scraper:
                 }""",
                 {"labels": list(self.NEWCOMER_SECTION_LABELS)},
             )
-            self._last_scope_snapshot = dict(scope or {}) if isinstance(scope, dict) else None
             return scope
         except Exception as exc:
-            self._last_scope_snapshot = None
             return {
                 "confirmed": False,
                 "reason": f"newcomers_section_lookup_failed:{exc}",
                 "label": "",
             }
+
+    def _locate_newcomers_scope(self):
+        scope = self._locate_newcomers_scope_raw()
+        if isinstance(scope, dict) and scope.get("confirmed"):
+            self._last_scope_snapshot = dict(scope)
+        return scope
 
     def _joined_groups_snapshot(self):
         try:
@@ -1200,6 +1265,10 @@ class Scraper:
 
     def scroll_member_list(self):
         scope = self._locate_newcomers_scope()
+        if not scope.get("confirmed") and self._can_attempt_newcomers_scope_recovery(scope):
+            recovered_scope = self._recover_newcomers_scope_from_last_confirmed(scope)
+            if recovered_scope and recovered_scope.get("confirmed"):
+                scope = recovered_scope
         if scope.get("confirmed"):
             before_state = self._capture_member_list_scroll_state(scope)
             scroll_plan = self._get_sequence_scroll_plan(before_state)
@@ -2542,6 +2611,10 @@ class Scraper:
                 "scopeLabel": "",
             }
         scope = self._locate_newcomers_scope()
+        if not scope.get("confirmed") and self._can_attempt_newcomers_scope_recovery(scope):
+            recovered_scope = self._recover_newcomers_scope_from_last_confirmed(scope)
+            if recovered_scope and recovered_scope.get("confirmed"):
+                scope = recovered_scope
         if not scope.get("confirmed"):
             return {
                 "items": [],
