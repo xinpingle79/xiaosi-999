@@ -401,6 +401,7 @@ class Messager:
         self.delivery_confirm_timeout_ms = int(
             task_cfg.get("delivery_confirm_timeout_ms", 2600) or 2600
         )
+        self.delivery_recheck_timeout_ms = self.delivery_confirm_timeout_ms
         self.delivery_settle_ms = int(
             task_cfg.get("delivery_settle_ms", 900) or 900
         )
@@ -846,10 +847,13 @@ class Messager:
                 if not primary_text:
                     return {"status": "error", "reason": "empty_message"}
 
-                delivery_state = self._paste_and_send(
+                delivery_state, rebound_session = self._paste_and_send(
                     chat_session["editor"],
                     primary_text,
+                    expected_name=name,
                 )
+                if rebound_session:
+                    chat_session = rebound_session
 
                 if delivery_state == "paste_failed":
                     log.warning(f"{self._prefix()}聊天输入框粘贴消息失败，跳过: {name}")
@@ -1036,13 +1040,95 @@ class Messager:
         except Exception:
             return False
 
-    def _paste_and_send(self, editor, text):
+    def _map_restriction_to_delivery_state(self, restriction):
+        if not restriction:
+            return None
+        reason = str(restriction.get("reason") or "").strip()
+        status = str(restriction.get("status") or "").strip()
+        if reason == "stranger_message_limit_reached" or status == "limit":
+            return "limit_reached"
+        if reason == "message_request_limit_reached":
+            return "message_request_limit_reached"
+        if reason == "account_cannot_message":
+            return "account_cannot_message"
+        if reason == "account_restricted_by_dialog":
+            return "send_restricted_ui"
+        if reason == "send_failed_ui":
+            return "send_failed_ui"
+        return None
+
+    def _retry_delivery_confirmation(self, editor, text, before_state, expected_name=None):
+        log.info(
+            f"{self._prefix()}发送确认首轮未命中，保留当前聊天窗口并进行二次核对: "
+            f"{expected_name or 'unknown'}"
+        )
+        restriction = self._detect_chat_restriction(expected_name=expected_name)
+        mapped_restriction = self._map_restriction_to_delivery_state(restriction)
+        if mapped_restriction:
+            return mapped_restriction, None
+
+        rebound_session = None
+        if not self._chat_editor_gone(editor):
+            rebound_session = self._locate_chat_session(expected_name=expected_name) or {
+                "editor": editor,
+                "close_button": None,
+            }
+        if not rebound_session:
+            rebound_session = self._wait_for_chat_session(
+                expected_name=expected_name,
+                timeout_ms=min(self.chat_session_wait_timeout_ms, 2200),
+            )
+        if not rebound_session:
+            restriction = self._detect_chat_restriction(expected_name=expected_name)
+            mapped_restriction = self._map_restriction_to_delivery_state(restriction)
+            if mapped_restriction:
+                return mapped_restriction, None
+            if self._check_stranger_limit_global():
+                return "limit_reached", None
+            return "timeout", None
+
+        rebound_editor = rebound_session.get("editor")
+        if not rebound_editor:
+            return "timeout", rebound_session
+
+        if not self._wait_for_editor_ready(
+            rebound_editor,
+            timeout_ms=min(self.editor_ready_wait_timeout_ms, 1800),
+        ):
+            restriction = self._detect_chat_restriction(expected_name=expected_name)
+            mapped_restriction = self._map_restriction_to_delivery_state(restriction)
+            if mapped_restriction:
+                return mapped_restriction, rebound_session
+            return "timeout", rebound_session
+
+        second_pass_state = self._wait_for_delivery(
+            rebound_editor,
+            text,
+            before_state,
+            timeout_ms=self.delivery_recheck_timeout_ms,
+        )
+        if second_pass_state == "timeout":
+            restriction = self._detect_chat_restriction(expected_name=expected_name)
+            mapped_restriction = self._map_restriction_to_delivery_state(restriction)
+            if mapped_restriction:
+                return mapped_restriction, rebound_session
+        return second_pass_state, rebound_session
+
+    def _paste_and_send(self, editor, text, expected_name=None):
         before_state = self._normalize_delivery_state(self._get_delivery_state(editor, text))
         if not self._paste_text_into_editor(editor, text):
-            return "paste_failed"
+            return "paste_failed", None
         self._sleep(0.04, min_seconds=0.01)
         self.page.keyboard.press("Enter")
-        return self._wait_for_delivery(editor, text, before_state)
+        delivery_state = self._wait_for_delivery(editor, text, before_state)
+        if delivery_state != "timeout":
+            return delivery_state, None
+        return self._retry_delivery_confirmation(
+            editor,
+            text,
+            before_state,
+            expected_name=expected_name,
+        )
 
     def _wait_for_delivery(self, editor, text, before_state, timeout_ms=None):
         timeout_ms = timeout_ms or self.delivery_confirm_timeout_ms

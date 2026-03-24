@@ -18,6 +18,7 @@ from tkinter import font as tkfont
 from tkinter import messagebox, ttk
 
 from utils.logger import log
+from utils.helpers import Database
 
 APP_NAME = "小四客户端"
 DEFAULT_SERVER_URL = "http://154.64.255.139:43090"
@@ -123,7 +124,7 @@ def _default_client_config() -> dict:
             "group_list_scroll_times": 0,
             "idle_scroll_limit": 3,
             "account_restricted_blocked_threshold": 2,
-            "account_restricted_signal_threshold": 3,
+            "account_restricted_signal_threshold": 5,
             "speed_factor": 0.85,
             "stranger_limit_cache_ms": 1200,
             "send_interval_seconds": [0, 0],
@@ -214,6 +215,30 @@ def save_messages_config(templates=None, probe_templates=None) -> None:
         yaml.safe_dump(payload, allow_unicode=True, sort_keys=False),
         encoding="utf-8",
     )
+
+
+def _sync_runtime_owner_message_templates(owner: str, messages: dict) -> bool:
+    owner = str(owner or "").strip()
+    if not owner or not isinstance(messages, dict):
+        return False
+    templates = _normalize_message_templates(messages.get("templates") or [])
+    probe_templates = _normalize_message_templates(messages.get("probe_templates") or [])
+    db = Database(db_path=str(_runtime_path("data", "server.db")))
+    try:
+        existing = db.get_message_templates(owner) or {}
+        existing_templates = _normalize_message_templates(existing.get("templates") or [])
+        existing_probe_templates = _normalize_message_templates(
+            existing.get("probe_templates") or []
+        )
+        if existing_templates == templates and existing_probe_templates == probe_templates:
+            return False
+        if templates or probe_templates:
+            db.set_message_templates(owner, templates, probe_templates)
+        else:
+            db.delete_message_templates(owner)
+        return True
+    finally:
+        db.close()
 
 
 def _migrate_legacy_message_templates(loaded: dict) -> bool:
@@ -2500,6 +2525,15 @@ class ClientApp:
 
         self._status_failure_streak = 0
         info = data.get("data") or {}
+        runtime_messages = info.get("messages")
+        if isinstance(runtime_messages, dict):
+            try:
+                _sync_runtime_owner_message_templates(
+                    info.get("owner") or self._runtime_owner(),
+                    runtime_messages,
+                )
+            except Exception as exc:
+                log.warning(f"同步执行端文案缓存失败：{exc}")
         self._apply_remote_stats(info)
         self._apply_button_state(
             agent_online=bool(info.get("agent_online")),

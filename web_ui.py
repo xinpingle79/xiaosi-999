@@ -781,39 +781,24 @@ class TaskManager:
     def _agent_has_running(self, owner=None):
         db = Database()
         try:
-            if hasattr(db, "count_agent_tasks"):
-                return db.count_agent_tasks(status="running", owner=owner) > 0
+            return _count_agent_tasks_by_scope(
+                db,
+                owner=owner,
+                statuses=("running",),
+                actions=("start",),
+            ) > 0
         finally:
             db.close()
-        return False
 
     def _is_task_paused_from_actions(self, db, owner=None, machine_id=None):
-        owner_name = str(owner or "").strip()
-        machine_id = str(machine_id or "").strip()
-        clauses = [
-            "action IN ('start', 'pause', 'resume', 'stop')",
-            "status IN ('pending', 'running', 'done')",
-        ]
-        params = []
-        if owner_name:
-            clauses.append("owner = ?")
-            params.append(owner_name)
-        if machine_id:
-            clauses.append("assigned_machine_id = ?")
-            params.append(machine_id)
-        if not params:
-            return False
-        row = db.conn.execute(
-            f"""
-            SELECT action
-            FROM agent_tasks
-            WHERE {' AND '.join(clauses)}
-            ORDER BY id DESC
-            LIMIT 1
-            """,
-            tuple(params),
-        ).fetchone()
-        return bool(row and str(row["action"] or "").strip() == "pause")
+        row = _load_latest_agent_task_by_scope(
+            db,
+            owner=owner,
+            machine_id=machine_id,
+            statuses=("done",),
+            actions=("start", "pause", "resume", "stop"),
+        )
+        return bool(row and str(row.get("action") or "").strip() == "pause")
 
     def stop_for_owner(self, owner):
         if not owner:
@@ -1876,6 +1861,16 @@ def _translate_client_start_block_reason(reason):
     return mapping.get(str(reason or "").strip(), "执行端尚未就绪")
 
 
+def _translate_control_action_state(action):
+    mapping = {
+        "stop": "正在处理停止指令",
+        "pause": "正在处理暂停指令",
+        "resume": "正在处理继续指令",
+        "restart_window": "正在处理单独启动指令",
+    }
+    return mapping.get(str(action or "").strip(), "正在处理控制指令")
+
+
 def _client_action_message(action, result, existing_status=""):
     action = str(action or "").strip()
     result = str(result or "").strip()
@@ -1960,29 +1955,108 @@ def _load_owner_device_summary(owner, db=None):
             db.close()
 
 
+def _count_agent_tasks_by_scope(db, owner=None, machine_id=None, statuses=None, actions=None):
+    clauses = []
+    params = []
+    owner_name = str(owner or "").strip()
+    machine_name = str(machine_id or "").strip()
+    status_values = [str(item or "").strip() for item in (statuses or []) if str(item or "").strip()]
+    action_values = [str(item or "").strip() for item in (actions or []) if str(item or "").strip()]
+    if owner_name:
+        clauses.append("owner = ?")
+        params.append(owner_name)
+    if machine_name:
+        clauses.append("assigned_machine_id = ?")
+        params.append(machine_name)
+    if status_values:
+        placeholders = ",".join("?" for _ in status_values)
+        clauses.append(f"status IN ({placeholders})")
+        params.extend(status_values)
+    if action_values:
+        placeholders = ",".join("?" for _ in action_values)
+        clauses.append(f"action IN ({placeholders})")
+        params.extend(action_values)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    row = db.conn.execute(
+        f"SELECT COUNT(1) AS total FROM agent_tasks {where}",
+        tuple(params),
+    ).fetchone()
+    return int(row["total"] or 0) if row else 0
+
+
+def _load_latest_agent_task_by_scope(db, owner=None, machine_id=None, statuses=None, actions=None):
+    clauses = []
+    params = []
+    owner_name = str(owner or "").strip()
+    machine_name = str(machine_id or "").strip()
+    status_values = [str(item or "").strip() for item in (statuses or []) if str(item or "").strip()]
+    action_values = [str(item or "").strip() for item in (actions or []) if str(item or "").strip()]
+    if owner_name:
+        clauses.append("owner = ?")
+        params.append(owner_name)
+    if machine_name:
+        clauses.append("assigned_machine_id = ?")
+        params.append(machine_name)
+    if status_values:
+        placeholders = ",".join("?" for _ in status_values)
+        clauses.append(f"status IN ({placeholders})")
+        params.extend(status_values)
+    if action_values:
+        placeholders = ",".join("?" for _ in action_values)
+        clauses.append(f"action IN ({placeholders})")
+        params.extend(action_values)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    row = db.conn.execute(
+        f"""
+        SELECT *
+        FROM agent_tasks
+        {where}
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        tuple(params),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def _count_distinct_running_start_accounts(db, owner=None):
+    owner_name = str(owner or "").strip()
+    if owner_name:
+        return 1 if _count_agent_tasks_by_scope(
+            db,
+            owner=owner_name,
+            statuses=("running",),
+            actions=("start",),
+        ) > 0 else 0
+    row = db.conn.execute(
+        """
+        SELECT COUNT(DISTINCT owner) AS total
+        FROM agent_tasks
+        WHERE status = 'running'
+          AND action = 'start'
+          AND COALESCE(owner, '') != ''
+        """
+    ).fetchone()
+    return int(row["total"] or 0) if row else 0
+
+
 def _load_runtime_task_counts(owner=None, db=None):
     owns_db = db is None
     db = db or Database()
     try:
-        if hasattr(db, "count_agent_tasks"):
-            running_tasks = db.count_agent_tasks(status="running", owner=owner)
-            pending_tasks = db.count_agent_tasks(status="pending", owner=owner)
-        else:
-            running_tasks = 0
-            pending_tasks = 0
-        account_filter = str(owner or "").strip()
-        if account_filter:
-            running_accounts = 1 if int(running_tasks or 0) > 0 else 0
-        else:
-            row = db.conn.execute(
-                """
-                SELECT COUNT(DISTINCT owner) AS total
-                FROM agent_tasks
-                WHERE status = 'running'
-                  AND COALESCE(owner, '') != ''
-                """
-            ).fetchone()
-            running_accounts = int(row["total"] or 0) if row else 0
+        running_tasks = _count_agent_tasks_by_scope(
+            db,
+            owner=owner,
+            statuses=("running",),
+            actions=("start",),
+        )
+        pending_tasks = _count_agent_tasks_by_scope(
+            db,
+            owner=owner,
+            statuses=("pending",),
+            actions=("start",),
+        )
+        running_accounts = _count_distinct_running_start_accounts(db, owner=owner)
         return {
             "running_tasks": int(running_tasks or 0),
             "pending_tasks": int(pending_tasks or 0),
@@ -2779,6 +2853,7 @@ def handle_client_status(payload):
     settings = _load_agent_settings()
     heartbeat_ttl = float(settings.get("heartbeat_ttl", 180) or 180)
     now = time.time()
+    runtime_messages = {"templates": [], "probe_templates": []}
 
     db = Database()
     try:
@@ -2799,6 +2874,11 @@ def handle_client_status(payload):
             machine_id=machine_id,
             api_token=api_token,
         )
+        owner_templates = db.get_message_templates(owner) or {}
+        runtime_messages = {
+            "templates": owner_templates.get("templates") or [],
+            "probe_templates": owner_templates.get("probe_templates") or [],
+        }
 
         stale_rows = TASK_MANAGER._cleanup_stale_machine_action_tasks(
             db,
@@ -2807,24 +2887,28 @@ def handle_client_status(payload):
             heartbeat_ttl,
             trigger="client_status",
         )
-        running_row = db.conn.execute(
-            """
-            SELECT COUNT(1) AS total
-            FROM agent_tasks
-            WHERE status = 'running' AND assigned_machine_id = ?
-            """,
-            (machine_id,),
-        ).fetchone()
-        pending_row = db.conn.execute(
-            """
-            SELECT COUNT(1) AS total
-            FROM agent_tasks
-            WHERE status = 'pending' AND assigned_machine_id = ?
-            """,
-            (machine_id,),
-        ).fetchone()
+        running_count = _count_agent_tasks_by_scope(
+            db,
+            machine_id=machine_id,
+            statuses=("running",),
+            actions=("start",),
+        )
+        pending_count = _count_agent_tasks_by_scope(
+            db,
+            machine_id=machine_id,
+            statuses=("pending",),
+            actions=("start",),
+        )
+        control_task = _load_latest_agent_task_by_scope(
+            db,
+            machine_id=machine_id,
+            statuses=("pending", "running"),
+            actions=("stop", "pause", "resume", "restart_window"),
+        )
+        control_action_name = str((control_task or {}).get("action") or "").strip()
+        control_action_pending = bool(control_action_name)
         task_paused = bool(
-            int(running_row["total"] or 0) > 0
+            int(running_count or 0) > 0
             and TASK_MANAGER._is_task_paused_from_actions(
                 db,
                 owner=owner,
@@ -2834,8 +2918,6 @@ def handle_client_status(payload):
     finally:
         db.close()
 
-    running_count = int(running_row["total"] or 0) if running_row else 0
-    pending_count = int(pending_row["total"] or 0) if pending_row else 0
     with TASK_MANAGER._lock:
         owner_logs = _filter_runtime_logs(
             list(TASK_MANAGER._logs),
@@ -2880,6 +2962,9 @@ def handle_client_status(payload):
     elif pending_count > 0:
         state = "queued"
         state_text = "任务排队中"
+    elif control_action_pending:
+        state = "processing"
+        state_text = _translate_control_action_state(control_action_name)
     elif agent_online:
         state = "idle"
         state_text = "执行端在线，等待任务"
@@ -2897,9 +2982,12 @@ def handle_client_status(payload):
             "task_running": running_count > 0,
             "task_pending": pending_count > 0,
             "task_paused": task_paused,
+            "control_action_pending": control_action_pending,
+            "control_action_name": control_action_name,
             "state": state,
             "state_text": state_text,
             "client_version": client_version,
+            "messages": runtime_messages,
             "bit_api": str((target_cfg or {}).get("bit_api") or "").strip(),
             "api_token": str((target_cfg or {}).get("api_token") or "").strip(),
             "stale_cleanup_ids": [row["id"] for row in stale_rows],
@@ -2943,6 +3031,20 @@ def handle_client_action(payload, action):
     task_running = bool(status_info.get("task_running"))
     task_pending = bool(status_info.get("task_pending"))
     task_paused = bool(status_info.get("task_paused"))
+    control_action_pending = bool(status_info.get("control_action_pending"))
+    control_action_name = str(status_info.get("control_action_name") or "").strip()
+    if control_action_pending:
+        if action == control_action_name:
+            return {
+                "ok": True,
+                "result": "duplicate",
+                "message": _client_action_message(action, "duplicate", existing_status="running"),
+            }
+        return {
+            "ok": True,
+            "result": "blocked",
+            "message": f"{_translate_control_action_state(control_action_name)}，请稍后再试",
+        }
     if action == "start":
         if task_running:
             return {"ok": True, "result": "duplicate", "message": "当前任务已在运行，无需重复启动"}
@@ -3436,7 +3538,7 @@ def save_full_config(payload, actor_username=None, actor_role=None):
     task_settings["resume_search_times"] = 20
     task_settings["idle_scroll_limit"] = 3
     task_settings["account_restricted_blocked_threshold"] = 2
-    task_settings["account_restricted_signal_threshold"] = 3
+    task_settings["account_restricted_signal_threshold"] = 5
     task_settings.pop("send_interval_seconds", None)
     task_settings.pop("typing_delay", None)
     messages = dict(current_messages)

@@ -993,7 +993,7 @@ def process_member_targets(
         task_cfg.get("account_restricted_blocked_threshold", 2) or 2
     )
     restricted_signal_threshold = int(
-        task_cfg.get("account_restricted_signal_threshold", 3) or 3
+        task_cfg.get("account_restricted_signal_threshold", 5) or 5
     )
 
     round_idx = 0

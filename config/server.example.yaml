@@ -22,4 +22,4 @@ task_settings:
   resume_search_times: 20
   idle_scroll_limit: 3
   account_restricted_blocked_threshold: 2
-  account_restricted_signal_threshold: 3
+  account_restricted_signal_threshold: 5

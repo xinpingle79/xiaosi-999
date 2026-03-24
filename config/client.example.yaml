@@ -17,7 +17,7 @@ task_settings:
   group_list_scroll_times: 0
   idle_scroll_limit: 3
   account_restricted_blocked_threshold: 2
-  account_restricted_signal_threshold: 3
+  account_restricted_signal_threshold: 5
   speed_factor: 0.85
   stranger_limit_cache_ms: 1200
   send_interval_seconds:
