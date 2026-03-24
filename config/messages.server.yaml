@@ -1,3 +1,13 @@
 probe_templates:
 - 你好
-templates: []
+templates:
+- Hi, sorry to bother you. Per moderator requirements and to prevent minors from joining,
+  could you please confirm your age and whether you've ever held stocks?
+- Hi there, to comply with moderator guidelines and ensure age-appropriate participation,
+  could you kindly share your age and if you have any stock investment experience?
+- Sorry to interrupt. As requested by the moderators, to keep the group compliant,
+  please let us know your age and whether you've ever owned stocks.
+- Hello, in line with admin requirements and to restrict underage access, could you
+  please state your age and whether you've traded stocks before?
+- Hi, just a quick check per moderator instructions. To ensure eligibility, could
+  you confirm your age and if you have any stock holding history?

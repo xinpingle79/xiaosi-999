@@ -837,6 +837,20 @@ def build_cursor_search_result(reason, found_cursor, messages_sent, cursor, **ex
     return result
 
 
+def resolve_group_root_for_recovery(scraper, group_id):
+    current_root = ""
+    try:
+        current_root = str(scraper.get_current_group_root_url() or "").strip()
+    except Exception:
+        current_root = ""
+    if current_root:
+        return current_root
+    normalized_group_id = str(group_id or "").strip()
+    if not normalized_group_id:
+        return ""
+    return f"https://www.facebook.com/groups/{normalized_group_id}"
+
+
 def process_current_group(
     scraper,
     sender,
@@ -895,46 +909,11 @@ def process_current_group(
             message_budget=message_budget,
             cursor=cursor,
             skip_until_cursor=True,
+            switch_recovery_cycles=0,
         )
-        if result["reason"] == "cursor_not_found_fallback":
-            log.warning(
-                f"🪃 未找到断点用户 {cursor_target}，配置允许回退，重置到新人区域顶部后重新全量扫描。"
-            )
-            scraper.scroll_to_top()
-            newcomers_found = scraper.focus_newcomers_section(
-                max_scroll_rounds=newcomers_search_rounds
-            )
-            if not newcomers_found:
-                log.error("断点回退时未能重新定位到小组新人区块，终止当前小组。")
-                return {
-                    "messages_sent": result["messages_sent"],
-                    "reason": "newcomers_section_not_found",
-                }
-            return process_member_targets(
-                scraper=scraper,
-                sender=sender,
-                db=db,
-                config=config,
-                local_messages=local_messages,
-                account_id=account_id,
-                scope_id=scope_id,
-                machine_id=machine_id,
-                group_id=group_id,
-                owner_username=owner_username,
-                probe_templates=probe_templates,
-                templates=templates,
-                template_source=template_source,
-                task_cfg=task_cfg,
-                max_scroll_rounds=max_scroll_rounds,
-                idle_scroll_limit=idle_scroll_limit,
-                cursor_search_rounds=cursor_search_rounds,
-                message_budget=message_budget,
-                cursor=None,
-                skip_until_cursor=False,
-            )
         if result["reason"] == "cursor_not_found_required":
             log.error(
-                f"⛔ 断点用户 {cursor_target} 未找到，配置要求必须命中断点，终止当前小组。"
+                f"⛔ 断点用户 {cursor_target} 未找到，当前规则要求必须命中断点，终止当前小组。"
             )
         return result
 
@@ -960,6 +939,7 @@ def process_current_group(
         message_budget=message_budget,
         cursor=None,
         skip_until_cursor=False,
+        switch_recovery_cycles=0,
     )
 
 
@@ -984,6 +964,7 @@ def process_member_targets(
     cursor=None,
     skip_until_cursor=False,
     template_source="local_messages_yaml",
+    switch_recovery_cycles=0,
 ):
     seen_profiles = set()
     found_cursor = not skip_until_cursor
@@ -991,7 +972,6 @@ def process_member_targets(
     idle_rounds = 0
     cursor_rounds = 0
     cursor_skip_count = 0
-    cursor_require_found = bool(task_cfg.get("cursor_require_found", False))
     no_scroll_rounds = 0
     list_unchanged_rounds = 0
     last_list_fingerprint = None
@@ -1013,6 +993,89 @@ def process_member_targets(
     unlimited_scroll = not max_scroll_rounds or int(max_scroll_rounds) <= 0
     last_anchor = None
     anchor_attempts = 0
+    max_group_exhausted_recovery_cycles = 3
+    max_cursor_recovery_cycles = 2
+
+    def reset_group_progress_state(restart_cursor_search=False):
+        nonlocal idle_rounds, cursor_rounds, cursor_skip_count, no_scroll_rounds
+        nonlocal list_unchanged_rounds, last_list_fingerprint, confirm_exhausted
+        nonlocal last_anchor, last_anchor_was_tail, allow_anchor_reseed, anchor_attempts
+        idle_rounds = 0
+        cursor_rounds = 0
+        no_scroll_rounds = 0
+        list_unchanged_rounds = 0
+        last_list_fingerprint = None
+        confirm_exhausted = False
+        last_anchor = None
+        last_anchor_was_tail = False
+        allow_anchor_reseed = False
+        anchor_attempts = 0
+        if restart_cursor_search:
+            cursor_skip_count = 0
+            seen_profiles.clear()
+
+    def get_switch_recovery_policy(trigger_reason):
+        base_rounds = int(task_cfg.get("newcomers_search_rounds", 40) or 40)
+        if trigger_reason == "group_exhausted":
+            return {
+                "max_cycles": max_group_exhausted_recovery_cycles,
+                "refocus_rounds": min(max(12, base_rounds // 2), 20),
+                "steps": (
+                    "current_top_refocus",
+                    "reopen_members",
+                    "reopen_members",
+                    "reopen_members",
+                ),
+            }
+        return {
+            "max_cycles": max_cursor_recovery_cycles,
+            "refocus_rounds": min(max(6, base_rounds // 4), 12),
+            "steps": (
+                "current_top_refocus",
+                "reopen_members",
+                "reopen_members",
+            ),
+        }
+
+    def attempt_leave_group_recovery(trigger_reason):
+        nonlocal switch_recovery_cycles
+        policy = get_switch_recovery_policy(trigger_reason)
+        max_cycles = int(policy.get("max_cycles") or 0)
+        if max_cycles <= 0 or switch_recovery_cycles >= max_cycles:
+            return False
+        group_root = resolve_group_root_for_recovery(scraper, group_id)
+        if not group_root:
+            return False
+        refocus_rounds = int(policy.get("refocus_rounds") or 12)
+        recovery_steps = tuple(policy.get("steps") or ())
+        if not recovery_steps:
+            return False
+        cycle_no = switch_recovery_cycles + 1
+        log.warning(
+            f"当前小组即将因 {trigger_reason} 结束，开始第 {cycle_no}/{max_cycles} 次换群前复查。"
+        )
+        for confirm_idx, step in enumerate(recovery_steps, start=1):
+            if step == "current_top_refocus":
+                log.info(
+                    f"换群前复查：第 {confirm_idx}/{len(recovery_steps)} 次先回到当前 members 视图顶部，并重新定位“小组新人”。"
+                )
+                scraper.scroll_to_top()
+            else:
+                log.info(
+                    f"换群前复查：第 {confirm_idx}/{len(recovery_steps)} 次重走当前小组 members 链路，确认是否仍有可加载成员。"
+                )
+                if not scraper.open_group_members_page(group_root):
+                    continue
+                scraper.scroll_to_top()
+            if scraper.focus_newcomers_section(max_scroll_rounds=refocus_rounds):
+                switch_recovery_cycles += 1
+                log.info("换群前复查恢复成功，继续留在当前小组。")
+                reset_group_progress_state(
+                    restart_cursor_search=bool(skip_until_cursor and not found_cursor)
+                )
+                return True
+        return False
+
     while unlimited_scroll or round_idx <= int(max_scroll_rounds):
         if should_stop(task_cfg):
             return {
@@ -1130,26 +1193,20 @@ def process_member_targets(
             )
             if immediate_exhausted:
                 if skip_until_cursor and not found_cursor:
+                    if attempt_leave_group_recovery("cursor_not_found_required"):
+                        continue
                     cursor_target = describe_cursor_target(cursor)
-                    if cursor_require_found:
-                        log.error(
-                            f"⛔ 断点搜索结束，未找到断点用户 {cursor_target}，且 cursor_require_found=true。"
-                        )
-                        return build_cursor_search_result(
-                            "cursor_not_found_required",
-                            found_cursor,
-                            messages_sent,
-                            cursor,
-                        )
-                    log.warning(
-                        f"🪃 断点搜索结束，未找到断点用户 {cursor_target}，允许回退为当前小组全量重扫。"
+                    log.error(
+                        f"⛔ 断点搜索结束，未找到断点用户 {cursor_target}，当前规则要求必须命中断点。"
                     )
                     return build_cursor_search_result(
-                        "cursor_not_found_fallback",
+                        "cursor_not_found_required",
                         found_cursor,
                         messages_sent,
                         cursor,
                     )
+                if attempt_leave_group_recovery("group_exhausted"):
+                    continue
                 return {
                     "found_cursor": found_cursor,
                     "messages_sent": messages_sent,
@@ -1178,26 +1235,20 @@ def process_member_targets(
 
             if should_confirm_exhausted and confirm_exhausted:
                 if skip_until_cursor and not found_cursor:
+                    if attempt_leave_group_recovery("cursor_not_found_required"):
+                        continue
                     cursor_target = describe_cursor_target(cursor)
-                    if cursor_require_found:
-                        log.error(
-                            f"⛔ 断点搜索结束，未找到断点用户 {cursor_target}，且 cursor_require_found=true。"
-                        )
-                        return build_cursor_search_result(
-                            "cursor_not_found_required",
-                            found_cursor,
-                            messages_sent,
-                            cursor,
-                        )
-                    log.warning(
-                        f"🪃 断点搜索结束，未找到断点用户 {cursor_target}，允许回退为当前小组全量重扫。"
+                    log.error(
+                        f"⛔ 断点搜索结束，未找到断点用户 {cursor_target}，当前规则要求必须命中断点。"
                     )
                     return build_cursor_search_result(
-                        "cursor_not_found_fallback",
+                        "cursor_not_found_required",
                         found_cursor,
                         messages_sent,
                         cursor,
                     )
+                if attempt_leave_group_recovery("group_exhausted"):
+                    continue
                 return {
                     "found_cursor": found_cursor,
                     "messages_sent": messages_sent,
@@ -1207,23 +1258,14 @@ def process_member_targets(
             if skip_until_cursor and not found_cursor:
                 cursor_rounds += 1
                 if cursor_rounds >= cursor_search_rounds and cursor_rounds % cursor_search_rounds == 0:
+                    if attempt_leave_group_recovery("cursor_not_found_required"):
+                        continue
                     cursor_target = describe_cursor_target(cursor)
-                    if cursor_require_found:
-                        log.error(
-                            f"⛔ 未找到断点用户 {cursor_target}，已连续滚动 {cursor_rounds} 轮，配置要求必须命中断点。"
-                        )
-                        return build_cursor_search_result(
-                            "cursor_not_found_required",
-                            found_cursor,
-                            messages_sent,
-                            cursor,
-                            searched_rounds=cursor_rounds,
-                        )
-                    log.warning(
-                        f"🪃 未找到断点用户 {cursor_target}，已连续滚动 {cursor_rounds} 轮，回退为当前小组全量重扫。"
+                    log.error(
+                        f"⛔ 未找到断点用户 {cursor_target}，已连续滚动 {cursor_rounds} 轮，当前规则要求必须命中断点。"
                     )
                     return build_cursor_search_result(
-                        "cursor_not_found_fallback",
+                        "cursor_not_found_required",
                         found_cursor,
                         messages_sent,
                         cursor,
@@ -1508,28 +1550,67 @@ def process_member_targets(
                     }
 
     if skip_until_cursor and not found_cursor:
+        if attempt_leave_group_recovery("cursor_not_found_required"):
+            return process_member_targets(
+                scraper=scraper,
+                sender=sender,
+                db=db,
+                config=config,
+                local_messages=local_messages,
+                account_id=account_id,
+                scope_id=scope_id,
+                machine_id=machine_id,
+                group_id=group_id,
+                owner_username=owner_username,
+                probe_templates=probe_templates,
+                templates=templates,
+                task_cfg=task_cfg,
+                max_scroll_rounds=max_scroll_rounds,
+                idle_scroll_limit=idle_scroll_limit,
+                cursor_search_rounds=cursor_search_rounds,
+                message_budget=message_budget,
+                cursor=cursor,
+                skip_until_cursor=skip_until_cursor,
+                template_source=template_source,
+                switch_recovery_cycles=switch_recovery_cycles,
+            )
         cursor_target = describe_cursor_target(cursor)
-        if cursor_require_found:
-            log.error(
-                f"⛔ 扫描达到滚动上限后仍未找到断点用户 {cursor_target}，配置要求必须命中断点。"
-            )
-            return build_cursor_search_result(
-                "cursor_not_found_required",
-                found_cursor,
-                messages_sent,
-                cursor,
-                searched_rounds=round_idx,
-            )
-        log.warning(
-            f"🪃 扫描达到滚动上限后仍未找到断点用户 {cursor_target}，回退为当前小组全量重扫。"
+        log.error(
+            f"⛔ 扫描达到滚动上限后仍未找到断点用户 {cursor_target}，当前规则要求必须命中断点。"
         )
         return build_cursor_search_result(
-            "cursor_not_found_fallback",
+            "cursor_not_found_required",
             found_cursor,
             messages_sent,
             cursor,
             searched_rounds=round_idx,
         )
+
+    if confirm_exhausted or (last_anchor_was_tail and no_scroll_rounds >= 1):
+        if attempt_leave_group_recovery("group_exhausted"):
+            return process_member_targets(
+                scraper=scraper,
+                sender=sender,
+                db=db,
+                config=config,
+                local_messages=local_messages,
+                account_id=account_id,
+                scope_id=scope_id,
+                machine_id=machine_id,
+                group_id=group_id,
+                owner_username=owner_username,
+                probe_templates=probe_templates,
+                templates=templates,
+                task_cfg=task_cfg,
+                max_scroll_rounds=max_scroll_rounds,
+                idle_scroll_limit=idle_scroll_limit,
+                cursor_search_rounds=cursor_search_rounds,
+                message_budget=message_budget,
+                cursor=cursor,
+                skip_until_cursor=skip_until_cursor,
+                template_source=template_source,
+                switch_recovery_cycles=switch_recovery_cycles,
+            )
 
     return {
         "found_cursor": found_cursor,

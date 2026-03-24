@@ -14,7 +14,6 @@ browser:
 task_settings:
   max_messages_per_account: 0
   scroll_times: 0
-  cursor_require_found: true
   group_list_scroll_times: 0
   idle_scroll_limit: 3
   account_restricted_blocked_threshold: 2

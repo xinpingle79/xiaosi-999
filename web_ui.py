@@ -631,28 +631,6 @@ class TaskManager:
                     time.sleep(0.5)
                     continue
 
-                self._cleanup_stale_machine_action_tasks(
-                    db,
-                    owner_name,
-                    machine_id,
-                    heartbeat_ttl,
-                    trigger="enqueue_machine_action",
-                )
-                existing_task = self._find_existing_machine_action_task(
-                    db,
-                    owner_name,
-                    machine_id,
-                    action,
-                )
-                if existing_task:
-                    self._logs.append(
-                        f"=== 跳过重复 {action} 指令：执行端 {machine_id} 已存在任务#{existing_task['id']} ({existing_task['status']}) ==="
-                    )
-                    return True, None, {
-                        "result": "duplicate",
-                        "task_id": existing_task["id"],
-                        "existing_status": existing_task["status"],
-                    }
                 bit_api = str(target_cfg.get("bit_api") or "").strip()
                 target_api_token = str(target_cfg.get("api_token") or "").strip()
                 if not bit_api or not target_api_token:
@@ -663,20 +641,45 @@ class TaskManager:
                     "api_token": target_api_token,
                     "device_config_id": target_cfg.get("id"),
                 }
-                task_id = db.enqueue_agent_task(
-                    owner_name,
-                    action,
-                    window_token=window_token,
-                    machine_id=machine_id,
-                    payload=payload,
-                )
-                self._logs.append(
-                    f"=== 已下发 {action} 指令到执行端 {machine_id} (任务#{task_id}) ==="
-                )
-                return True, None, {
-                    "result": "accepted",
-                    "task_id": task_id,
-                }
+                # Keep duplicate detection and enqueue in one critical section so
+                # concurrent requests cannot observe different queue states.
+                with self._lock:
+                    self._cleanup_stale_machine_action_tasks(
+                        db,
+                        owner_name,
+                        machine_id,
+                        heartbeat_ttl,
+                        trigger="enqueue_machine_action",
+                    )
+                    existing_task = self._find_existing_machine_action_task(
+                        db,
+                        owner_name,
+                        machine_id,
+                        action,
+                    )
+                    if existing_task:
+                        self._logs.append(
+                            f"=== 跳过重复 {action} 指令：执行端 {machine_id} 已存在任务#{existing_task['id']} ({existing_task['status']}) ==="
+                        )
+                        return True, None, {
+                            "result": "duplicate",
+                            "task_id": existing_task["id"],
+                            "existing_status": existing_task["status"],
+                        }
+                    task_id = db.enqueue_agent_task(
+                        owner_name,
+                        action,
+                        window_token=window_token,
+                        machine_id=machine_id,
+                        payload=payload,
+                    )
+                    self._logs.append(
+                        f"=== 已下发 {action} 指令到执行端 {machine_id} (任务#{task_id}) ==="
+                    )
+                    return True, None, {
+                        "result": "accepted",
+                        "task_id": task_id,
+                    }
         finally:
             db.close()
 

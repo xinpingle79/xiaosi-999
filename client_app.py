@@ -120,7 +120,6 @@ def _default_client_config() -> dict:
         "task_settings": {
             "max_messages_per_account": 0,
             "scroll_times": 0,
-            "cursor_require_found": True,
             "group_list_scroll_times": 0,
             "idle_scroll_limit": 3,
             "account_restricted_blocked_threshold": 2,
@@ -146,6 +145,7 @@ def _sanitize_client_config(data: dict) -> dict:
     task_settings = cleaned.get("task_settings")
     if isinstance(task_settings, dict):
         for key in (
+            "cursor_require_found",
             "fast_message_button_only",
             "force_hover_card",
             "fast_action_timeout_ms",
