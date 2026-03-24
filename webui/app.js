@@ -999,7 +999,7 @@ function applyTaskButtonState() {
   );
   const taskRunning = Boolean(status.task_running ?? status.running);
   const taskPending = Boolean(status.task_pending) || inferTaskPending(status);
-  const taskPaused = Boolean(status.task_paused) || Boolean(status.pause_global) || Boolean(status.pause_owner);
+  const taskPaused = Boolean(status.task_paused);
   const startReady = agentOnline && hasBoundDevice && hasConnectionFields;
   let startBlockReason = "";
   if (!hasBoundDevice) {

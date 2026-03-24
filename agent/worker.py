@@ -60,15 +60,7 @@ def _normalize_server_url(server_url):
 
 
 def _should_migrate_server_url(server_url):
-    normalized = _normalize_server_url(server_url)
-    if not normalized:
-        return False
-    parsed = urlparse(normalized)
-    host = str(parsed.hostname or "").strip().lower()
-    port = parsed.port
-    if port is None:
-        port = 80 if parsed.scheme == "http" else 443 if parsed.scheme == "https" else None
-    return parsed.scheme == "http" and port == 43090 and host in {"127.0.0.1", "localhost"}
+    return False
 
 
 def _set_runtime_dir(value: str) -> None:
@@ -360,6 +352,46 @@ def _persist_client_auth(config_path=None, agent_token=""):
     )
 
 
+def _attempt_runtime_token_recovery(cfg, config_path=None):
+    owner = str(cfg.get("owner") or "").strip()
+    machine_id = str(cfg.get("machine_id") or "").strip()
+    api_token = str(cfg.get("api_token") or "").strip()
+    bit_api = str(cfg.get("bit_api") or "").strip()
+    client_version = str(cfg.get("client_version") or "").strip()
+    if not (owner and machine_id and api_token):
+        return False
+
+    status_code, data = _post_json(
+        f"{cfg['server_url']}/api/client/activate",
+        {
+            "owner": owner,
+            "machine_id": machine_id,
+            "bit_api": bit_api,
+            "api_token": api_token,
+            "client_version": client_version,
+        },
+        timeout=12,
+    )
+    if status_code != 200 or not isinstance(data, dict) or not data.get("ok"):
+        return False
+
+    info = data.get("data") or {}
+    agent_token = str(info.get("agent_token") or "").strip()
+    if not agent_token:
+        return False
+
+    cfg["agent_token"] = agent_token
+    server_url = str(info.get("server_url") or "").strip().rstrip("/")
+    if server_url:
+        cfg["server_url"] = server_url
+    if "expire_at" in info:
+        cfg["expire_at"] = info.get("expire_at")
+    if "max_devices" in info:
+        cfg["max_devices"] = info.get("max_devices")
+    _persist_client_auth(config_path=config_path, agent_token=agent_token)
+    return True
+
+
 def _clear_runtime_auth(cfg, config_path=None):
     cfg["agent_token"] = ""
     cfg.pop("token_expires_at", None)
@@ -382,6 +414,8 @@ def _ensure_runtime_token(cfg, config_path=None):
         return False
     agent_token = str(cfg.get("agent_token") or "").strip()
     if not agent_token:
+        if _attempt_runtime_token_recovery(cfg, config_path=config_path):
+            return True
         print("缺少有效凭证，请先在客户端输入激活码完成激活")
         return False
     return True
@@ -425,6 +459,8 @@ def _heartbeat_loop(cfg, stop_event, worker, config_path=None):
         )
         if isinstance(result, dict):
             if result.get("error") == "invalid_token":
+                if _attempt_runtime_token_recovery(cfg, config_path=config_path):
+                    continue
                 _handle_runtime_auth_failure(
                     worker,
                     cfg,
@@ -795,6 +831,9 @@ def main():
             )
             if isinstance(result, dict):
                 if result.get("error") == "invalid_token":
+                    if _attempt_runtime_token_recovery(cfg, config_path=args.config):
+                        time.sleep(cfg["poll_interval"])
+                        continue
                     _handle_runtime_auth_failure(
                         worker,
                         cfg,

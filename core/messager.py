@@ -1,8 +1,8 @@
 import os
 import time
-from pathlib import Path
 
 from core.scraper import Scraper
+from utils.helpers import run_pause_aware_action, wait_if_runtime_paused
 from utils.logger import log
 
 
@@ -39,104 +39,7 @@ class Messager:
         'span[aria-label="关闭"]',
         'span[aria-label="Close"]',
     ]
-    MEMBER_CARD_MESSAGE_SELECTORS = [
-        'div[aria-label="发消息"]',
-        'div[aria-label="发送消息"]',
-        'div[aria-label="發送訊息"]',
-        'div[aria-label="發消息"]',
-        'div[aria-label="Message"]',
-        'div[aria-label="Send message"]',
-        'div[aria-label="ส่งข้อความ"]',
-        'div[aria-label="Nhắn tin"]',
-        'div[aria-label="Gửi tin nhắn"]',
-        'div[aria-label="Enviar mensaje"]',
-        'div[aria-label="Enviar mensagem"]',
-        'div[aria-label="Envoyer un message"]',
-        'div[aria-label="Nachricht senden"]',
-        'div[aria-label="Invia messaggio"]',
-        'div[aria-label="Kirim pesan"]',
-        'div[aria-label="Hantar mesej"]',
-        'div[aria-label="Mesaj gönder"]',
-        'div[aria-label="Отправить сообщение"]',
-        'div[aria-label="Wyślij wiadomość"]',
-        'div[aria-label="메시지 보내기"]',
-        'div[aria-label="メッセージを送信"]',
-        'div[aria-label="إرسال رسالة"]',
-        'div[aria-label="বার্তা পাঠান"]',
-        'div[aria-label="मैसेज भेजें"]',
-        'button[aria-label="发消息"]',
-        'button[aria-label="发送消息"]',
-        'button[aria-label="發送訊息"]',
-        'button[aria-label="發消息"]',
-        'button[aria-label="Message"]',
-        'button[aria-label="Send message"]',
-        'button[aria-label="ส่งข้อความ"]',
-        'button[aria-label="Nhắn tin"]',
-        'button[aria-label="Gửi tin nhắn"]',
-        'button[aria-label="Enviar mensaje"]',
-        'button[aria-label="Enviar mensagem"]',
-        'button[aria-label="Envoyer un message"]',
-        'button[aria-label="Nachricht senden"]',
-        'button[aria-label="Invia messaggio"]',
-        'button[aria-label="Kirim pesan"]',
-        'button[aria-label="Hantar mesej"]',
-        'button[aria-label="Mesaj gönder"]',
-        'button[aria-label="Отправить сообщение"]',
-        'button[aria-label="Wyślij wiadomość"]',
-        'button[aria-label="메시지 보내기"]',
-        'button[aria-label="メッセージを送信"]',
-        'button[aria-label="إرسال رسالة"]',
-        'button[aria-label="বার্তা পাঠান"]',
-        'button[aria-label="मैसेज भेजें"]',
-        'div[role="button"]:has-text("发消息")',
-        'div[role="button"]:has-text("发送消息")',
-        'div[role="button"]:has-text("發送訊息")',
-        'div[role="button"]:has-text("發消息")',
-        'div[role="button"]:has-text("Message")',
-        'div[role="button"]:has-text("Send message")',
-        'div[role="button"]:has-text("ส่งข้อความ")',
-        'div[role="button"]:has-text("Nhắn tin")',
-        'div[role="button"]:has-text("Gửi tin nhắn")',
-        'div[role="button"]:has-text("Enviar mensaje")',
-        'div[role="button"]:has-text("Enviar mensagem")',
-        'div[role="button"]:has-text("Envoyer un message")',
-        'div[role="button"]:has-text("Nachricht senden")',
-        'div[role="button"]:has-text("Invia messaggio")',
-        'div[role="button"]:has-text("Kirim pesan")',
-        'div[role="button"]:has-text("Hantar mesej")',
-        'div[role="button"]:has-text("Mesaj gönder")',
-        'div[role="button"]:has-text("Отправить сообщение")',
-        'div[role="button"]:has-text("Wyślij wiadomość")',
-        'div[role="button"]:has-text("메시지 보내기")',
-        'div[role="button"]:has-text("メッセージを送信")',
-        'div[role="button"]:has-text("إرسال رسالة")',
-        'div[role="button"]:has-text("বার্তা পাঠান")',
-        'div[role="button"]:has-text("मैसेज भेजें")',
-        'button:has-text("发消息")',
-        'button:has-text("发送消息")',
-        'button:has-text("發送訊息")',
-        'button:has-text("發消息")',
-        'button:has-text("Message")',
-        'button:has-text("Send message")',
-        'button:has-text("ส่งข้อความ")',
-        'button:has-text("Nhắn tin")',
-        'button:has-text("Gửi tin nhắn")',
-        'button:has-text("Enviar mensaje")',
-        'button:has-text("Enviar mensagem")',
-        'button:has-text("Envoyer un message")',
-        'button:has-text("Nachricht senden")',
-        'button:has-text("Invia messaggio")',
-        'button:has-text("Kirim pesan")',
-        'button:has-text("Hantar mesej")',
-        'button:has-text("Mesaj gönder")',
-        'button:has-text("Отправить сообщение")',
-        'button:has-text("Wyślij wiadomość")',
-        'button:has-text("메시지 보내기")',
-        'button:has-text("メッセージを送信")',
-        'button:has-text("إرسال رسالة")',
-        'button:has-text("বার্তা পাঠান")',
-        'button:has-text("मैसेज भेजें")',
-    ]
+    ACTION_ELEMENT_SELECTOR = 'button, a, [role="button"], [aria-label]'
     MEMBER_CARD_MESSAGE_TEXTS = [
         "发消息",
         "发送消息",
@@ -301,6 +204,25 @@ class Messager:
         "Vous ne pouvez pas envoyer de message à ce compte pour le moment",
         "Bạn không thể nhắn tin cho tài khoản này ngay lúc này",
         "ขณะนี้คุณไม่สามารถส่งข้อความถึงบัญชีนี้ได้",
+    ]
+    MESSENGER_LOGIN_REQUIRED_TEXTS = [
+        "你可以在对方下次登录 Messenger 时发送消息",
+        "你可以在他下次登录 Messenger 时发送消息",
+        "你可以在她下次登录 Messenger 时发送消息",
+        "你可以在其下次登录 Messenger 时发送消息",
+        "你可以在对方下次登入 Messenger 时傳送訊息",
+        "你可以在他下次登入 Messenger 時傳送訊息",
+        "你可以在她下次登入 Messenger 時傳送訊息",
+        "你可以在其下次登入 Messenger 時傳送訊息",
+        "还无法看到这个聊天",
+        "還無法看到這個聊天",
+        "你还无法看到这个聊天",
+        "你還無法看到這個聊天",
+        "You can send a message when they next log in to Messenger",
+        "You can send a message when he next logs in to Messenger",
+        "You can send a message when she next logs in to Messenger",
+        "You can't see this chat yet",
+        "You cannot see this chat yet",
     ]
     SEND_RESTRICTED_TEXTS = [
         "当前无法发送",
@@ -468,7 +390,6 @@ class Messager:
         self.page = page
         self.window_label = (window_label or "").strip()
         task_cfg = task_cfg or {}
-        self._pause_flag_path = self._resolve_pause_flag(task_cfg)
         try:
             speed_factor = float(task_cfg.get("speed_factor", 1.0) or 1.0)
         except Exception:
@@ -557,7 +478,9 @@ class Messager:
         log.info(f"{self._prefix()}{step_name}，{detail}...")
         last_error = None
         while (time.time() - start) * 1000 < timeout_ms:
-            self._wait_if_paused()
+            paused_seconds = self._wait_if_paused()
+            if paused_seconds:
+                start += paused_seconds
             try:
                 result = checker()
             except Exception as exc:
@@ -573,33 +496,27 @@ class Messager:
         log.warning(f"{self._prefix()}{step_name}等待超时，已等待 {waited:.1f} 秒，{detail}失败{suffix}")
         return None
 
-    def _resolve_pause_flag(self, task_cfg):
-        pause_flag = (os.environ.get(self.ENV_PAUSE_FLAG) or "").strip()
-        if pause_flag:
-            return Path(pause_flag)
-        owner = (os.environ.get("FB_RPA_OWNER") or "").strip()
-        runtime_root = (os.environ.get("FB_RPA_RUNTIME_DIR") or "").strip()
-        if not runtime_root:
-            runtime_root = (task_cfg.get("runtime_dir") or "").strip()
-        base = Path(runtime_root).expanduser() if runtime_root else Path(os.getcwd()) / "runtime"
-        base.mkdir(parents=True, exist_ok=True)
-        safe_owner = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in owner) if owner else "default"
-        return base / "data" / f"pause_{safe_owner}.flag"
-
-    def _is_paused(self):
-        try:
-            return bool(self._pause_flag_path and self._pause_flag_path.exists())
-        except Exception:
-            return False
-
     def _wait_if_paused(self):
-        if not self._is_paused():
-            return False
-        log.info("⏸ 已暂停，等待继续...")
-        while self._is_paused():
-            time.sleep(0.3)
-        log.info("▶️ 已继续，恢复执行。")
-        return True
+        pause_logged = False
+
+        def _on_pause():
+            nonlocal pause_logged
+            if not pause_logged:
+                log.info("⏸ 已暂停，等待继续...")
+                pause_logged = True
+
+        def _on_resume():
+            if pause_logged:
+                log.info("▶️ 已继续，恢复执行。")
+
+        paused_seconds, _ = wait_if_runtime_paused(
+            pause_env=self.ENV_PAUSE_FLAG,
+            stop_env=None,
+            poll_seconds=0.1,
+            on_pause=_on_pause,
+            on_resume=_on_resume,
+        )
+        return paused_seconds
 
     def _scale_ms(self, value, min_ms=80):
         try:
@@ -614,6 +531,30 @@ class Messager:
         except Exception:
             scaled = float(seconds)
         time.sleep(max(min_seconds, scaled))
+
+    def _run_pause_aware_action(self, action, timeout_ms, slice_ms=220, retry_interval=0.05):
+        pause_logged = False
+
+        def _on_pause():
+            nonlocal pause_logged
+            if not pause_logged:
+                log.info("⏸ 已暂停，等待继续...")
+                pause_logged = True
+
+        def _on_resume():
+            if pause_logged:
+                log.info("▶️ 已继续，恢复执行。")
+
+        return run_pause_aware_action(
+            action,
+            timeout_ms=timeout_ms,
+            pause_env=self.ENV_PAUSE_FLAG,
+            stop_env=None,
+            slice_ms=slice_ms,
+            retry_interval=retry_interval,
+            on_pause=_on_pause,
+            on_resume=_on_resume,
+        )
 
     def _visible_timeout(self, default_ms=200, min_ms=80):
         return self._scale_ms(default_ms, min_ms=min_ms)
@@ -779,7 +720,10 @@ class Messager:
                     in_view = in_view and box["x"] >= 0 and (box["x"] + box["width"]) <= viewport_w
                 if not in_view:
                     try:
-                        link.scroll_into_view_if_needed(timeout=action_timeout)
+                        self._run_pause_aware_action(
+                            lambda step_timeout: link.scroll_into_view_if_needed(timeout=step_timeout),
+                            timeout_ms=action_timeout,
+                        )
                     except Exception:
                         refound_link = self._find_member_link(target)
                         if refound_link:
@@ -787,7 +731,10 @@ class Messager:
                     self._wait_for_stable_box(link, max_rounds=3, delay=0.06)
             else:
                 try:
-                    link.scroll_into_view_if_needed(timeout=action_timeout)
+                    self._run_pause_aware_action(
+                        lambda step_timeout: link.scroll_into_view_if_needed(timeout=step_timeout),
+                        timeout_ms=action_timeout,
+                    )
                 except Exception:
                     refound_link = self._find_member_link(target)
                     if refound_link:
@@ -811,7 +758,10 @@ class Messager:
                 self._close_visible_chat_windows()
 
             try:
-                button.click(timeout=action_timeout)
+                self._run_pause_aware_action(
+                    lambda step_timeout: button.click(timeout=step_timeout),
+                    timeout_ms=action_timeout,
+                )
                 log.info(f"{self._prefix()}发消息按钮点击成功: {name}")
             except Exception:
                 try:
@@ -987,14 +937,28 @@ class Messager:
         if not normalized_text:
             return False
         try:
-            editor.click()
+            self._run_pause_aware_action(
+                lambda step_timeout: editor.click(timeout=step_timeout),
+                timeout_ms=self._scale_ms(1200, min_ms=600),
+            )
         except Exception:
             return False
         self._sleep(0.04, min_seconds=0.01)
         try:
-            editor.press("Meta+A" if os.name != "nt" and os.uname().sysname == "Darwin" else "Control+A")
+            self._run_pause_aware_action(
+                lambda step_timeout: editor.press(
+                    "Meta+A" if os.name != "nt" and os.uname().sysname == "Darwin" else "Control+A",
+                    timeout=step_timeout,
+                ),
+                timeout_ms=self._scale_ms(600, min_ms=240),
+                slice_ms=180,
+            )
             self._sleep(0.02, min_seconds=0.01)
-            editor.press("Backspace")
+            self._run_pause_aware_action(
+                lambda step_timeout: editor.press("Backspace", timeout=step_timeout),
+                timeout_ms=self._scale_ms(600, min_ms=240),
+                slice_ms=180,
+            )
         except Exception:
             try:
                 editor.evaluate(
@@ -1091,7 +1055,11 @@ class Messager:
         success_seen_at = None
         success_mode = None
         while time.time() < deadline:
-            self._wait_if_paused()
+            paused_seconds = self._wait_if_paused()
+            if paused_seconds:
+                deadline += paused_seconds
+                if success_seen_at is not None:
+                    success_seen_at += paused_seconds
             state = self._normalize_delivery_state(self._get_delivery_state(editor, text))
             if not state["state_ready"]:
                 if self._check_stranger_limit_global():
@@ -1189,7 +1157,7 @@ class Messager:
         except Exception:
             return False
 
-    def _detect_profile_message_gate(self, link, hover_card=None):
+    def _detect_profile_message_gate(self, link, hover_card=None, hard_only=False):
         if hover_card is not None:
             texts = self._extract_action_texts_from_scope(hover_card)
         else:
@@ -1205,6 +1173,8 @@ class Messager:
             return "account_cannot_message"
         if self._matches_any_text(normalized, self.SEND_RESTRICTED_TEXTS):
             return "send_restricted_ui"
+        if hard_only:
+            return None
         if any(token in normalized for token in self.ADD_FRIEND_TEXTS):
             return "add_friend_required"
         if any(token in normalized for token in self.FOLLOW_ONLY_TEXTS):
@@ -1218,11 +1188,11 @@ class Messager:
     def _extract_action_texts_from_scope(self, scope):
         try:
             return scope.evaluate(
-                """(node) => {
+                """(node, payload) => {
                     const normalize = (value) => (value || '').replace(/\\s+/g, ' ').trim();
                     const values = [];
                     const seen = new Set();
-                    for (const el of Array.from(node.querySelectorAll('button, a, [role="button"], [aria-label]'))) {
+                    for (const el of Array.from(node.querySelectorAll(payload.selector))) {
                         if (el.offsetParent === null) continue;
                         const text = normalize(el.innerText);
                         const aria = normalize(el.getAttribute && el.getAttribute('aria-label'));
@@ -1233,6 +1203,7 @@ class Messager:
                     }
                     return values;
                 }""",
+                {"selector": self.ACTION_ELEMENT_SELECTOR},
                 timeout=self._scale_ms(700, min_ms=250),
             ) or []
         except Exception:
@@ -1241,7 +1212,7 @@ class Messager:
     def _extract_action_texts_near_link(self, link):
         try:
             return link.evaluate(
-                """(node) => {
+                """(node, payload) => {
                     const normalize = (value) => (value || '').replace(/\\s+/g, ' ').trim();
                     const rect = node.getBoundingClientRect();
                     const topMin = rect.top - 140;
@@ -1254,7 +1225,7 @@ class Messager:
                     const values = [];
                     const seen = new Set();
                     for (let depth = 0; depth < 4 && root; depth += 1) {
-                        for (const el of Array.from(root.querySelectorAll('button, a, [role="button"], [aria-label]'))) {
+                        for (const el of Array.from(root.querySelectorAll(payload.selector))) {
                             if (el === node || node.contains(el) || el.offsetParent === null) continue;
                             const box = el.getBoundingClientRect();
                             if (!box.width || !box.height) continue;
@@ -1271,6 +1242,7 @@ class Messager:
                     }
                     return values;
                 }""",
+                {"selector": self.ACTION_ELEMENT_SELECTOR},
                 timeout=self._scale_ms(700, min_ms=250),
             ) or []
         except Exception:
@@ -1280,6 +1252,7 @@ class Messager:
         payload = {
             "strangerLimitTexts": self.STRANGER_LIMIT_TEXTS,
             "messageRequestLimitTexts": self.MESSAGE_REQUEST_LIMIT_TEXTS,
+            "messengerLoginRequiredTexts": self.MESSENGER_LOGIN_REQUIRED_TEXTS,
             "accountCannotMessageTexts": self.ACCOUNT_CANNOT_MESSAGE_TEXTS,
             "sendRestrictedTexts": self.SEND_RESTRICTED_TEXTS,
             "failureTexts": self.DELIVERY_FAILURE_TEXTS,
@@ -1321,6 +1294,9 @@ class Messager:
                             if (payload.messageRequestLimitTexts.some((token) => text.includes(token))) {
                                 return {reason: 'message_request_limit_reached', alert_text: text};
                             }
+                            if ((payload.messengerLoginRequiredTexts || []).some((token) => text.includes(token))) {
+                                return {reason: 'messenger_login_required', alert_text: text};
+                            }
                             if (payload.accountCannotMessageTexts.some((token) => text.includes(token))) {
                                 return {reason: 'account_cannot_message', alert_text: text};
                             }
@@ -1361,6 +1337,12 @@ class Messager:
                         "status": "blocked",
                         "reason": "message_request_limit_reached",
                         "alert_text": self.MESSAGE_REQUEST_LIMIT_ALERT_TEXT,
+                    }
+                if result.get("reason") == "messenger_login_required":
+                    return {
+                        "status": "skip",
+                        "reason": "messenger_login_required",
+                        "alert_text": result.get("alert_text") or "对方当前未登录 Messenger，暂时无法发起对话。",
                     }
                 if result.get("reason") == "account_cannot_message":
                     return {
@@ -1875,8 +1857,12 @@ class Messager:
             "residual_chat": residual_chat,
         }
 
-    def _classify_message_button_failure(self, link, name, hover_card=None, timed_out=False):
-        gate_reason = self._detect_profile_message_gate(link, hover_card=hover_card) if hover_card is not None else None
+    def _classify_message_button_failure(self, link, name, hover_card=None, timed_out=False, hard_only=False):
+        gate_reason = (
+            self._detect_profile_message_gate(link, hover_card=hover_card, hard_only=hard_only)
+            if hover_card is not None
+            else None
+        )
         if gate_reason:
             if gate_reason == "stranger_message_limit_reached":
                 return {
@@ -1912,14 +1898,8 @@ class Messager:
                 "log": f"{self._prefix()}成员资料卡限制，跳过: {name} ({gate_reason})",
             }
 
-        overlay = self._detect_blocking_overlay()
-        if overlay:
-            self._dismiss_interfering_popups(context=f"成员 {name} 发消息按钮识别阶段")
-            return {
-                "status": "error",
-                "reason": "message_button_blocked_popup",
-                "log": f"{self._prefix()}检测到干扰弹层，当前成员暂不发送: {name} ({overlay.get('text') or 'popup'})",
-            }
+        if hard_only:
+            return None
 
         if hover_card is None:
             return {
@@ -1960,7 +1940,10 @@ class Messager:
                     try:
                         if not button.is_visible(timeout=self._visible_timeout()):
                             continue
-                        button.click(timeout=self._scale_ms(1500, min_ms=300))
+                        self._run_pause_aware_action(
+                            lambda step_timeout: button.click(timeout=step_timeout),
+                            timeout_ms=self._scale_ms(1500, min_ms=300),
+                        )
                         self._sleep(0.08, min_seconds=0.03)
                         closed = True
                         closed_total += 1
@@ -2002,7 +1985,10 @@ class Messager:
                         if not btn.is_visible(timeout=self._scale_ms(220, min_ms=160)):
                             continue
                         try:
-                            btn.click(timeout=self._scale_ms(450, min_ms=180))
+                            self._run_pause_aware_action(
+                                lambda step_timeout: btn.click(timeout=step_timeout),
+                                timeout_ms=self._scale_ms(450, min_ms=180),
+                            )
                             closed_any = True
                             closed_total += 1
                         except Exception:
@@ -2270,7 +2256,10 @@ class Messager:
                 self._dismiss_member_hover_card()
                 state["overlay_cleared"] = True
             try:
-                link.scroll_into_view_if_needed(timeout=self._scale_ms(1200, min_ms=600))
+                self._run_pause_aware_action(
+                    lambda step_timeout: link.scroll_into_view_if_needed(timeout=step_timeout),
+                    timeout_ms=self._scale_ms(1200, min_ms=600),
+                )
                 state["link_box"] = self._wait_for_stable_box(link, max_rounds=2, delay=0.06) or state["link_box"]
             except Exception:
                 pass
@@ -2303,8 +2292,9 @@ class Messager:
                 name,
                 hover_card=hover_card,
                 timed_out=False,
+                hard_only=True,
             )
-            if gate_failure["status"] in {"skip", "blocked", "limit"}:
+            if gate_failure:
                 return None, gate_failure
             return button, None
 
@@ -2315,67 +2305,56 @@ class Messager:
             timed_out=False,
         )
 
-    def _find_message_button_in_container(self, container):
+    def _collect_action_candidates_in_container(self, container):
         try:
-            action_texts = self._extract_action_texts_from_scope(container)
-        except Exception:
-            action_texts = []
-        normalized_actions = " ".join(
-            self._normalize_text(item) for item in action_texts if item
-        ).strip()
-        if normalized_actions:
-            has_gate_action = (
-                self._matches_any_text(normalized_actions, self.ADD_FRIEND_TEXTS)
-                or self._matches_any_text(normalized_actions, self.FOLLOW_ONLY_TEXTS)
-                or self._matches_any_text(normalized_actions, self.CONNECT_TEXTS)
-                or self._matches_any_text(normalized_actions, self.INVITE_TEXTS)
-            )
-            has_message_action = (
-                self._matches_any_text(normalized_actions, self.MEMBER_CARD_MESSAGE_TEXTS)
-                or any(
-                    keyword in normalized_actions.lower()
-                    for keyword in self.MEMBER_CARD_MESSAGE_HINT_KEYWORDS
-                )
-            )
-            if has_gate_action and not has_message_action:
-                return None
-        for selector in self.MEMBER_CARD_MESSAGE_SELECTORS:
-            try:
-                locator = container.locator(selector)
-                count = locator.count()
-            except Exception:
-                continue
-            for idx in range(count):
-                button = locator.nth(idx)
-                try:
-                    if not button.is_visible(timeout=self._visible_timeout()):
-                        continue
-                    if button.get_attribute("aria-disabled") == "true":
-                        continue
-                    return button
-                except Exception:
-                    continue
-        try:
-            locator = container.locator('button, a[role="button"], div[role="button"], span[role="button"], [aria-label]')
+            locator = container.locator(self.ACTION_ELEMENT_SELECTOR)
             count = locator.count()
         except Exception:
-            count = 0
-            locator = None
+            return []
+        candidates = []
+        seen = set()
         for idx in range(count):
-            button = locator.nth(idx)
+            element = locator.nth(idx)
             try:
-                if not button.is_visible(timeout=self._visible_timeout()):
+                if not element.is_visible(timeout=self._visible_timeout()):
                     continue
-                if button.get_attribute("aria-disabled") == "true":
+                if element.get_attribute("aria-disabled") == "true":
                     continue
-                label = self._normalize_text(button.get_attribute("aria-label") or "")
-                text = self._normalize_text(button.inner_text() or "")
-                combined = f"{label} {text}".strip()
-                if not self._matches_any_text(combined, self.MEMBER_CARD_MESSAGE_TEXTS):
+                label = self._normalize_text(element.get_attribute("aria-label") or "")
+                text = self._normalize_text(element.inner_text() or "")
+                combined = self._normalize_text(f"{label} {text}")
+                if not combined:
                     continue
-                return button
+                dedupe_key = combined.lower()
+                if dedupe_key in seen:
+                    continue
+                seen.add(dedupe_key)
+                candidates.append({"locator": element, "combined": combined})
             except Exception:
                 continue
+        return candidates
+
+    def _find_message_button_in_container(self, container):
+        candidates = self._collect_action_candidates_in_container(container)
+        if not candidates:
+            return None
+        gate_detected = False
+        for candidate in candidates:
+            combined = candidate["combined"]
+            if (
+                self._matches_any_text(combined, self.MEMBER_CARD_MESSAGE_TEXTS)
+                or any(keyword in combined.lower() for keyword in self.MEMBER_CARD_MESSAGE_HINT_KEYWORDS)
+            ):
+                return candidate["locator"]
+            if (
+                self._matches_any_text(combined, self.ADD_FRIEND_TEXTS)
+                or self._matches_any_text(combined, self.FOLLOW_ONLY_TEXTS)
+                or self._matches_any_text(combined, self.CONNECT_TEXTS)
+                or self._matches_any_text(combined, self.INVITE_TEXTS)
+            ):
+                gate_detected = True
+        if gate_detected:
+            return None
         return None
 
     def _matches_any_text(self, text, tokens):
@@ -2440,7 +2419,11 @@ class Messager:
     def _trigger_hover_card(self, link):
         triggered = False
         try:
-            link.hover(timeout=self._scale_ms(900, min_ms=450))
+            self._run_pause_aware_action(
+                lambda step_timeout: link.hover(timeout=step_timeout),
+                timeout_ms=self._scale_ms(900, min_ms=450),
+                slice_ms=180,
+            )
             triggered = True
         except Exception:
             pass
@@ -2671,7 +2654,10 @@ class Messager:
             return 0
 
         try:
-            close_button.click(timeout=self._scale_ms(1500, min_ms=300))
+            self._run_pause_aware_action(
+                lambda step_timeout: close_button.click(timeout=step_timeout),
+                timeout_ms=self._scale_ms(1500, min_ms=300),
+            )
             closed = self._wait_for_condition(
                 "聊天窗口收尾",
                 "等待聊天窗口关闭",

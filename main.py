@@ -19,7 +19,7 @@ from playwright.sync_api import sync_playwright
 from core.browser_manager import BrowserManager
 from core.messager import Messager
 from core.scraper import Scraper
-from utils.helpers import Database
+from utils.helpers import Database, runtime_flag_active, wait_if_runtime_paused
 from utils.logger import log
 
 warnings.filterwarnings("ignore")
@@ -65,7 +65,13 @@ def _client_config_path():
 
 def _messages_config_path():
     if IS_FROZEN:
-        return _user_data_root() / "config" / "messages.yaml"
+        user_path = _user_data_root() / "config" / "messages.yaml"
+        if user_path.exists():
+            return user_path
+        bundled_path = BASE_DIR / "config" / "messages.yaml"
+        if bundled_path.exists():
+            return bundled_path
+        return user_path
     return BASE_DIR / "config" / "messages.yaml"
 
 
@@ -237,6 +243,13 @@ def resolve_message_templates(local_messages, account_messages=None):
             "owner_probe": len(owner_probe),
         },
     }
+
+
+def load_runtime_message_templates(db, owner_username, local_messages):
+    account_messages = None
+    if owner_username:
+        account_messages = db.get_message_templates(owner_username)
+    return resolve_message_templates(local_messages, account_messages)
 
 
 def _runtime_dir(config=None):
@@ -428,10 +441,7 @@ def run_single_session(
     window_token_label = resolve_window_token(profile, window_token)
     owner_username = (os.environ.get(ENV_OWNER) or "").strip()
     machine_id = str(config.get("machine_id") or "").strip()
-    account_messages = None
-    if owner_username:
-        account_messages = db.get_message_templates(owner_username)
-    template_resolution = resolve_message_templates(msgs, account_messages)
+    template_resolution = load_runtime_message_templates(db, owner_username, msgs)
     probe_templates = template_resolution["probe_templates"]
     formal_templates = template_resolution["templates"]
     template_source = template_resolution["template_source"]
@@ -585,6 +595,7 @@ def run_single_session(
                         sender=sender,
                         db=db,
                         config=config,
+                        local_messages=msgs,
                         account_id=account_id,
                         scope_id=scope_id,
                         machine_id=machine_id,
@@ -831,6 +842,7 @@ def process_current_group(
     sender,
     db,
     config,
+    local_messages,
     account_id,
     scope_id,
     machine_id,
@@ -867,6 +879,7 @@ def process_current_group(
             sender=sender,
             db=db,
             config=config,
+            local_messages=local_messages,
             account_id=account_id,
             scope_id=scope_id,
             machine_id=machine_id,
@@ -902,6 +915,7 @@ def process_current_group(
                 sender=sender,
                 db=db,
                 config=config,
+                local_messages=local_messages,
                 account_id=account_id,
                 scope_id=scope_id,
                 machine_id=machine_id,
@@ -930,6 +944,7 @@ def process_current_group(
         sender=sender,
         db=db,
         config=config,
+        local_messages=local_messages,
         account_id=account_id,
         scope_id=scope_id,
         machine_id=machine_id,
@@ -953,6 +968,7 @@ def process_member_targets(
     sender,
     db,
     config,
+    local_messages,
     account_id,
     scope_id,
     machine_id,
@@ -1287,6 +1303,31 @@ def process_member_targets(
             ui_settle_sleep(task_cfg)
             continue
 
+        latest_template_resolution = load_runtime_message_templates(
+            db=db,
+            owner_username=owner_username,
+            local_messages=local_messages,
+        )
+        latest_templates = latest_template_resolution["templates"]
+        if latest_templates:
+            latest_template_source = latest_template_resolution["template_source"]
+            if (
+                latest_template_source != template_source
+                or latest_templates != templates
+            ):
+                templates = latest_templates
+                probe_templates = latest_template_resolution["probe_templates"]
+                template_source = latest_template_source
+                template_stats = latest_template_resolution["stats"]
+                log.info(
+                    f"📝 文案热更新：selected={template_source}，"
+                    f"local_formal={template_stats['local_formal']}，"
+                    f"owner_formal={template_stats['owner_formal']}，"
+                    f"local_probe={template_stats['local_probe']}，"
+                    f"owner_probe={template_stats['owner_probe']}，"
+                    f"active={len(templates)}，probe={len(probe_templates)}"
+                )
+
         template_index = random.randrange(len(templates))
         selected_template = templates[template_index]
         greeting_text = render_message(selected_template, target["name"])
@@ -1609,33 +1650,47 @@ def should_advance_cursor_for_skip(reason):
         "follow_only",
         "friend_required",
         "invite_only",
+        "messenger_login_required",
     }
     return str(reason or "").strip() in permanent_reasons
 
 
 def should_stop(task_cfg):
-    stop_flag_file = (os.environ.get(ENV_STOP_FLAG) or "").strip()
-    return bool(stop_flag_file and os.path.exists(stop_flag_file))
+    return runtime_flag_active(ENV_STOP_FLAG)
 
 def should_pause(task_cfg):
-    pause_flag_file = (os.environ.get(ENV_PAUSE_FLAG) or "").strip()
-    return bool(pause_flag_file and os.path.exists(pause_flag_file))
+    return runtime_flag_active(ENV_PAUSE_FLAG)
 
 def wait_if_paused(task_cfg, db=None, group_id=None, account_id=None, scope_id=None, anchor=None):
     if not should_pause(task_cfg):
         return True, False
-    log.info("⏸ 已暂停，等待继续...")
-    if db and group_id and anchor:
-        try:
-            db.save_cursor(group_id, anchor, account_id=account_id, scope_id=scope_id)
-        except Exception:
-            pass
-    while should_pause(task_cfg):
-        if should_stop(task_cfg):
-            return False, True
-        time.sleep(0.5)
-    log.info("▶️ 已继续，恢复执行。")
-    return True, False
+    pause_logged = False
+    cursor_saved = False
+
+    def _on_pause():
+        nonlocal pause_logged, cursor_saved
+        if not pause_logged:
+            log.info("⏸ 已暂停，等待继续...")
+            pause_logged = True
+        if not cursor_saved and db and group_id and anchor:
+            try:
+                db.save_cursor(group_id, anchor, account_id=account_id, scope_id=scope_id)
+            except Exception:
+                pass
+            cursor_saved = True
+
+    def _on_resume():
+        if pause_logged:
+            log.info("▶️ 已继续，恢复执行。")
+
+    _, stopped = wait_if_runtime_paused(
+        pause_env=ENV_PAUSE_FLAG,
+        stop_env=ENV_STOP_FLAG,
+        poll_seconds=0.1,
+        on_pause=_on_pause,
+        on_resume=_on_resume,
+    )
+    return (not stopped), stopped
 
 
 def interruptible_sleep(task_cfg, seconds, step=0.2):

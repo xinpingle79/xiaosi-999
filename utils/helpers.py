@@ -11,6 +11,8 @@ from utils.logger import log
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+ENV_STOP_FLAG = "FB_RPA_STOP_FLAG"
+ENV_PAUSE_FLAG = "FB_RPA_PAUSE_FLAG"
 
 
 def _runtime_dir():
@@ -25,6 +27,82 @@ def _runtime_dir():
 
 def _runtime_path(*parts):
     return _runtime_dir().joinpath(*parts)
+
+
+def runtime_flag_active(env_name):
+    flag_file = (os.environ.get(str(env_name or "")) or "").strip()
+    return bool(flag_file and os.path.exists(flag_file))
+
+
+def wait_if_runtime_paused(
+    pause_env=ENV_PAUSE_FLAG,
+    stop_env=ENV_STOP_FLAG,
+    poll_seconds=0.1,
+    on_pause=None,
+    on_resume=None,
+):
+    if not runtime_flag_active(pause_env):
+        return 0.0, False
+    if callable(on_pause):
+        try:
+            on_pause()
+        except Exception:
+            pass
+    paused_start = time.time()
+    poll_seconds = max(0.03, float(poll_seconds or 0.03))
+    while runtime_flag_active(pause_env):
+        if stop_env and runtime_flag_active(stop_env):
+            return max(0.0, time.time() - paused_start), True
+        time.sleep(poll_seconds)
+    paused_seconds = max(0.0, time.time() - paused_start)
+    # `stop` may clear the pause flag first. Re-check once here so a stop request
+    # does not get misclassified as a resume.
+    if stop_env and runtime_flag_active(stop_env):
+        return paused_seconds, True
+    if callable(on_resume):
+        try:
+            on_resume()
+        except Exception:
+            pass
+    return paused_seconds, False
+
+
+def run_pause_aware_action(
+    action,
+    timeout_ms,
+    pause_env=ENV_PAUSE_FLAG,
+    stop_env=None,
+    slice_ms=220,
+    retry_interval=0.05,
+    on_pause=None,
+    on_resume=None,
+):
+    timeout_ms = max(180, int(timeout_ms or 180))
+    slice_ms = max(80, min(int(slice_ms or 80), timeout_ms))
+    retry_interval = max(0.01, float(retry_interval or 0.01))
+    deadline = time.time() + timeout_ms / 1000
+    last_error = None
+    while time.time() < deadline:
+        paused_seconds, stopped = wait_if_runtime_paused(
+            pause_env=pause_env,
+            stop_env=stop_env,
+            poll_seconds=0.1,
+            on_pause=on_pause,
+            on_resume=on_resume,
+        )
+        if paused_seconds:
+            deadline += paused_seconds
+        if stopped:
+            raise TimeoutError("pause_aware_action_stopped")
+        remaining_ms = max(80, int((deadline - time.time()) * 1000))
+        try:
+            return action(min(slice_ms, remaining_ms))
+        except Exception as exc:
+            last_error = exc
+        time.sleep(retry_interval)
+    if last_error is not None:
+        raise last_error
+    raise TimeoutError("pause_aware_action_timeout")
 
 
 def _is_uuid_code(value):
@@ -71,7 +149,6 @@ class Database:
         self._migrate_device_configs()
         self._migrate_agent_tasks()
         self._migrate_sessions()
-        self._migrate_runtime_flags()
         self.conn.commit()
 
     def _migrate_sent_history(self):
@@ -1481,59 +1558,6 @@ class Database:
                 """,
                 (normalized_scope_id, normalized_account_id, normalized_group_id, row["done_at"]),
             )
-
-    def _migrate_runtime_flags(self):
-        columns = self._fetch_table_columns("runtime_flags")
-        if columns:
-            expected = {"key", "value", "updated_at"}
-            if expected.issubset(columns):
-                return
-            self.conn.execute("DROP TABLE IF EXISTS runtime_flags")
-        self._create_runtime_flags_table()
-
-    def _create_runtime_flags_table(self):
-        self.conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS runtime_flags (
-                key TEXT NOT NULL PRIMARY KEY,
-                value TEXT,
-                updated_at REAL
-            )
-            """
-        )
-
-    def set_runtime_flag(self, key, value):
-        now = time.time()
-        self.conn.execute(
-            """
-            INSERT OR REPLACE INTO runtime_flags (key, value, updated_at)
-            VALUES (?, ?, ?)
-            """,
-            (str(key), str(value), now),
-        )
-        self.conn.commit()
-
-    def get_runtime_flag(self, key):
-        row = self.conn.execute(
-            "SELECT value FROM runtime_flags WHERE key = ?",
-            (str(key),),
-        ).fetchone()
-        if not row:
-            return None
-        return row["value"]
-
-    def set_pause_state(self, paused, owner=None):
-        key = "pause:global"
-        if owner:
-            key = f"pause:owner:{owner}"
-        self.set_runtime_flag(key, "1" if paused else "0")
-
-    def is_pause_state(self, owner=None):
-        if owner:
-            key = f"pause:owner:{owner}"
-            if self.get_runtime_flag(key) == "1":
-                return True
-        return self.get_runtime_flag("pause:global") == "1"
 
     def mark_group_done(self, group_id, account_id=None, scope_id=None, done_at=None):
         normalized_group_id = self.normalize_group_id(group_id)

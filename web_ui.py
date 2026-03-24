@@ -685,7 +685,6 @@ class TaskManager:
         if not owner_name:
             return False, "总后台不参与任务操作，请在子后台执行"
         with self._lock:
-            self._clear_pause_state_db(owner_name, clear_global=False)
             self._logs.clear()
             self._logs.append("=== 任务已下发 ===")
             self._logs.append("=== 正在确认执行端在线状态 ===")
@@ -700,7 +699,6 @@ class TaskManager:
         if not owner_name:
             return False, "总后台不参与任务操作，请在子后台执行"
         with self._lock:
-            self._clear_pause_state_db(owner_name, clear_global=False)
             return self._enqueue_owner_device_actions(
                 "stop", owner_name, allow_disabled=True
             )
@@ -712,7 +710,6 @@ class TaskManager:
         with self._lock:
             if not self._agent_has_running(owner_name):
                 return False, "当前没有运行中的任务"
-            self._set_pause_state_db(True, owner=owner_name)
             return self._enqueue_owner_device_actions("pause", owner_name)
 
     def resume(self, owner=None):
@@ -722,7 +719,6 @@ class TaskManager:
         with self._lock:
             if not self._agent_has_running(owner_name):
                 return False, "当前没有运行中的任务"
-            self._clear_pause_state_db(owner_name, clear_global=False)
             return self._enqueue_owner_device_actions("resume", owner_name)
 
     def restart_window(self, window_token, owner=None):
@@ -744,18 +740,18 @@ class TaskManager:
                 running_tasks = int(task_counts.get("running_tasks") or 0)
                 pending_tasks = int(task_counts.get("pending_tasks") or 0)
                 running_accounts = int(task_counts.get("running_accounts") or 0)
-                pause_global = db.is_pause_state()
-                pause_owner = db.is_pause_state(owner or "admin")
+                task_paused = bool(
+                    running_tasks > 0
+                    and self._is_task_paused_from_actions(db, owner=owner)
+                )
             except Exception:
                 running_tasks = 0
                 pending_tasks = 0
                 running_accounts = 0
-                pause_global = False
-                pause_owner = False
+                task_paused = False
             finally:
                 db.close()
             running = running_tasks > 0
-            task_paused = bool(running and (pause_global or pause_owner))
             logs = _filter_runtime_logs(list(self._logs), account_id=owner)
             task_pending = bool(pending_tasks > 0 or infer_task_pending(logs))
             stats = build_runtime_stats(
@@ -769,8 +765,6 @@ class TaskManager:
                 "task_running": running,
                 "task_pending": task_pending,
                 "task_paused": task_paused,
-                "pause_global": bool(pause_global),
-                "pause_owner": bool(pause_owner),
                 "state": "paused" if task_paused else ("running" if running else ("queued" if task_pending else "idle")),
                 "state_text": "任务暂停中" if task_paused else ("任务运行中" if running else ("任务排队中" if task_pending else "当前没有运行中的任务")),
                 "pid": None,
@@ -781,25 +775,6 @@ class TaskManager:
                 "stats": stats,
             }
 
-    def _set_pause_state_db(self, paused, owner=None):
-        db = Database()
-        try:
-            db.set_pause_state(paused, owner=owner)
-        finally:
-            db.close()
-
-    def _clear_pause_state_db(self, owner=None, clear_global=False):
-        db = Database()
-        try:
-            if owner:
-                db.set_pause_state(False, owner=owner)
-                if clear_global:
-                    db.set_pause_state(False, owner=None)
-            else:
-                db.set_pause_state(False, owner=None)
-        finally:
-            db.close()
-
     def _agent_has_running(self, owner=None):
         db = Database()
         try:
@@ -809,11 +784,38 @@ class TaskManager:
             db.close()
         return False
 
+    def _is_task_paused_from_actions(self, db, owner=None, machine_id=None):
+        owner_name = str(owner or "").strip()
+        machine_id = str(machine_id or "").strip()
+        clauses = [
+            "action IN ('start', 'pause', 'resume', 'stop')",
+            "status IN ('pending', 'running', 'done')",
+        ]
+        params = []
+        if owner_name:
+            clauses.append("owner = ?")
+            params.append(owner_name)
+        if machine_id:
+            clauses.append("assigned_machine_id = ?")
+            params.append(machine_id)
+        if not params:
+            return False
+        row = db.conn.execute(
+            f"""
+            SELECT action
+            FROM agent_tasks
+            WHERE {' AND '.join(clauses)}
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            tuple(params),
+        ).fetchone()
+        return bool(row and str(row["action"] or "").strip() == "pause")
+
     def stop_for_owner(self, owner):
         if not owner:
             return
         with self._lock:
-            self._clear_pause_state_db(owner, clear_global=False)
             ok, error = self._enqueue_owner_device_actions(
                 "stop", owner, allow_disabled=True
             )
@@ -2429,12 +2431,137 @@ def _cleanup_device_config_duplicates(db, owner, keep_id, machine_id="", api_tok
             removed_ids.append(cfg_id)
     return removed_ids
 
+
+def _build_client_activation_response(owner, expire_at, max_devices, agent_token, request_host="", client_version=""):
+    return {
+        "ok": True,
+        "data": {
+            "owner": owner,
+            "server_url": _build_server_base_url(request_host=request_host),
+            "expire_at": expire_at,
+            "max_devices": max_devices,
+            "agent_token": agent_token,
+            "token_expires_at": None,
+            "client_version": client_version or "",
+        },
+    }
+
+
+def _issue_agent_token_for_machine(db, owner, machine_id, client_version=""):
+    owner = str(owner or "").strip()
+    machine_id = str(machine_id or "").strip()
+    if not owner or not machine_id:
+        return ""
+
+    existing = db.get_agent(machine_id)
+    existing_last_seen = None
+    existing_label = ""
+    existing_status = 1
+    if existing:
+        existing_last_seen = existing.get("last_seen")
+        existing_label = str(existing.get("label") or "").strip()
+        status_raw = existing.get("status", 1)
+        existing_status = 1 if status_raw is None else int(status_raw)
+
+    agent_token = secrets.token_urlsafe(32)
+    seed_last_seen = existing_last_seen if existing_last_seen not in (None, "") else 0.1
+    db.upsert_agent(
+        machine_id,
+        existing_label or machine_id,
+        seed_last_seen,
+        owner=owner,
+        status=existing_status,
+        token=agent_token,
+        token_expires_at=None,
+        client_version=client_version or None,
+    )
+    return agent_token
+
+
+def _try_recover_client_activation(db, payload, request_host=""):
+    owner = str(payload.get("owner") or "").strip()
+    machine_id = str(payload.get("machine_id") or "").strip()
+    client_version = str(payload.get("client_version") or "").strip()
+    bit_api = str(payload.get("bit_api") or "").strip()
+    api_token = str(payload.get("api_token") or "").strip()
+
+    if not (owner and machine_id and api_token):
+        return None
+
+    account = db.get_user_account(owner)
+    if not account:
+        return {"ok": False, "error": "unauthorized"}
+    if int(account.get("status") or 0) == 0:
+        return {"ok": False, "error": "account_disabled"}
+    expired, expire_at = _is_account_expired(account)
+    if expired:
+        return {"ok": False, "error": "account_expired"}
+
+    configs = db.list_device_configs(owner)
+    device_cfg = _select_device_config(configs, machine_id=machine_id, api_token=api_token)
+    if not device_cfg:
+        auto_bound = _auto_bind_device_config(
+            owner,
+            machine_id,
+            bit_api,
+            api_token,
+            source="client_activate_recover",
+        )
+        if not auto_bound:
+            return {"ok": False, "error": "unauthorized"}
+        configs = db.list_device_configs(owner)
+        device_cfg = _select_device_config(configs, machine_id=machine_id, api_token=api_token)
+        if not device_cfg:
+            return {"ok": False, "error": "unauthorized"}
+
+    status_raw = device_cfg.get("status", 1)
+    if status_raw is None:
+        status_raw = 1
+    if int(status_raw) == 0:
+        return {"ok": False, "error": "device_disabled"}
+
+    bound_machine = str(device_cfg.get("machine_id") or "").strip()
+    if bound_machine and bound_machine != machine_id:
+        return {"ok": False, "error": "device_bound"}
+
+    existing_agent = db.get_agent(machine_id)
+    if existing_agent:
+        existing_owner = str(existing_agent.get("owner") or "").strip()
+        if existing_owner and existing_owner != owner:
+            return {"ok": False, "error": "device_bound"}
+        existing_agent_status = existing_agent.get("status", 1)
+        if existing_agent_status is None:
+            existing_agent_status = 1
+        if int(existing_agent_status) == 0:
+            return {"ok": False, "error": "device_disabled"}
+
+    max_devices = int(_load_agent_security().get("max_devices_per_account", 1) or 1)
+    account_max = account.get("max_devices")
+    if account_max not in (None, ""):
+        try:
+            max_devices = int(account_max)
+        except Exception:
+            pass
+
+    agent_token = _issue_agent_token_for_machine(
+        db,
+        owner=owner,
+        machine_id=machine_id,
+        client_version=client_version,
+    )
+    return _build_client_activation_response(
+        owner=owner,
+        expire_at=expire_at,
+        max_devices=max_devices,
+        agent_token=agent_token,
+        request_host=request_host,
+        client_version=client_version,
+    )
+
 def handle_client_activate(payload, request_host=""):
     activation_code = str(payload.get("activation_code") or "").strip()
     machine_id = str(payload.get("machine_id") or "").strip()
     client_version = str(payload.get("client_version") or "").strip()
-    if not activation_code:
-        return {"ok": False, "error": "missing_activation_code"}
     if not machine_id:
         return {"ok": False, "error": "missing_machine_id"}
     security = _load_agent_security()
@@ -2443,6 +2570,16 @@ def handle_client_activate(payload, request_host=""):
 
     db = Database()
     try:
+        if not activation_code:
+            recovered = _try_recover_client_activation(
+                db,
+                payload,
+                request_host=request_host,
+            )
+            if recovered is not None:
+                return recovered
+            return {"ok": False, "error": "missing_activation_code"}
+
         account = db.get_user_account_by_activation_code(activation_code)
         if not account:
             return {"ok": False, "error": "invalid_activation_code"}
@@ -2477,40 +2614,20 @@ def handle_client_activate(payload, request_host=""):
             if (not existing or str(existing.get("owner") or "").strip() != owner) and current_count >= max_devices:
                 return {"ok": False, "error": "device_limit_reached"}
 
-        agent_token = secrets.token_urlsafe(32)
-        existing_last_seen = None
-        existing_label = ""
-        existing_status = 1
-        if existing:
-            existing_last_seen = existing.get("last_seen")
-            existing_label = str(existing.get("label") or "").strip()
-            status_raw = existing.get("status", 1)
-            existing_status = 1 if status_raw is None else int(status_raw)
-        seed_last_seen = existing_last_seen if existing_last_seen not in (None, "") else 0.1
-        db.upsert_agent(
-            machine_id,
-            existing_label or machine_id,
-            seed_last_seen,
+        agent_token = _issue_agent_token_for_machine(
+            db,
             owner=owner,
-            status=existing_status,
-            token=agent_token,
-            token_expires_at=None,
-            client_version=client_version or None,
+            machine_id=machine_id,
+            client_version=client_version,
         )
-
-        server_url = _build_server_base_url(request_host=request_host)
-        return {
-            "ok": True,
-            "data": {
-                "owner": owner,
-                "server_url": server_url,
-                "expire_at": expire_at,
-                "max_devices": max_devices,
-                "agent_token": agent_token,
-                "token_expires_at": None,
-                "client_version": client_version or "",
-            },
-        }
+        return _build_client_activation_response(
+            owner=owner,
+            expire_at=expire_at,
+            max_devices=max_devices,
+            agent_token=agent_token,
+            request_host=request_host,
+            client_version=client_version,
+        )
     finally:
         db.close()
 
@@ -2703,14 +2820,14 @@ def handle_client_status(payload):
             """,
             (machine_id,),
         ).fetchone()
-        try:
-            pause_global = db.is_pause_state()
-        except Exception:
-            pause_global = False
-        try:
-            pause_owner = db.is_pause_state(owner)
-        except Exception:
-            pause_owner = False
+        task_paused = bool(
+            int(running_row["total"] or 0) > 0
+            and TASK_MANAGER._is_task_paused_from_actions(
+                db,
+                owner=owner,
+                machine_id=machine_id,
+            )
+        )
     finally:
         db.close()
 
@@ -2729,7 +2846,6 @@ def handle_client_status(payload):
         running_tasks=running_count,
         running_accounts=(1 if running_count > 0 else 0),
     )
-    task_paused = bool(running_count > 0 and (pause_global or pause_owner))
     config_synced = bool(target_cfg)
     device_bound = bool(
         target_cfg and str(target_cfg.get("machine_id") or "").strip() == machine_id
@@ -2778,8 +2894,6 @@ def handle_client_status(payload):
             "task_running": running_count > 0,
             "task_pending": pending_count > 0,
             "task_paused": task_paused,
-            "pause_global": bool(pause_global),
-            "pause_owner": bool(pause_owner),
             "state": state,
             "state_text": state_text,
             "client_version": client_version,
@@ -2857,15 +2971,9 @@ def handle_client_action(payload, action):
             "message": f"当前状态不允许单独启动：{_translate_client_start_block_reason(status_info.get('start_block_reason'))}",
         }
 
-    owner_name = verified.get("owner")
-    if action == "pause":
-        TASK_MANAGER._set_pause_state_db(True, owner=owner_name)
-    elif action in {"start", "stop", "resume"}:
-        TASK_MANAGER._clear_pause_state_db(owner_name, clear_global=False)
-
     ok, error, detail = TASK_MANAGER.enqueue_machine_action(
         action,
-        owner_name=owner_name,
+        owner_name=verified.get("owner"),
         machine_id=verified.get("machine_id"),
         api_token=api_token,
         window_token=window_token,
@@ -3013,25 +3121,13 @@ def handle_agent_task(payload):
             heartbeat_ttl,
             trigger="agent_task_poll",
         )
-        pause_global = False
-        pause_owner = None
-        try:
-            pause_global = db.is_pause_state()
-        except Exception:
-            pause_global = False
         task = db.claim_agent_task(machine_id)
         if not task:
-            return {"ok": True, "task": None, "pause_global": pause_global}
+            return {"ok": True, "task": None}
         try:
             payload_data = json.loads(task.get("payload") or "{}")
         except Exception:
             payload_data = {}
-        task_owner = task.get("owner") or ""
-        if task_owner:
-            try:
-                pause_owner = db.is_pause_state(task_owner)
-            except Exception:
-                pause_owner = None
         return {
             "ok": True,
             "task": {
@@ -3041,8 +3137,6 @@ def handle_agent_task(payload):
                 "window_token": task.get("window_token") or "",
                 "payload": payload_data,
             },
-            "pause_global": pause_global,
-            "pause_owner": pause_owner,
         }
     finally:
         db.close()

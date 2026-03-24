@@ -84,6 +84,16 @@ def _messages_config_path() -> Path:
 MESSAGES_CONFIG_PATH = _messages_config_path()
 
 
+def _messages_read_path() -> Path:
+    if MESSAGES_CONFIG_PATH.exists():
+        return MESSAGES_CONFIG_PATH
+    if getattr(sys, "frozen", False):
+        bundled_path = ROOT_DIR / "config" / "messages.yaml"
+        if bundled_path.exists():
+            return bundled_path
+    return MESSAGES_CONFIG_PATH
+
+
 def _default_machine_id() -> str:
     hostname = socket.gethostname()
     node = uuid.getnode()
@@ -154,15 +164,7 @@ def _sanitize_client_config(data: dict) -> dict:
 
 
 def _should_migrate_server_url(server_url: str) -> bool:
-    normalized = _normalize_server_url(server_url)
-    if not normalized:
-        return False
-    parsed = urlparse(normalized)
-    host = str(parsed.hostname or "").strip().lower()
-    port = parsed.port
-    if port is None:
-        port = 80 if parsed.scheme == "http" else 443 if parsed.scheme == "https" else None
-    return parsed.scheme == "http" and port == 43090 and host in {"127.0.0.1", "localhost"}
+    return False
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
@@ -184,10 +186,11 @@ def _normalize_message_templates(templates) -> list:
 
 
 def load_messages_config() -> dict:
-    if not MESSAGES_CONFIG_PATH.exists():
+    read_path = _messages_read_path()
+    if not read_path.exists():
         return {}
     try:
-        loaded = yaml.safe_load(MESSAGES_CONFIG_PATH.read_text(encoding="utf-8")) or {}
+        loaded = yaml.safe_load(read_path.read_text(encoding="utf-8")) or {}
     except Exception:
         return {}
     return {
@@ -277,14 +280,60 @@ def _runtime_dir() -> Path:
         runtime_root = str(client_cfg.get("runtime_dir") or "").strip()
     if runtime_root:
         base = Path(runtime_root).expanduser()
-    else:
+    elif getattr(sys, "frozen", False):
         base = _user_data_root() / "runtime"
+    else:
+        base = ROOT_DIR / "runtime"
+        _migrate_source_runtime_license(base)
     base.mkdir(parents=True, exist_ok=True)
     return base
 
 
 def _runtime_path(*parts: str) -> Path:
     return _runtime_dir().joinpath(*parts)
+
+
+def _load_license_payload(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return {
+        "owner": data.get("owner") or "",
+        "expire_at": data.get("expire_at"),
+        "max_devices": data.get("max_devices"),
+    }
+
+
+def _migrate_source_runtime_license(target_runtime: Path) -> None:
+    if getattr(sys, "frozen", False):
+        return
+    legacy_runtime = _user_data_root() / "runtime"
+    try:
+        if legacy_runtime.resolve() == target_runtime.resolve():
+            return
+    except Exception:
+        pass
+    legacy_license = legacy_runtime / "license.json"
+    if not legacy_license.exists():
+        return
+    target_license = target_runtime / "license.json"
+    current_payload = _load_license_payload(target_license)
+    if str(current_payload.get("owner") or "").strip():
+        return
+    legacy_payload = _load_license_payload(legacy_license)
+    if not str(legacy_payload.get("owner") or "").strip():
+        return
+    try:
+        target_runtime.mkdir(parents=True, exist_ok=True)
+        target_license.write_text(
+            json.dumps(legacy_payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
 
 
 def _license_path() -> Path:
@@ -604,12 +653,45 @@ class ClientApp:
         if not pid:
             return False
         try:
-            os.kill(int(pid), 0)
+            pid = int(pid)
+        except Exception:
+            return False
+        try:
+            os.kill(pid, 0)
         except OSError:
             return False
         except Exception:
             return False
+        if not sys.platform.startswith("win"):
+            try:
+                state_result = subprocess.run(
+                    ["ps", "-o", "stat=", "-p", str(pid)],
+                    check=False,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                    timeout=1.0,
+                )
+                process_state = str(state_result.stdout or "").strip().upper()
+                if not process_state:
+                    return False
+                if "Z" in process_state:
+                    return False
+            except Exception:
+                pass
         return True
+
+    def _local_worker_alive(self):
+        if self.worker_process and self.worker_process.poll() is None:
+            return True
+        if self.worker_process and self.worker_process.poll() is not None:
+            self.worker_process = None
+        worker_pid = self._read_worker_pid()
+        if self._is_pid_running(worker_pid):
+            return True
+        if worker_pid:
+            self._clear_worker_pid()
+        return False
 
     def _terminate_pid(self, pid, wait_seconds=6.0):
         if not pid:
@@ -670,10 +752,103 @@ class ClientApp:
         deadline = time.time() + max(timeout, 0.5)
         while time.time() < deadline:
             info = self.refresh_remote_status(silent=True, tolerate_transient=True)
-            if info and not info.get("task_running") and not info.get("task_pending"):
+            if (
+                info
+                and not info.get("task_running")
+                and not info.get("task_pending")
+                and not info.get("task_paused")
+            ):
                 return True
             time.sleep(0.5)
         return False
+
+    def _collect_control_runtime_snapshot(self, tolerate_transient=True):
+        info = self.refresh_remote_status(
+            silent=True,
+            tolerate_transient=tolerate_transient,
+        )
+        snapshot = dict(info or self._button_state_snapshot or {})
+        local_worker_alive = self._local_worker_alive()
+        remote_busy = bool(
+            snapshot.get("task_running")
+            or snapshot.get("task_pending")
+            or snapshot.get("task_paused")
+        )
+        return snapshot, local_worker_alive, remote_busy
+
+    def _recover_stale_remote_tasks(self):
+        self._cleanup_stale_worker_process()
+        self._clear_runtime_control_flags()
+        if not self._ensure_worker_running(wait_online=True):
+            return (
+                False,
+                "检测到执行进程已退出，但自动拉起执行端失败，请重新打开软件后再试。",
+                dict(self._button_state_snapshot or {}),
+            )
+        payload = {
+            "agent_token": self._current_agent_token(),
+            "machine_id": self.machine_id,
+        }
+        ok, data = self._post_client_api("/api/client/stop", payload, timeout=15)
+        if not ok:
+            return (
+                False,
+                f"检测到执行进程已退出，但残留任务状态清理失败：{_translate_client_error(data.get('error'))}",
+                dict(self._button_state_snapshot or {}),
+            )
+        cleared = self._wait_for_remote_task_clear(timeout=10.0)
+        info = self.refresh_remote_status(silent=True, tolerate_transient=True)
+        snapshot = dict(info or self._button_state_snapshot or {})
+        still_busy = bool(
+            snapshot.get("task_running")
+            or snapshot.get("task_pending")
+            or snapshot.get("task_paused")
+        )
+        if not cleared and still_busy:
+            return (
+                False,
+                "检测到执行进程已退出，但旧任务状态尚未清理完成，请稍后重试。",
+                snapshot,
+            )
+        return (
+            True,
+            "检测到执行进程已退出，已自动清理残留任务状态。",
+            snapshot,
+        )
+
+    def _prepare_control_action(self, action):
+        snapshot, local_worker_alive, remote_busy = self._collect_control_runtime_snapshot(
+            tolerate_transient=True
+        )
+        if local_worker_alive:
+            return "continue", snapshot
+        self._cleanup_stale_worker_process()
+        self._clear_runtime_control_flags()
+        if not remote_busy:
+            return "continue", snapshot
+        if action == "stop":
+            recovered, message, snapshot = self._recover_stale_remote_tasks()
+            self._show_control_feedback("info" if recovered else "warning", message)
+            return ("handled" if recovered else "blocked"), snapshot
+        if action == "start":
+            recovered, message, snapshot = self._recover_stale_remote_tasks()
+            if not recovered:
+                self._show_control_feedback("warning", message)
+                return "blocked", snapshot
+            return "continue", snapshot
+        if action == "pause":
+            self._show_control_feedback(
+                "warning",
+                "检测到执行进程已退出，暂停不会生效；如需重新执行，请点击启动。",
+            )
+            return "blocked", snapshot
+        if action == "resume":
+            self._show_control_feedback(
+                "warning",
+                "检测到执行进程已退出，继续无法恢复旧任务；请点击启动重新开始。",
+            )
+            return "blocked", snapshot
+        return "continue", snapshot
 
     def _shutdown_worker_runtime(self, send_stop=True):
         self._set_runtime_stop_flag()
@@ -1932,7 +2107,6 @@ class ClientApp:
             window_count = 10
         self.window_count_text.set(str(window_count if window_count >= 0 else 10))
         self.window_no_text.set(str(self.client_config.get("window_no") or "").strip())
-        owner = str(self.license_data.get("owner") or "").strip()
         license_expired = _license_is_expired(self.license_data)
         self.verified = _client_can_use_token(self.client_config, self.license_data)
         if license_expired:
@@ -1942,11 +2116,15 @@ class ClientApp:
             self._show_operation_screen()
             self.root.after(0, self._restore_verified_session)
         else:
-            self._show_activation_screen(
-                "验证成功后自动进入操作界面",
-                error=False,
-            )
-            self._apply_button_state(agent_online=False, task_running=False, task_pending=False)
+            if self._attempt_token_recovery(silent=True):
+                self._show_operation_screen()
+                self.root.after(0, self._restore_verified_session)
+            else:
+                self._show_activation_screen(
+                    "验证成功后自动进入操作界面",
+                    error=False,
+                )
+                self._apply_button_state(agent_online=False, task_running=False, task_pending=False)
 
     def _restore_verified_session(self):
         if not self.verified:
@@ -1960,6 +2138,49 @@ class ClientApp:
 
     def _current_agent_token(self):
         return str(self.client_config.get("agent_token") or "").strip()
+
+    def _build_recovery_payload(self):
+        owner = self._runtime_owner()
+        machine_id = str(self.machine_id or "").strip()
+        bit_api = _normalize_bit_api(self.bit_api.get())
+        api_token = str(self.api_token.get() or "").strip()
+        client_version = str(self.client_config.get("client_version") or "").strip()
+        if not (owner and machine_id and api_token):
+            return None
+        return {
+            "owner": owner,
+            "machine_id": machine_id,
+            "bit_api": bit_api,
+            "api_token": api_token,
+            "client_version": client_version,
+        }
+
+    def _attempt_token_recovery(self, silent=False):
+        payload = self._build_recovery_payload()
+        if not payload:
+            return False
+        ok, data = self._post_client_api(
+            "/api/client/activate",
+            payload,
+            timeout=10,
+            retries=1,
+            retry_delay=0.6,
+        )
+        if not ok:
+            return False
+        info = data.get("data") or {}
+        self.server_url = _normalize_server_url(info.get("server_url") or self.server_url)
+        self.license_data = {
+            "owner": info.get("owner") or payload.get("owner") or "",
+            "expire_at": info.get("expire_at"),
+            "max_devices": info.get("max_devices"),
+        }
+        save_license(self.license_data)
+        self._store_local_auth(info.get("agent_token"), info.get("token_expires_at"))
+        self.verified = bool(self._current_agent_token())
+        if self.verified and not silent:
+            self._set_activation_notice("已自动恢复当前设备的登录状态", error=False)
+        return self.verified
 
     def _clear_local_auth(self, preserve_license=True):
         config = load_client_config()
@@ -2117,6 +2338,8 @@ class ClientApp:
             worker_cmd = [sys.executable, str(worker_script)]
 
         agent_token = self._current_agent_token()
+        if not agent_token and self._attempt_token_recovery(silent=True):
+            agent_token = self._current_agent_token()
         if not agent_token:
             messagebox.showerror("提示", "当前缺少有效 agent_token，请重新激活。")
             self._show_activation_screen("请重新输入激活码。", error=True)
@@ -2253,6 +2476,11 @@ class ClientApp:
             error_code = str(data.get("error") or "").strip()
             if error_code in CLIENT_REACTIVATION_ERRORS:
                 self._status_failure_streak = 0
+                if self._attempt_token_recovery(silent=True):
+                    return self.refresh_remote_status(
+                        silent=silent,
+                        tolerate_transient=tolerate_transient,
+                    )
                 self._clear_local_auth(preserve_license=True)
                 self._reset_status_summary()
                 self._apply_button_state(agent_online=False, task_running=False, task_pending=False)
@@ -2316,7 +2544,7 @@ class ClientApp:
         }
         return mapping.get(str(action or "").strip(), "")
 
-    def _precheck_control_action(self, action):
+    def _precheck_control_action(self, action, snapshot=None):
         action = str(action or "").strip()
         button_key = self._control_action_key(action)
         if button_key and self._is_action_locked(button_key):
@@ -2328,7 +2556,7 @@ class ClientApp:
                 "restart_window": "单独启动任务已在处理中，请勿重复下发",
             }
             return False, "warning", duplicate_message.get(action, "当前操作正在处理中，请勿重复点击")
-        snapshot = dict(self._button_state_snapshot or {})
+        snapshot = dict(snapshot or self._button_state_snapshot or {})
         task_running = bool(snapshot.get("task_running"))
         task_pending = bool(snapshot.get("task_pending"))
         task_paused = bool(snapshot.get("task_paused"))
@@ -2547,7 +2775,12 @@ class ClientApp:
         if not self.verified:
             messagebox.showwarning("提示", "请先完成激活验证")
             return False
-        allowed, level, message = self._precheck_control_action(action)
+        prepare_result, snapshot = self._prepare_control_action(action)
+        if prepare_result == "handled":
+            return True
+        if prepare_result != "continue":
+            return False
+        allowed, level, message = self._precheck_control_action(action, snapshot=snapshot)
         if not allowed:
             self._show_control_feedback(level, message)
             return False
