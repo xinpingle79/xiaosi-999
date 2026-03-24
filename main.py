@@ -447,6 +447,7 @@ def run_single_session(
     template_source = template_resolution["template_source"]
     template_stats = template_resolution["stats"]
     startup_gate_released = False
+    close_session_on_exit = True
 
     def release_startup_gate():
         nonlocal startup_gate_released
@@ -562,10 +563,12 @@ def run_single_session(
                     if not cont:
                         log.warning(f"[{alert_account_id}] 检测到停止标记，任务提前结束。")
                         final_reason = "stopped"
+                        close_session_on_exit = False
                         break
                     if should_stop(task_cfg):
                         log.warning(f"[{alert_account_id}] 检测到停止标记，任务提前结束。")
                         final_reason = "stopped"
+                        close_session_on_exit = False
                         break
                     if owner_username and db.is_account_disabled(owner_username):
                         log.warning(f"[{alert_account_id}] 当前账号已禁用，停止任务。")
@@ -618,6 +621,7 @@ def run_single_session(
                     if result["reason"] == "stopped":
                         log.warning(f"[{alert_account_id}] 收到停止信号，结束当前窗口。")
                         final_reason = "stopped"
+                        close_session_on_exit = False
                         break
                     if result["reason"] == "account_restricted":
                         blocked_targets = result.get("blocked_targets") or []
@@ -680,7 +684,10 @@ def run_single_session(
                 }
             finally:
                 release_startup_gate()
-                bm.close(session)
+                if close_session_on_exit:
+                    bm.close(session)
+                elif session:
+                    log.info(f"[{alert_account_id}] 停止任务仅结束系统进程，保留 BitBrowser 窗口。")
     finally:
         db.close()
 
