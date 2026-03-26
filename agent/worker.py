@@ -317,6 +317,7 @@ def _build_config(args):
         "expire_at": config.get("expire_at"),
         "max_devices": config.get("max_devices"),
         "_locked_fields": locked_fields,
+        "config_path": args.config,
     }
 
 
@@ -334,6 +335,107 @@ def _post_agent_json(cfg, url, payload, timeout=10):
     if cfg.get("agent_token"):
         base.setdefault("agent_token", cfg.get("agent_token"))
     return _post_json(url, base, timeout=timeout)
+
+
+def _normalize_message_templates(templates):
+    return [
+        str(item).strip()
+        for item in (templates or [])
+        if str(item).strip()
+    ]
+
+
+def _normalize_runtime_task_settings(task_settings):
+    if not isinstance(task_settings, dict):
+        return {}
+    normalized = {}
+    for key in (
+        "max_messages_per_account",
+        "scroll_times",
+        "group_list_scroll_times",
+        "resume_search_times",
+        "idle_scroll_limit",
+        "max_windows",
+    ):
+        if key not in task_settings:
+            continue
+        try:
+            normalized[key] = max(0, int(task_settings.get(key) or 0))
+        except Exception:
+            continue
+    return normalized
+
+
+def _save_client_config(target, config):
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        yaml.safe_dump(config, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+
+
+def _sync_runtime_owner_message_templates(owner, messages):
+    from utils.helpers import Database
+
+    owner = str(owner or "").strip()
+    if not owner or not isinstance(messages, dict):
+        return False
+    templates = _normalize_message_templates(messages.get("templates") or [])
+    db = Database(db_path=str(_runtime_path("data", "server.db")))
+    try:
+        existing = db.get_message_templates(owner) or {}
+        existing_templates = _normalize_message_templates(existing.get("templates") or [])
+        if existing_templates == templates:
+            return False
+        if templates:
+            db.set_message_templates(owner, templates)
+        else:
+            db.delete_message_templates(owner)
+        return True
+    finally:
+        db.close()
+
+
+def _sync_authoritative_task_settings(config_path=None, task_settings=None):
+    normalized = _normalize_runtime_task_settings(task_settings)
+    if not normalized:
+        return False
+    target = Path(config_path) if config_path else CLIENT_CONFIG_PATH
+    config = _load_client_config(target)
+    if not config:
+        config = {}
+    current = dict(config.get("task_settings") or {})
+    changed = False
+    for key, value in normalized.items():
+        if current.get(key) != value:
+            current[key] = value
+            changed = True
+    if not changed:
+        return False
+    config["task_settings"] = current
+    _save_client_config(target, config)
+    return True
+
+
+def _sync_runtime_bundle(cfg, config_path=None):
+    _, result = _post_agent_json(
+        cfg,
+        f"{cfg['server_url']}/api/client/status",
+        {"machine_id": cfg.get("machine_id") or ""},
+        timeout=12,
+    )
+    if not isinstance(result, dict) or not result.get("ok"):
+        return False
+    info = result.get("data") or {}
+    _sync_authoritative_task_settings(
+        config_path=config_path,
+        task_settings=info.get("task_settings"),
+    )
+    _sync_runtime_owner_message_templates(
+        info.get("owner") or cfg.get("owner") or "",
+        info.get("messages") or {},
+    )
+    return True
 
 
 def _persist_client_auth(config_path=None, agent_token=""):
@@ -576,6 +678,13 @@ class Worker:
         return env
 
     def _launch_process(self, owner, window_token, payload, task_id):
+        try:
+            _sync_runtime_bundle(
+                self.cfg,
+                config_path=self.cfg.get("config_path"),
+            )
+        except Exception as exc:
+            self._send_log(owner, f"[worker] 启动前同步运行配置失败：{exc}")
         if IS_FROZEN:
             main_exe = ROOT_DIR / "FB_RPA_Main.exe"
             if not main_exe.exists():

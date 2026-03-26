@@ -18,8 +18,6 @@ from tkinter import font as tkfont
 from tkinter import messagebox, ttk
 
 from utils.logger import log
-from utils.helpers import Database
-
 APP_NAME = "小四客户端"
 DEFAULT_SERVER_URL = "http://154.64.255.139:43090"
 CLIENT_ERROR_I18N = {
@@ -123,8 +121,6 @@ def _default_client_config() -> dict:
             "scroll_times": 0,
             "group_list_scroll_times": 0,
             "idle_scroll_limit": 3,
-            "account_restricted_blocked_threshold": 2,
-            "account_restricted_signal_threshold": 5,
             "speed_factor": 0.85,
             "stranger_limit_cache_ms": 1200,
             "send_interval_seconds": [0, 0],
@@ -195,19 +191,15 @@ def load_messages_config() -> dict:
     except Exception:
         return {}
     return {
-        "probe_templates": _normalize_message_templates(loaded.get("probe_templates") or []),
         "templates": _normalize_message_templates(loaded.get("templates") or []),
     }
 
 
-def save_messages_config(templates=None, probe_templates=None) -> None:
+def save_messages_config(templates=None) -> None:
     current = load_messages_config()
     payload = {
-        "probe_templates": _normalize_message_templates(current.get("probe_templates") or []),
         "templates": _normalize_message_templates(current.get("templates") or []),
     }
-    if probe_templates is not None:
-        payload["probe_templates"] = _normalize_message_templates(probe_templates)
     if templates is not None:
         payload["templates"] = _normalize_message_templates(templates)
     MESSAGES_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -215,31 +207,6 @@ def save_messages_config(templates=None, probe_templates=None) -> None:
         yaml.safe_dump(payload, allow_unicode=True, sort_keys=False),
         encoding="utf-8",
     )
-
-
-def _sync_runtime_owner_message_templates(owner: str, messages: dict) -> bool:
-    owner = str(owner or "").strip()
-    if not owner or not isinstance(messages, dict):
-        return False
-    templates = _normalize_message_templates(messages.get("templates") or [])
-    probe_templates = _normalize_message_templates(messages.get("probe_templates") or [])
-    db = Database(db_path=str(_runtime_path("data", "server.db")))
-    try:
-        existing = db.get_message_templates(owner) or {}
-        existing_templates = _normalize_message_templates(existing.get("templates") or [])
-        existing_probe_templates = _normalize_message_templates(
-            existing.get("probe_templates") or []
-        )
-        if existing_templates == templates and existing_probe_templates == probe_templates:
-            return False
-        if templates or probe_templates:
-            db.set_message_templates(owner, templates, probe_templates)
-        else:
-            db.delete_message_templates(owner)
-        return True
-    finally:
-        db.close()
-
 
 def _migrate_legacy_message_templates(loaded: dict) -> bool:
     if "message_templates" not in loaded:
@@ -252,7 +219,6 @@ def _migrate_legacy_message_templates(loaded: dict) -> bool:
         return False
     save_messages_config(
         templates=legacy_templates,
-        probe_templates=current_messages.get("probe_templates") or [],
     )
     return True
 
@@ -1099,11 +1065,15 @@ class ClientApp:
                 self.root.iconify()
 
     def _initial_window_count(self):
-        raw = _parse_int(
-            (self.client_config.get("task_settings") or {}).get("max_windows") or 10,
-            10,
+        return self._format_window_count_display(
+            (self.client_config.get("task_settings") or {}).get("max_windows")
         )
-        return str(raw if raw > 0 else 10)
+
+    def _format_window_count_display(self, raw_value):
+        raw_text = str("" if raw_value is None else raw_value).strip()
+        if raw_text == "":
+            return "10"
+        return str(max(0, _parse_int(raw_value, 0)))
 
     def _build_ui(self):
         self.viewport = tk.Frame(self.root, bg=self.WINDOW_BG)
@@ -1677,6 +1647,7 @@ class ClientApp:
             font=("Microsoft YaHei", 11),
         )
         self.window_count_entry.pack(fill="both", expand=True, ipady=4)
+        self.window_count_entry.configure(state="readonly")
         tk.Label(
             window_group,
             text="窗口号",
@@ -2070,6 +2041,10 @@ class ClientApp:
         db_stats = stats.get("db") or {}
         self.sent_count_text.set(str(_parse_int(db_stats.get("sent_today"), 0)))
         self.failed_count_text.set(str(_parse_int(db_stats.get("failed_today"), 0)))
+        task_settings = info.get("task_settings") or {}
+        if isinstance(task_settings, dict) and "max_windows" in task_settings:
+            max_windows = max(0, _parse_int(task_settings.get("max_windows"), 0))
+            self.window_count_text.set(self._format_window_count_display(max_windows))
 
     def _collect_message_templates(self):
         if self.message_text is None:
@@ -2127,10 +2102,9 @@ class ClientApp:
         self.min_interval.insert(0, min_value)
         self.max_interval.delete(0, tk.END)
         self.max_interval.insert(0, max_value)
-        window_count = _parse_int(task_settings.get("max_windows"), 10)
-        if window_count <= 0 and str(task_settings.get("max_windows") or "").strip() == "":
-            window_count = 10
-        self.window_count_text.set(str(window_count if window_count >= 0 else 10))
+        self.window_count_text.set(
+            self._format_window_count_display(task_settings.get("max_windows"))
+        )
         self.window_no_text.set(str(self.client_config.get("window_no") or "").strip())
         license_expired = _license_is_expired(self.license_data)
         self.verified = _client_can_use_token(self.client_config, self.license_data)
@@ -2239,16 +2213,8 @@ class ClientApp:
             min_value, max_value = max_value, min_value
         return [min_value, max_value]
 
-    def _collect_window_count(self):
-        raw = str(self.window_count_text.get() or "").strip()
-        if not raw:
-            return 10
-        value = _parse_int(raw, 10)
-        return max(0, value)
-
     def _build_client_config(self):
         interval = self._collect_send_interval()
-        max_windows = self._collect_window_count()
         config = load_client_config()
         config["server_url"] = self.server_url or DEFAULT_SERVER_URL
         config["machine_id"] = self.machine_id
@@ -2259,7 +2225,11 @@ class ClientApp:
         config["window_no"] = str(self.window_no_text.get() or "").strip()
         config.setdefault("task_settings", {})
         config["task_settings"]["send_interval_seconds"] = interval
-        config["task_settings"]["max_windows"] = max_windows
+        current_max_windows = config["task_settings"].get("max_windows")
+        if current_max_windows is not None:
+            config["task_settings"]["max_windows"] = max(0, _parse_int(current_max_windows, 0))
+        else:
+            config["task_settings"].pop("max_windows", None)
         return config
 
     def _save_local_config(self, require_connection_fields=False):
@@ -2525,15 +2495,6 @@ class ClientApp:
 
         self._status_failure_streak = 0
         info = data.get("data") or {}
-        runtime_messages = info.get("messages")
-        if isinstance(runtime_messages, dict):
-            try:
-                _sync_runtime_owner_message_templates(
-                    info.get("owner") or self._runtime_owner(),
-                    runtime_messages,
-                )
-            except Exception as exc:
-                log.warning(f"同步执行端文案缓存失败：{exc}")
         self._apply_remote_stats(info)
         self._apply_button_state(
             agent_online=bool(info.get("agent_online")),
@@ -2776,17 +2737,22 @@ class ClientApp:
         if not self._save_local_config(require_connection_fields=False):
             return
         self._show_operation_screen()
-        self._ensure_worker_ready_after_config(wait_remote_ready=True, skip_sync=False)
-        messagebox.showinfo("提示", "激活成功，已进入操作界面")
+        sync_ready = self._sync_config_or_reuse_remote("激活后配置同步")
+        if sync_ready:
+            self._ensure_worker_ready_after_config(wait_remote_ready=True, skip_sync=True)
+            messagebox.showinfo("提示", "激活成功，已进入操作界面")
+            return
+        messagebox.showwarning("提示", "激活成功，但设备配置尚未同步完成，请先检查连接配置后再启动。")
 
     def on_save_settings(self):
         if not self._save_local_config(require_connection_fields=False):
             return
-        synced = self._sync_config_to_server(show_error=False)
-        self._ensure_worker_ready_after_config(wait_remote_ready=False, skip_sync=True)
-        if self.verified and not synced:
-            messagebox.showwarning("提示", "本地配置已保存，执行端将继续按本地配置运行，服务器同步稍后重试")
-            return
+        if self.verified:
+            synced = self._sync_config_or_reuse_remote("保存配置")
+            if not synced:
+                messagebox.showwarning("提示", "本地配置已保存，但设备配置尚未同步完成，新的连接配置暂未生效。")
+                return
+            self._ensure_worker_ready_after_config(wait_remote_ready=False, skip_sync=True)
         messagebox.showinfo("提示", "本地配置已保存")
 
     def _ensure_worker_ready_after_config(self, wait_remote_ready=False, skip_sync=False):

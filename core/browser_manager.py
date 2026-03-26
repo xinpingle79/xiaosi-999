@@ -140,10 +140,87 @@ class BrowserManager:
         first_profile = profiles[0] if profiles else None
         return first_profile.get("id") if first_profile else None
 
+    def _safe_page_url(self, page):
+        if page is None:
+            return ""
+        try:
+            return str(page.url or "").strip()
+        except Exception:
+            return ""
+
+    def _is_checkpoint_surface(self, url):
+        current_url = str(url or "").strip().lower()
+        return "facebook.com/checkpoint" in current_url
+
+    def _is_reusable_facebook_url(self, url):
+        current_url = str(url or "").strip()
+        return (
+            "facebook.com" in current_url
+            and "console.bitbrowser.net" not in current_url
+            and not current_url.startswith("about:")
+        )
+
+    def _has_real_facebook_surface(self, page):
+        if page is None:
+            return False
+        try:
+            if self._is_checkpoint_surface(page.url):
+                return False
+            return bool(
+                page.evaluate(
+                    """() => {
+                        const title = (document.title || '').trim();
+                        const bodyText = ((document.body && document.body.innerText) || '').trim();
+                        const html = ((document.body && document.body.innerHTML) || '').slice(0, 4000);
+                        const workbenchLike =
+                            title.includes('{{$t(') ||
+                            !!document.querySelector('#app .open-info') ||
+                            html.includes('chuhai2345') ||
+                            html.includes('q-btn') ||
+                            html.includes('open-info');
+                        if (workbenchLike) return false;
+                        if (document.querySelector('[role="banner"]')) return true;
+                        if (document.querySelector('[role="main"]')) return true;
+                        if (document.querySelector('a[href="/groups/"], a[href*="/groups/?ref=bookmarks"]')) return true;
+                        return bodyText.length >= 40;
+                    }"""
+                )
+            )
+        except Exception:
+            return False
+
+    def _score_page_candidate(self, page):
+        url = self._safe_page_url(page)
+        if not url:
+            return -1
+        lower_url = url.lower()
+        if lower_url.startswith("chrome://"):
+            return -1
+        if self._is_checkpoint_surface(url):
+            return 400
+        if self._is_reusable_facebook_url(url) and self._has_real_facebook_surface(page):
+            return 300
+        if "facebook.com" in lower_url and not lower_url.startswith("about:blank"):
+            return 120
+        if lower_url.startswith("about:blank"):
+            return 0
+        return 100
+
     def _pick_page(self, context):
-        for page in context.pages:
-            if not page.url.startswith("chrome://"):
-                return page
+        best_page = None
+        best_score = -1
+        for page in list(getattr(context, "pages", []) or []):
+            try:
+                if page.is_closed():
+                    continue
+            except Exception:
+                continue
+            score = self._score_page_candidate(page)
+            if score > best_score:
+                best_score = score
+                best_page = page
+        if best_page is not None:
+            return best_page
         return context.new_page()
 
     def start(self, browser_id):

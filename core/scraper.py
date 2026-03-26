@@ -12,6 +12,9 @@ class Scraper:
     NEWCOMER_SECTION_LABELS = (
         "小组新人",
         "最近加入",
+        "新加入的成员",
+        "新人加入",
+        "新加入团队",
         "New to the group",
         "New members",
         "Recently joined",
@@ -235,6 +238,52 @@ class Scraper:
         "مساهمون بارزون",
         "صفحة عامة",
     )
+    GROUP_ENTRY_LABELS = (
+        "小组",
+        "群组",
+        "Groups",
+        "Groupes",
+        "Grupos",
+        "Gruppen",
+        "Gruppi",
+        "Groepen",
+        "Группы",
+        "Grupy",
+        "Gruplar",
+        "المجموعات",
+        "समूह",
+        "グループ",
+        "그룹",
+        "Nhóm",
+        "Grup",
+        "Kumpulan",
+        "กลุ่ม",
+        "กรุ๊ป",
+        "গ্রুপ",
+    )
+    SEE_ALL_LABELS = (
+        "查看全部",
+        "See all",
+        "View all",
+        "Ver todo",
+        "Ver todos",
+        "Ver tudo",
+        "Voir tout",
+        "Tout voir",
+        "Alle anzeigen",
+        "Mostra tutti",
+        "Alles bekijken",
+        "ดูทั้งหมด",
+        "Xem tất cả",
+        "Lihat semua",
+        "Lihat semuanya",
+        "Zobacz wszystko",
+        "Hepsini gör",
+        "عرض الكل",
+        "すべて見る",
+        "모두 보기",
+        "Посмотреть все",
+    )
     JOINED_GROUP_SECTION_LABELS = (
         "你加入的小组",
         "已加入的小组",
@@ -269,36 +318,166 @@ class Scraper:
         "กลุ่มของคุณ",
         "กลุ่มที่คุณเข้าร่วม",
     )
-    JOINED_GROUP_SKIP_LABELS = {
-        "查看全部",
-        "See all",
-        "View all",
-        "Ver todo",
-        "Ver todos",
-        "Voir tout",
-        "Alle anzeigen",
-        "Mostra tutti",
-        "Alles bekijken",
-        "ดูทั้งหมด",
-        "新建小组",
-        "Create new group",
-        "你的小组",
-        "Your groups",
-        "发现小组",
-        "Discover groups",
-    }
-    MEMBERS_PAGE_HINTS = (
+    JOINED_GROUP_SKIP_LABELS = set(
+        SEE_ALL_LABELS
+        + (
+            "新建小组",
+            "Create new group",
+            "你的小组",
+            "Your groups",
+            "发现小组",
+            "Discover groups",
+        )
+    )
+    MEMBERS_TAB_LABELS = (
         "Members",
         "People",
         "成员",
         "成员页",
         "成员列表",
         "成员资料",
+        "用户",
+        "Miembros",
+        "Membros",
+        "Membres",
+        "Mitglieder",
+        "Membri",
+        "Leden",
+        "Участники",
+        "Członkowie",
+        "Üyeler",
+        "الأعضاء",
+        "Thành viên",
+        "Anggota",
+        "Ahli",
         "สมาชิก",
         "สมาชิกในกลุ่ม",
         "ผู้คน",
         "ผู้คนในกลุ่ม",
+        "メンバー",
+        "멤버",
+        "회원",
+        "सदस्य",
+        "সদস্য",
+    )
+    MEMBERS_PAGE_HINTS = MEMBERS_TAB_LABELS + (
         "People you may know",
+    )
+    MEMBERS_TAB_NOISE_TEXTS = (
+        "万位成员",
+        "查看所有人",
+    )
+    MEMBER_ACTION_SKIP_LABELS = SEE_ALL_LABELS + (
+        "邀请",
+        "邀請",
+        "Invite",
+        "Invitar",
+        "Convidar",
+        "Inviter",
+        "Einladen",
+        "Invita",
+        "เชิญ",
+        "Mời",
+        "Undang",
+        "Jemput",
+        "Zaproś",
+        "Davet et",
+        "دعوة",
+        "发消息",
+        "发送消息",
+        "發送訊息",
+        "發消息",
+        "Message",
+        "Send message",
+        "Send a message",
+        "Enviar mensaje",
+        "Enviar mensagem",
+        "Envoyer un message",
+        "Nachricht senden",
+        "Invia messaggio",
+        "ส่งข้อความ",
+        "Nhắn tin",
+        "Gửi tin nhắn",
+        "Kirim pesan",
+        "Hantar mesej",
+        "Mesaj gönder",
+        "Сообщение",
+        "Wyślij wiadomość",
+        "メッセージ",
+        "메시지",
+        "إرسال رسالة",
+        "更多",
+        "More",
+        "Más",
+        "Mais",
+        "Plus",
+        "Mehr",
+        "Altro",
+        "Meer",
+        "เพิ่มเติม",
+        "Thêm",
+        "Lainnya",
+        "Lagi",
+        "Więcej",
+        "Daha fazla",
+        "المزيد",
+        "すべて表示",
+        "더 보기",
+    )
+    MEMBER_ACTION_HINT_KEYWORDS = (
+        "发消息",
+        "发送消息",
+        "發送訊息",
+        "發消息",
+        "message",
+        "send message",
+        "mensaje",
+        "mensagem",
+        "envoyer un message",
+        "nachricht",
+        "messaggio",
+        "ส่งข้อความ",
+        "ข้อความ",
+        "nhắn tin",
+        "tin nhắn",
+        "pesan",
+        "mesej",
+        "mesaj",
+        "сообщение",
+        "wiadomo",
+        "メッセージ",
+        "메시지",
+        "رسالة",
+        "বার্তা",
+        "मैसेज",
+        "add friend",
+        "添加好友",
+        "加好友",
+        "加為好友",
+        "follow",
+        "关注",
+        "關注",
+        "追蹤",
+        "connect",
+        "连接",
+        "連接",
+        "建立关系",
+        "建立關係",
+        "invite",
+        "邀请",
+        "邀請",
+        "invitar",
+        "convidar",
+        "inviter",
+        "einladen",
+        "invita",
+        "เชิญ",
+        "mời",
+        "undang",
+        "jemput",
+        "zaproś",
+        "davet",
+        "دعوة",
     )
     RESERVED_TOP_LEVEL_PATHS = {
         "about",
@@ -584,6 +763,8 @@ class Scraper:
                             `${label}•`,
                             `${label}:`,
                             `${label}：`,
+                            `${label}。`,
+                            `${label}，`,
                             `${label}（`,
                             `${label} (`,
                             `${label} -`,
@@ -998,8 +1179,14 @@ class Scraper:
             time.sleep(min(0.1, remaining))
 
     def open_groups_feed(self):
+        if self._is_checkpoint_surface(self.page.url):
+            log.warning(f"{self._prefix()}当前页面命中 Facebook checkpoint，停止进入小组流程，交由上层统一处理。")
+            return False
         if not self._adopt_existing_facebook_page():
             log.warning(f"{self._prefix()}未找到可复用的 Facebook 页面，无法按手动路径进入小组。")
+            return False
+        if self._is_checkpoint_surface(self.page.url):
+            log.warning(f"{self._prefix()}接管页面后命中 Facebook checkpoint，停止进入小组流程，交由上层统一处理。")
             return False
         if self._has_groups_surface_ready():
             return True
@@ -1008,7 +1195,7 @@ class Scraper:
         if self._open_home_surface_for_groups_entry():
             click_info = self._click_groups_entry()
             if click_info:
-                entered_groups_surface = self._wait_for_groups_surface(timeout=3.0, step_name="小组首页")
+                entered_groups_surface = self._wait_for_groups_surface(timeout=5.0, step_name="小组首页")
         if not entered_groups_surface:
             if not self._open_groups_surface_by_direct_navigation():
                 log.warning(f"{self._prefix()}未能回到 Facebook 首页，无法按手动路径进入小组。")
@@ -1592,10 +1779,11 @@ class Scraper:
             for _ in range(3):
                 clicked = self.page.evaluate(
                     """(payload) => {
-                    const joinedLabels = new Set(payload.joinedLabels || []);
-                    const seeAllLabels = new Set(payload.seeAllLabels || []);
                     const sidebarMaxX = Math.min(window.innerWidth * 0.42, 520);
                     const normalize = (value) => (value || '').trim().replace(/\\s+/g, ' ');
+                    const lower = (value) => normalize(value).toLowerCase();
+                    const joinedLabels = new Set((payload.joinedLabels || []).map(lower).filter(Boolean));
+                    const seeAllLabels = new Set((payload.seeAllLabels || []).map(lower).filter(Boolean));
                     const cssPath = (el) => {
                         if (!el || !(el instanceof Element)) return '';
                         const parts = [];
@@ -1616,20 +1804,21 @@ class Scraper:
                     let fallback = null;
                     for (const el of Array.from(document.querySelectorAll('a[href], div[role="link"], span[role="link"]'))) {
                         const text = normalize(el.innerText || el.getAttribute('aria-label') || '');
+                        const textLower = text.toLowerCase();
                         if (!text) continue;
                         const rect = el.getBoundingClientRect();
                         if (!rect.width || !rect.height) continue;
                         if (rect.right < 0 || rect.bottom < 0 || rect.top > window.innerHeight) continue;
                         if (rect.left > sidebarMaxX) continue;
                         const href = el.getAttribute('href') || '';
-                        if (joinedLabels.has(text) && /\\/groups\\/(joins|feed)(\\/|\\?|$)?/i.test(href || '')) {
+                        if (joinedLabels.has(textLower) && /\\/groups\\/(joins|feed)(\\/|\\?|$)?/i.test(href || '')) {
                             el.click();
                             return {
                                 clickedText: text,
                                 clickedSelector: cssPath(el),
                             };
                         }
-                        if (seeAllLabels.has(text) && !fallback) {
+                        if (seeAllLabels.has(textLower) && !fallback) {
                             fallback = {
                                 el,
                                 clickedText: text,
@@ -1649,7 +1838,7 @@ class Scraper:
                     ,
                     {
                         "joinedLabels": list(self.JOINED_GROUP_SECTION_LABELS),
-                        "seeAllLabels": ["查看全部", "See all"],
+                        "seeAllLabels": list(self.SEE_ALL_LABELS),
                     },
                 )
                 if clicked:
@@ -1685,6 +1874,32 @@ class Scraper:
     def _ensure_facebook_home_surface(self):
         self._adopt_existing_facebook_page()
 
+    def _safe_page_url(self, page=None):
+        target_page = page or self.page
+        if target_page is None:
+            return ""
+        try:
+            return str(target_page.url or "").strip()
+        except Exception:
+            return ""
+
+    def _score_runtime_page_candidate(self, page):
+        url = self._safe_page_url(page)
+        if not url:
+            return -1
+        lower_url = url.lower()
+        if lower_url.startswith("chrome://"):
+            return -1
+        if self._is_checkpoint_surface(url):
+            return 400
+        if self._is_reusable_facebook_url(url) and self._has_real_facebook_surface(page):
+            return 300
+        if "facebook.com" in lower_url and not lower_url.startswith("about:blank"):
+            return 120
+        if lower_url.startswith("about:blank"):
+            return 0
+        return -1
+
     def _adopt_existing_facebook_page(self):
         try:
             deadline = time.time() + 12.0
@@ -1692,25 +1907,50 @@ class Scraper:
                 paused_seconds = self._wait_if_paused()
                 if paused_seconds:
                     deadline += paused_seconds
-                if self._is_reusable_facebook_url(self.page.url) and self._has_real_facebook_surface(self.page):
+                candidate_pages = []
+                try:
+                    candidate_pages.append(self.page)
+                except Exception:
+                    pass
+                try:
+                    candidate_pages.extend(list(self.page.context.pages or []))
+                except Exception:
+                    pass
+                try:
+                    browser = self.page.context.browser
+                    if browser is not None:
+                        for context in list(getattr(browser, "contexts", []) or []):
+                            candidate_pages.extend(list(getattr(context, "pages", []) or []))
+                except Exception:
+                    pass
+
+                seen = set()
+                best_page = None
+                best_score = -1
+                for candidate in candidate_pages:
+                    marker = id(candidate)
+                    if marker in seen:
+                        continue
+                    seen.add(marker)
+                    try:
+                        if candidate.is_closed():
+                            continue
+                    except Exception:
+                        continue
+                    score = self._score_runtime_page_candidate(candidate)
+                    if score > best_score:
+                        best_score = score
+                        best_page = candidate
+
+                if best_page is not None and best_score >= 300:
+                    switched = best_page is not self.page
+                    self.page = best_page
                     try:
                         self.page.bring_to_front()
                     except Exception:
                         pass
-                    return True
-                for candidate in self.page.context.pages:
-                    if candidate.is_closed():
-                        continue
-                    if not self._is_reusable_facebook_url(candidate.url):
-                        continue
-                    if not self._has_real_facebook_surface(candidate):
-                        continue
-                    self.page = candidate
-                    try:
-                        self.page.bring_to_front()
-                    except Exception:
-                        pass
-                    log.info(f"{self._prefix()}已接管现成 Facebook 页面: {self.page.url}")
+                    if switched:
+                        log.info(f"{self._prefix()}已接管现成 Facebook 页面: {self.page.url}")
                     return True
                 self._pause_aware_sleep(0.4)
             log.info(f"{self._prefix()}未发现现成 Facebook 页面，先进入 Facebook 首页。")
@@ -1718,11 +1958,11 @@ class Scraper:
             self._wait_for_condition(
                 "Facebook首页",
                 "等待 Facebook 首页真实内容出现",
-                lambda: self._is_reusable_facebook_url(self.page.url) and self._has_real_facebook_surface(self.page),
+                lambda: self._score_runtime_page_candidate(self.page) >= 300,
                 timeout=12.0,
                 interval=0.4,
             )
-            return self._is_reusable_facebook_url(self.page.url) and self._has_real_facebook_surface(self.page)
+            return self._score_runtime_page_candidate(self.page) >= 300
         except Exception:
             return False
         return False
@@ -1735,9 +1975,15 @@ class Scraper:
             and not current_url.startswith("about:")
         )
 
+    def _is_checkpoint_surface(self, url):
+        current_url = str(url or "").strip().lower()
+        return "facebook.com/checkpoint" in current_url
+
     def _has_real_facebook_surface(self, page=None):
         target_page = page or self.page
         try:
+            if self._is_checkpoint_surface(target_page.url):
+                return False
             return bool(
                 target_page.evaluate(
                     """() => {
@@ -1767,7 +2013,7 @@ class Scraper:
         if self._is_home_surface(self.page.url):
             self._wait_for_condition(
                 "Facebook首页",
-                "等待左侧“小组”入口出现",
+                "等待“小组”入口出现",
                 self._has_groups_sidebar_entry,
                 timeout=10.0,
                 interval=0.3,
@@ -1778,7 +2024,7 @@ class Scraper:
             return False
         self._wait_for_condition(
             "Facebook首页",
-            "等待左侧“小组”入口出现",
+            "等待“小组”入口出现",
             self._has_groups_sidebar_entry,
             timeout=12.0,
             interval=0.3,
@@ -1795,6 +2041,7 @@ class Scraper:
             return bool(
                 self.page.evaluate(
                     """(tokens) => {
+                        const normalizedTokens = (tokens || []).map((token) => (token || '').trim().toLowerCase()).filter(Boolean);
                         const normalize = (value) => (value || '').trim().replace(/\\s+/g, ' ');
                         const visible = (el) => {
                             if (!el) return false;
@@ -1806,15 +2053,28 @@ class Scraper:
                             if (rect.bottom < 0 || rect.right < 0 || rect.top > window.innerHeight || rect.left > window.innerWidth) return false;
                             return true;
                         };
+                        const isGroupsDestination = (href) => {
+                            const normalizedHref = String(href || '');
+                            if (!normalizedHref) return false;
+                            if (/\\/groups\\/(discover|create)(\\/|\\?|$)/i.test(normalizedHref) || /[?&]category=create/i.test(normalizedHref)) return false;
+                            if (/\\/groups\\/[0-9A-Za-z_-]+/i.test(normalizedHref)) return false;
+                            if (/\\/members(\\/|\\?|$)/i.test(normalizedHref)) return false;
+                            return /\\/groups\\/?(\\?|$)/i.test(normalizedHref) || /\\/groups\\/(feed|joins)(\\/|\\?|$)/i.test(normalizedHref);
+                        };
                         return Array.from(document.querySelectorAll('a[href], div[role="link"], span[role="link"]')).some((el) => {
                             if (!visible(el)) return false;
                             const text = normalize(el.innerText || el.getAttribute('aria-label') || el.getAttribute('title') || '');
-                            if (!tokens.some((token) => text === token || text.includes(token))) return false;
+                            const textLower = text.toLowerCase();
+                            const href = el.getAttribute('href') || '';
+                            const matchesText = normalizedTokens.some((token) => textLower === token || textLower.includes(token));
                             const rect = el.getBoundingClientRect();
-                            return rect.left < Math.min(window.innerWidth * 0.38, 420) && rect.top >= 72;
+                            const sidebarCandidate = rect.left < Math.min(window.innerWidth * 0.38, 420) && rect.top >= 72;
+                            const topNavCandidate = rect.top <= 170 && rect.left >= 80 && rect.right <= window.innerWidth - 16;
+                            if (matchesText && (sidebarCandidate || topNavCandidate)) return true;
+                            return isGroupsDestination(href) && topNavCandidate;
                         });
                     }""",
-                    ["小组", "群组", "Groups", "Groupes", "Grupos", "กลุ่ม"],
+                    list(self.GROUP_ENTRY_LABELS),
                 )
             )
         except Exception:
@@ -1825,6 +2085,7 @@ class Scraper:
             log.info(f"{self._prefix()}正在点击 Facebook 首页入口。")
             return self.page.evaluate(
                 """(tokens) => {
+                    const normalizedTokens = (tokens || []).map((token) => (token || '').trim().toLowerCase()).filter(Boolean);
                     const normalize = (value) => (value || '').trim().replace(/\\s+/g, ' ');
                     const visible = (el) => {
                         if (!el) return false;
@@ -1891,6 +2152,7 @@ class Scraper:
             log.info(f"{self._prefix()}正在点击“小组”入口。")
             return self.page.evaluate(
                 """(tokens) => {
+                    const normalizedTokens = (tokens || []).map((token) => (token || '').trim().toLowerCase()).filter(Boolean);
                     const normalize = (value) => (value || '').trim().replace(/\\s+/g, ' ');
                     const visible = (el) => {
                         if (!el) return false;
@@ -1924,15 +2186,27 @@ class Scraper:
                         }
                         return parts.join(' > ');
                     };
+                    const isGroupsDestination = (href) => {
+                        const normalizedHref = String(href || '');
+                        if (!normalizedHref) return false;
+                        if (/\\/groups\\/(discover|create)(\\/|\\?|$)/i.test(normalizedHref) || /[?&]category=create/i.test(normalizedHref)) return false;
+                        if (/\\/groups\\/[0-9A-Za-z_-]+/i.test(normalizedHref)) return false;
+                        if (/\\/members(\\/|\\?|$)/i.test(normalizedHref)) return false;
+                        return /\\/groups\\/?(\\?|$)/i.test(normalizedHref) || /\\/groups\\/(feed|joins)(\\/|\\?|$)/i.test(normalizedHref);
+                    };
                     let best = null;
                     for (const el of Array.from(document.querySelectorAll('a[href], div[role="link"], span[role="link"]'))) {
                         if (!visible(el)) continue;
                         const text = normalize(el.innerText || el.getAttribute('aria-label') || el.getAttribute('title') || '');
+                        const textLower = text.toLowerCase();
                         const href = el.getAttribute('href') || '';
                         const rect = el.getBoundingClientRect();
-                        if (!tokens.some((token) => text === token || text.includes(token))) continue;
-                        if (rect.left >= Math.min(window.innerWidth * 0.38, 420)) continue;
-                        if (rect.top < 72) continue;
+                        const matchesText = normalizedTokens.some((token) => textLower === token || textLower.includes(token));
+                        const looksLikeGroupsHref = isGroupsDestination(href);
+                        const sidebarCandidate = rect.left < Math.min(window.innerWidth * 0.38, 420) && rect.top >= 72;
+                        const topNavCandidate = rect.top <= 170 && rect.left >= 80 && rect.right <= window.innerWidth - 16;
+                        if (!matchesText && !looksLikeGroupsHref) continue;
+                        if (!sidebarCandidate && !topNavCandidate) continue;
                         let score = 0;
                         if (/\\/groups\\/feed/i.test(href)) score += 240;
                         if (/\\/groups\\/?(\\?|$)/i.test(href)) score += 200;
@@ -1940,7 +2214,10 @@ class Scraper:
                         if (/\\/groups\\/(discover|create)/i.test(href) || /[?&]category=create/i.test(href)) score -= 240;
                         if (/\\/groups\\/[0-9A-Za-z_-]+/i.test(href)) score -= 160;
                         if (/\\/members/i.test(href)) score -= 200;
-                        score += 120;
+                        if (matchesText) score += 140;
+                        if (looksLikeGroupsHref) score += 120;
+                        if (sidebarCandidate) score += 90;
+                        if (topNavCandidate) score += 120;
                         if (score <= 0) continue;
                         const candidate = {
                             score,
@@ -1957,7 +2234,7 @@ class Scraper:
                         clickedSelector: best.clickedSelector,
                     };
                 }""",
-                ["小组", "群组", "Groups", "Groupes", "Grupos", "กลุ่ม"],
+                list(self.GROUP_ENTRY_LABELS),
             )
         except Exception:
             return None
@@ -2122,9 +2399,11 @@ class Scraper:
             for _ in range(4):
                 clicked = self.page.evaluate(
                     """(payload) => {
-                    const tokens = Array.isArray(payload?.tokens) ? payload.tokens : [];
-                    const expectedGroupRoot = String(payload?.expectedGroupRoot || '').trim().replace(/\\/+$/, '');
                     const normalize = (value) => (value || '').trim().replace(/\\s+/g, ' ');
+                    const tokens = Array.isArray(payload?.tokens)
+                        ? payload.tokens.map((token) => normalize(token).toLowerCase()).filter(Boolean)
+                        : [];
+                    const expectedGroupRoot = String(payload?.expectedGroupRoot || '').trim().replace(/\\/+$/, '');
                     const visible = (el) => {
                         if (!el) return false;
                         const rect = el.getBoundingClientRect();
@@ -2166,11 +2445,12 @@ class Scraper:
                     for (const el of Array.from(document.querySelectorAll('a[href], [role="tab"], div[role="link"], span[role="link"]'))) {
                         if (!visible(el)) continue;
                         const text = normalize(el.innerText || el.getAttribute('aria-label') || el.getAttribute('title') || '');
+                        const textLower = text.toLowerCase();
                         const href = el.getAttribute('href') || '';
                         const rect = el.getBoundingClientRect();
                         const groupRoot = resolveGroupRoot(href);
                         const hasMembersHref = /\\/members(\\/|\\?|$)/i.test(href);
-                        const hasMembersText = tokens.some((token) => text === token || text.includes(token));
+                        const hasMembersText = tokens.some((token) => textLower === token || textLower.includes(token));
                         if (!hasMembersHref && !hasMembersText) continue;
                         if (expectedGroupRoot && groupRoot && groupRoot !== expectedGroupRoot) continue;
                         let score = 0;
@@ -2179,7 +2459,7 @@ class Scraper:
                         if (expectedGroupRoot && groupRoot === expectedGroupRoot) score += 180;
                         if (rect.y >= 210 && rect.y <= 340) score += 80;
                         if (rect.y < 190) score -= 120;
-                        if ((text.includes('万位成员') || text.includes('查看所有人')) && rect.y < 220) score -= 160;
+                        if ((payload.membersTabNoiseTexts || []).some((token) => text.includes(token)) && rect.y < 220) score -= 160;
                         if (score <= 0) continue;
                         const candidate = {
                             score,
@@ -2199,7 +2479,8 @@ class Scraper:
                     };
                 }""",
                     {
-                        "tokens": ["成员", "Members", "People", "成员列表", "成员资料", "用户"],
+                        "tokens": list(self.MEMBERS_TAB_LABELS),
+                        "membersTabNoiseTexts": list(self.MEMBERS_TAB_NOISE_TEXTS),
                         "expectedGroupRoot": expected_group_root,
                     },
                 )
@@ -2271,9 +2552,68 @@ class Scraper:
         return path.startswith("/groups/joins")
 
     def _has_groups_surface_ready(self):
-        if self._is_groups_surface(self.page.url):
+        if self._has_groups_list_ready():
             return True
-        return self._has_groups_list_ready()
+        if self._is_checkpoint_surface(self.page.url):
+            return False
+        if not self._is_groups_surface(self.page.url):
+            return False
+        try:
+            return bool(
+                self.page.evaluate(
+                    """() => {
+                        const normalize = (value) => (value || '').replace(/\\s+/g, ' ').trim();
+                        const visible = (el) => {
+                            if (!el) return false;
+                            const rect = el.getBoundingClientRect();
+                            if (!rect.width || !rect.height) return false;
+                            const style = window.getComputedStyle(el);
+                            if (!style) return false;
+                            if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+                            if (rect.bottom < 0 || rect.right < 0 || rect.top > window.innerHeight || rect.left > window.innerWidth) return false;
+                            return true;
+                        };
+                        const path = location.pathname || '';
+                        const onGroupsSurface = path === '/groups' || path === '/groups/' || path.startsWith('/groups/feed') || path.startsWith('/groups/joins');
+                        if (!onGroupsSurface) return false;
+                        const main = document.querySelector('main, [role="main"]');
+                        if (!main) return false;
+                        const mainRect = main.getBoundingClientRect();
+                        if (!mainRect.width || mainRect.height < 160) return false;
+                        const isGroupListHref = (href) => {
+                            const normalizedHref = String(href || '');
+                            if (!normalizedHref) return false;
+                            if (/\\/groups\\/(discover|create)(\\/|\\?|$)/i.test(normalizedHref) || /[?&]category=create/i.test(normalizedHref)) {
+                                return false;
+                            }
+                            if (/\\/members(\\/|\\?|$)/i.test(normalizedHref)) return false;
+                            return /\\/groups\\/[0-9A-Za-z_-]+(\\/|\\?|$)/i.test(normalizedHref);
+                        };
+                        const visibleGroupLinks = Array.from(document.querySelectorAll('a[href]'))
+                            .filter((el) => {
+                                if (!visible(el)) return false;
+                                const href = (el.getAttribute && (el.getAttribute('href') || '')) || '';
+                                if (!isGroupListHref(href)) return false;
+                                const text = normalize(el.innerText || (el.getAttribute && (el.getAttribute('aria-label') || el.getAttribute('title'))) || '');
+                                return text.length >= 2;
+                            })
+                            .length;
+                        const visibleHeadings = Array.from(document.querySelectorAll('h1, h2, h3, h4, [role="heading"], [aria-level]'))
+                            .filter((el) => {
+                                if (!visible(el)) return false;
+                                const text = normalize(el.innerText || '');
+                                return text.length >= 2;
+                            })
+                            .length;
+                        const mainText = normalize(main.innerText || document.body.innerText || '');
+                        const richMainText = mainText.length >= 220;
+                        const structuredSurface = visibleHeadings >= 2 && mainText.length >= 120;
+                        return (visibleGroupLinks >= 2 && mainText.length >= 80) || structuredSurface || richMainText;
+                    }"""
+                )
+            )
+        except Exception:
+            return False
 
     def _wait_for_groups_surface(self, timeout=12.0, step_name="小组首页"):
         return self._wait_for_condition(
@@ -2337,9 +2677,9 @@ class Scraper:
         )
         for direct_url in direct_urls:
             try:
-                log.warning(f"{self._prefix()}左侧“小组”入口识别失败，尝试直接进入: {direct_url}")
+                log.warning(f"{self._prefix()}“小组”入口识别失败，尝试直接进入: {direct_url}")
                 self._goto_pause_aware(direct_url, timeout_ms=30000, settle_timeout_ms=3000)
-                self._wait_for_groups_surface(timeout=3.0, step_name="小组首页")
+                self._wait_for_groups_surface(timeout=5.0, step_name="小组首页")
                 if self._has_groups_surface_ready():
                     return True
             except Exception:
@@ -2350,7 +2690,9 @@ class Scraper:
         try:
             return bool(
                 self.page.evaluate(
-                    """() => {
+                    """(payload) => {
+                        const normalize = (value) => (value || '').trim().replace(/\\s+/g, ' ');
+                        const tokens = (payload.tokens || []).map((token) => normalize(token).toLowerCase()).filter(Boolean);
                         const path = location.pathname || '';
                         if (!path.startsWith('/groups/') || path.includes('/members')) return false;
                         const main = document.querySelector('[role="main"]');
@@ -2358,17 +2700,19 @@ class Scraper:
                         const membersLink = Array.from(document.querySelectorAll('a[href], [role="tab"], div[role="link"], span[role="link"]'))
                             .find((el) => {
                                 const href = el.getAttribute && (el.getAttribute('href') || '');
-                                const text = (el.innerText || el.getAttribute('aria-label') || '').trim();
+                                const text = normalize(el.innerText || el.getAttribute('aria-label') || '');
+                                const textLower = text.toLowerCase();
                                 const rect = el.getBoundingClientRect();
                                 if (!rect.width || !rect.height) return false;
                                 if (rect.bottom < 0 || rect.top > window.innerHeight) return false;
                                 if (/\\/members(\\/|\\?|$)/.test(href)) return true;
-                                return ['成员', 'Members', 'People', '用户'].some((token) => text === token || text.includes(token));
+                                return tokens.some((token) => textLower === token || textLower.includes(token));
                             });
                         if (membersLink) return true;
                         const article = document.querySelector('div[role="feed"], div[data-pagelet]');
                         return !!(article && article.getBoundingClientRect().height > 200);
-                    }"""
+                    }""",
+                    {"tokens": list(self.MEMBERS_TAB_LABELS)},
                 )
             )
         except Exception:
@@ -2414,12 +2758,14 @@ class Scraper:
                 """(payload) => {
                     const headings = payload.headings || [];
                     const normalize = (value) => (value || '').replace(/\\s+/g, ' ').trim();
+                    const headingsLower = headings.map((token) => normalize(token).toLowerCase()).filter(Boolean);
                     const url = location.pathname || '';
                     const looksLikeMembers = url.includes('/members');
                     const hasHeading = Array.from(document.querySelectorAll('h1, h2, h3, span, div'))
                         .some((el) => {
                             const text = normalize(el.innerText || '');
-                            return headings.some((token) => text === token || text.includes(token));
+                            const textLower = text.toLowerCase();
+                            return headingsLower.some((token) => textLower === token || textLower.includes(token));
                         });
                     const ids = [];
                     const seen = new Set();
@@ -2630,9 +2976,12 @@ class Scraper:
                 const anchorUserId = payload.anchorUserId || '';
                 const scope = payload.scope || {};
                 const scopeSelector = scope.containerSelector || '';
+                const normalize = (value) => (value || '').trim().replace(/\\s+/g, ' ');
+                const lower = (value) => normalize(value).toLowerCase();
                 const recentJoinRe = /(刚加入|刚刚加入|加入时间[:：]\\s*\\S+|(约|大约|大概)?\\s*\\d+\\s*(秒|分钟|小时|天|周|月|个月|年)前(?:加入)?|\\d{4}年\\d{1,2}月\\d{1,2}日由.+添加|joined\\s+(just now|just|\\d+\\s*(second|minute|hour|day|week|month|year)s?\\s+ago|on\\s+\\w+)|added\\s+by|se\\s+unió|hace\\s+\\d+|añadido\\s+por|entrou|há\\s+\\d+|adicionado\\s+por|a\\s+rejoint|il\\s+y\\s+a|ajouté\\s+par|beigetreten|vor\\s+\\d+|si\\s+è\\s+unito|fa\\s+\\d+|aggiunto\\s+da|toegetreden|geleden|присоединился|назад|dołączył|temu|katıldı|önce|انضم|منذ|शामिल|पहले|bergabung|yang\\s+lalu|menyertai|yang\\s+lalu|tham\\s+gia|trước|参加|前|가입|전|เพิ่งเข้าร่วม|เข้าร่วมเมื่อ|เข้าร่วม|เมื่อ\\s*\\d+\\s*(วินาที|นาที|ชั่วโมง|วัน|สัปดาห์|เดือน|ปี)ที่แล้ว|ចូលរួម|ເຂົ້າຮ່ວມ|sumali|nakaraan)/i;
                 const groupUserRe = /\\/groups\\/[^/]+\\/user\\/\\d+\\/?/i;
-                const skipNames = new Set(['查看全部', 'See all', '邀请', 'Invite', '发消息', 'Message', '更多', 'More']);
+                const skipNames = new Set((payload.skipLabels || []).map(lower).filter(Boolean));
+                const actionHintKeywords = (payload.actionHintKeywords || []).map(lower).filter(Boolean);
                 const blockedRoleTexts = payload.blockedRoleTexts || [];
                 const results = [];
                 const headingBottom = Number(scope.headingBottom || scope.sectionTop || 0);
@@ -2652,7 +3001,6 @@ class Scraper:
                 }
                 const laneMinX = Math.max(0, scopeLeft - 32);
                 const laneMaxX = Math.min(window.innerWidth, scopeRight + 96);
-                const actionHintRe = /(发消息|发送消息|發送訊息|message|send message|add friend|follow|connect)/i;
                     const cssPath = (el) => {
                         if (!el || !(el instanceof Element)) return null;
                         const parts = [];
@@ -2710,8 +3058,9 @@ class Scraper:
                     const name = (a.innerText || a.getAttribute('aria-label') || '')
                         .trim()
                         .replace(/\\s+/g, ' ');
+                    const nameLower = name.toLowerCase();
                     if (!name || name.length < 2 || name.length > 80) continue;
-                    if (skipNames.has(name)) continue;
+                    if (skipNames.has(nameLower)) continue;
 
                     let card = a;
                     let bestCard = null;
@@ -2719,11 +3068,12 @@ class Scraper:
                     for (let depth = 0; depth < 7 && card; depth += 1) {
                         const cardRect = card.getBoundingClientRect();
                         const text = (card.innerText || '').trim().replace(/\\s+/g, ' ');
+                        const textLower = text.toLowerCase();
                         if (text && text.length <= 420 && text.includes(name)) {
                             const memberIds = getVisibleGroupUserIds(card);
                             let score = 2;
                             if (recentJoinRe.test(text)) score += 4;
-                            if (actionHintRe.test(text)) score += 1;
+                            if (actionHintKeywords.some((token) => textLower.includes(token))) score += 1;
                             if (card.getAttribute && card.getAttribute('role') === 'listitem') score += 2;
                             if (text.includes(name + ' ')) score += 1;
                             if (text.length >= 24) score += 1;
@@ -2774,7 +3124,6 @@ class Scraper:
                         roleProbe = roleProbe.parentElement;
                     }
                     if (blockedLocally || hasBlockedRole(cardText)) continue;
-                    if (cardText.includes('管理员和版主') || cardText.includes('Admins and moderators')) continue;
 
                     results.push({
                         href,
@@ -2856,6 +3205,8 @@ class Scraper:
                         "anchorUserId": anchor_user_id or "",
                         "scope": scope,
                         "blockedRoleTexts": list(self.NEWCOMER_BLOCKED_ROLE_TEXTS),
+                        "skipLabels": list(self.MEMBER_ACTION_SKIP_LABELS),
+                        "actionHintKeywords": list(self.MEMBER_ACTION_HINT_KEYWORDS),
                     },
                 )
             except Exception as exc:

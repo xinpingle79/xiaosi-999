@@ -79,13 +79,24 @@ def _build_server_base_url(request_host=""):
 
 def _sanitize_server_settings(data):
     settings = dict(data or {})
-    task_settings = settings.get("task_settings")
-    if isinstance(task_settings, dict):
-        task_settings = dict(task_settings)
-        task_settings.pop("send_interval_seconds", None)
-        task_settings.pop("typing_delay", None)
-        settings["task_settings"] = task_settings
+    settings["task_settings"] = _normalize_runtime_task_settings(settings.get("task_settings"))
     return settings
+
+
+def _normalize_runtime_task_settings(data):
+    raw = dict(data or {}) if isinstance(data, dict) else {}
+    normalized = {
+        "max_messages_per_account": 0,
+        "scroll_times": 0,
+        "group_list_scroll_times": 0,
+        "resume_search_times": 20,
+        "idle_scroll_limit": 3,
+    }
+    try:
+        normalized["max_windows"] = max(0, int(raw.get("max_windows", 0) or 0))
+    except Exception:
+        normalized["max_windows"] = 0
+    return normalized
 
 
 def _drop_session(token):
@@ -1711,7 +1722,6 @@ def load_full_config(username=None):
             templates = db.get_message_templates(username)
             if templates is not None:
                 messages["templates"] = templates.get("templates") or []
-                messages["probe_templates"] = templates.get("probe_templates") or []
         finally:
             db.close()
 
@@ -2362,103 +2372,6 @@ def _verify_agent_request(payload):
         db.close()
 
 
-def _auto_bind_device_config(owner, machine_id, bit_api, api_token, source=""):
-    owner = str(owner or "").strip()
-    machine_id = str(machine_id or "").strip()
-    bit_api = str(bit_api or "").strip()
-    api_token = str(api_token or "").strip()
-    if not owner or not machine_id:
-        return False
-    if not api_token:
-        TASK_MANAGER._append_runtime_log(
-            f"=== [自动绑定] 跳过：缺少 api_token owner={owner} machine_id={machine_id} source={source} ==="
-        )
-        return False
-    db = Database()
-    try:
-        configs = db.list_device_configs(owner)
-        matches = []
-        for cfg in configs:
-            try:
-                status = int(cfg.get("status", 1) or 0)
-            except Exception:
-                status = 0
-            if status != 1:
-                continue
-            if str(cfg.get("api_token") or "").strip() != api_token:
-                continue
-            matches.append(cfg)
-        if not matches:
-            TASK_MANAGER._append_runtime_log(
-                f"=== [自动绑定] token 未匹配 owner={owner} api_token={api_token} machine_id={machine_id} source={source} ==="
-            )
-            return False
-        if len(matches) > 1:
-            ids = ",".join(str(m.get("id") or "") for m in matches)
-            TASK_MANAGER._append_runtime_log(
-                f"=== [自动绑定] token 冲突 owner={owner} api_token={api_token} configs={ids} source={source} ==="
-            )
-            return False
-        cfg = matches[0]
-        existing_machine = str(cfg.get("machine_id") or "").strip()
-        if existing_machine and existing_machine != machine_id:
-            TASK_MANAGER._append_runtime_log(
-                f"=== [自动绑定] 已绑定其他设备 owner={owner} config_id={cfg.get('id')} existing={existing_machine} incoming={machine_id} source={source} ==="
-            )
-            return False
-
-        current_bit_api = str(cfg.get("bit_api") or "").strip()
-        incoming_bit_api = bit_api or current_bit_api
-        bit_api_changed = bool(incoming_bit_api) and incoming_bit_api != current_bit_api
-        new_machine_id = existing_machine or machine_id
-
-        updated = True
-        if (not existing_machine) or bit_api_changed:
-            updated = db.update_device_config(
-                cfg.get("id"),
-                owner,
-                cfg.get("name") or "",
-                new_machine_id,
-                incoming_bit_api,
-                api_token,
-                cfg.get("status", 1),
-            )
-
-        if not existing_machine:
-            if updated:
-                TASK_MANAGER._append_runtime_log(
-                    f"=== [自动绑定] token 匹配成功，已绑定 owner={owner} machine_id={machine_id} config_id={cfg.get('id')} source={source} ==="
-                )
-                if bit_api_changed:
-                    TASK_MANAGER._append_runtime_log(
-                        f"=== [自动绑定] bit_api 更新 owner={owner} config_id={cfg.get('id')} old={current_bit_api} new={incoming_bit_api} source={source} ==="
-                    )
-                return True
-            TASK_MANAGER._append_runtime_log(
-                f"=== [自动绑定] 绑定失败 owner={owner} machine_id={machine_id} config_id={cfg.get('id')} source={source} ==="
-            )
-            return False
-
-        if bit_api_changed:
-            if updated:
-                TASK_MANAGER._append_runtime_log(
-                    f"=== [自动绑定] bit_api 更新 owner={owner} config_id={cfg.get('id')} old={current_bit_api} new={incoming_bit_api} source={source} ==="
-                )
-            else:
-                TASK_MANAGER._append_runtime_log(
-                    f"=== [自动绑定] bit_api 更新失败 owner={owner} config_id={cfg.get('id')} source={source} ==="
-                )
-
-        # 已绑定且无变化时不重复刷成功日志
-        if bit_api_changed:
-            TASK_MANAGER._append_runtime_log(
-                f"=== [自动绑定] token 匹配成功，已绑定 owner={owner} machine_id={new_machine_id} config_id={cfg.get('id')} source={source} ==="
-            )
-        return True
-    finally:
-        db.close()
-
-
 def _select_device_config(configs, machine_id="", api_token=""):
     machine_id = str(machine_id or "").strip()
     api_token = str(api_token or "").strip()
@@ -2577,19 +2490,7 @@ def _try_recover_client_activation(db, payload, request_host=""):
     configs = db.list_device_configs(owner)
     device_cfg = _select_device_config(configs, machine_id=machine_id, api_token=api_token)
     if not device_cfg:
-        auto_bound = _auto_bind_device_config(
-            owner,
-            machine_id,
-            bit_api,
-            api_token,
-            source="client_activate_recover",
-        )
-        if not auto_bound:
-            return {"ok": False, "error": "unauthorized"}
-        configs = db.list_device_configs(owner)
-        device_cfg = _select_device_config(configs, machine_id=machine_id, api_token=api_token)
-        if not device_cfg:
-            return {"ok": False, "error": "unauthorized"}
+        return {"ok": False, "error": "unauthorized"}
 
     status_raw = device_cfg.get("status", 1)
     if status_raw is None:
@@ -2851,9 +2752,11 @@ def handle_client_status(payload):
     owner = verified.get("owner") or ""
     api_token = str(payload.get("api_token") or "").strip()
     settings = _load_agent_settings()
+    server_settings = _sanitize_server_settings(read_yaml(SETTINGS_PATH))
+    runtime_task_settings = dict(server_settings.get("task_settings") or {})
     heartbeat_ttl = float(settings.get("heartbeat_ttl", 180) or 180)
     now = time.time()
-    runtime_messages = {"templates": [], "probe_templates": []}
+    runtime_messages = {"templates": []}
 
     db = Database()
     try:
@@ -2877,7 +2780,6 @@ def handle_client_status(payload):
         owner_templates = db.get_message_templates(owner) or {}
         runtime_messages = {
             "templates": owner_templates.get("templates") or [],
-            "probe_templates": owner_templates.get("probe_templates") or [],
         }
 
         stale_rows = TASK_MANAGER._cleanup_stale_machine_action_tasks(
@@ -2988,6 +2890,7 @@ def handle_client_status(payload):
             "state_text": state_text,
             "client_version": client_version,
             "messages": runtime_messages,
+            "task_settings": runtime_task_settings,
             "bit_api": str((target_cfg or {}).get("bit_api") or "").strip(),
             "api_token": str((target_cfg or {}).get("api_token") or "").strip(),
             "stale_cleanup_ids": [row["id"] for row in stale_rows],
@@ -3126,8 +3029,6 @@ def handle_agent_heartbeat(payload):
         )
     finally:
         db.close()
-    owner = str((_agent or {}).get("owner") or "").strip()
-    _auto_bind_device_config(owner, machine_id, bit_api, api_token, source="heartbeat")
     return {"ok": True}
 
 
@@ -3512,12 +3413,12 @@ def save_full_config(payload, actor_username=None, actor_role=None):
             try:
                 existing = db.get_message_templates(actor_username) or {}
                 templates = messages_payload.get("templates")
-                probe_templates = messages_payload.get("probe_templates")
                 if templates is None:
                     templates = existing.get("templates") or []
-                if probe_templates is None:
-                    probe_templates = existing.get("probe_templates") or []
-                db.set_message_templates(actor_username, templates or [], probe_templates or [])
+                db.set_message_templates(
+                    actor_username,
+                    templates or [],
+                )
             finally:
                 db.close()
         return
@@ -3528,26 +3429,9 @@ def save_full_config(payload, actor_username=None, actor_role=None):
 
     task_settings = settings.setdefault("task_settings", {})
     task_settings.update(settings_payload.get("task_settings") or {})
-    task_settings["max_messages_per_account"] = 0
-    try:
-        task_settings["max_windows"] = max(0, int(task_settings.get("max_windows", 0)))
-    except Exception:
-        task_settings["max_windows"] = 0
-    task_settings["scroll_times"] = 0
-    task_settings["group_list_scroll_times"] = 0
-    task_settings["resume_search_times"] = 20
-    task_settings["idle_scroll_limit"] = 3
-    task_settings["account_restricted_blocked_threshold"] = 2
-    task_settings["account_restricted_signal_threshold"] = 5
-    task_settings.pop("send_interval_seconds", None)
-    task_settings.pop("typing_delay", None)
+    settings = _sanitize_server_settings(settings)
     messages = dict(current_messages)
     messages.update(messages_payload)
-    messages["probe_templates"] = (
-        messages.get("probe_templates")
-        or current_messages.get("probe_templates")
-        or []
-    )
     messages["templates"] = (
         messages.get("templates")
         or current_messages.get("templates")
@@ -3586,6 +3470,13 @@ def ensure_web_ui_defaults():
             changed = True
     if changed:
         write_yaml(SETTINGS_PATH, settings)
+
+
+def ensure_server_task_settings_defaults():
+    settings = read_yaml(SETTINGS_PATH)
+    cleaned = _sanitize_server_settings(settings)
+    if cleaned != settings:
+        write_yaml(SETTINGS_PATH, cleaned)
 
 
 def ensure_admin_account():
@@ -3628,6 +3519,7 @@ def ensure_activation_codes_uuid():
 
 def main():
     ensure_web_ui_defaults()
+    ensure_server_task_settings_defaults()
     ensure_admin_account()
     ensure_activation_codes_uuid()
     start_cleanup_daemon()

@@ -809,16 +809,44 @@ class Database:
     def _migrate_message_templates(self):
         columns = self._fetch_table_columns("message_templates")
         if columns:
-            expected = {"username", "templates", "probe_templates", "updated_at"}
-            if expected.issubset(columns):
+            expected = {"username", "templates", "updated_at"}
+            if expected.issubset(columns) and "probe_templates" not in columns:
                 return
+            legacy_rows = self.conn.execute(
+                """
+                SELECT username, templates, updated_at
+                FROM message_templates
+                """
+            ).fetchall()
             self.conn.execute("DROP TABLE IF EXISTS message_templates")
+            self.conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS message_templates (
+                    username TEXT NOT NULL PRIMARY KEY,
+                    templates TEXT,
+                    updated_at DATETIME
+                )
+                """
+            )
+            if legacy_rows:
+                self.conn.executemany(
+                    """
+                    INSERT OR REPLACE INTO message_templates
+                    (username, templates, updated_at)
+                    VALUES (?, ?, ?)
+                    """,
+                    [
+                        (row["username"], row["templates"], row["updated_at"])
+                        for row in legacy_rows
+                    ],
+                )
+            self.conn.commit()
+            return
         self.conn.execute(
             """
             CREATE TABLE IF NOT EXISTS message_templates (
                 username TEXT NOT NULL PRIMARY KEY,
                 templates TEXT,
-                probe_templates TEXT,
                 updated_at DATETIME
             )
             """
@@ -848,7 +876,7 @@ class Database:
             return None
         row = self.conn.execute(
             """
-            SELECT templates, probe_templates
+            SELECT templates
             FROM message_templates
             WHERE username = ?
             """,
@@ -860,28 +888,21 @@ class Database:
             templates = json.loads(row["templates"]) if row["templates"] else []
         except Exception:
             templates = []
-        try:
-            probe_templates = (
-                json.loads(row["probe_templates"]) if row["probe_templates"] else []
-            )
-        except Exception:
-            probe_templates = []
-        return {"templates": templates, "probe_templates": probe_templates}
+        return {"templates": templates}
 
-    def set_message_templates(self, username, templates, probe_templates):
+    def set_message_templates(self, username, templates):
         username = (username or "").strip()
         if not username:
             return
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         templates_payload = json.dumps(templates or [], ensure_ascii=False)
-        probe_payload = json.dumps(probe_templates or [], ensure_ascii=False)
         self.conn.execute(
             """
             INSERT OR REPLACE INTO message_templates
-            (username, templates, probe_templates, updated_at)
-            VALUES (?, ?, ?, ?)
+            (username, templates, updated_at)
+            VALUES (?, ?, ?)
             """,
-            (username, templates_payload, probe_payload, now),
+            (username, templates_payload, now),
         )
         self.conn.commit()
 
@@ -1064,6 +1085,11 @@ class Database:
             f"UPDATE user_accounts SET {', '.join(fields)} WHERE username = ?",
             tuple(params),
         )
+        if username != original_username:
+            self.conn.execute(
+                "UPDATE message_templates SET username = ? WHERE username = ?",
+                (username, original_username),
+            )
         self.conn.commit()
 
     def list_device_configs(self, owner):
@@ -1133,15 +1159,6 @@ class Database:
         )
         self.conn.commit()
         return self.conn.total_changes > 0
-        if username != original_username:
-            try:
-                self.conn.execute(
-                    "UPDATE message_templates SET username = ? WHERE username = ?",
-                    (username, original_username),
-                )
-                self.conn.commit()
-            except Exception as exc:
-                log.error(f"更新文案归属失败: {exc}")
 
     def set_user_activation_code(self, username, activation_code):
         username = (username or "").strip()

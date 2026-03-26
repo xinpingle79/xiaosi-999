@@ -212,9 +212,7 @@ def resolve_message_templates(local_messages, account_messages=None):
     local_payload = local_messages if isinstance(local_messages, dict) else {}
     account_payload = account_messages if isinstance(account_messages, dict) else {}
     local_formal = _normalize_message_templates(local_payload.get("templates") or [])
-    local_probe = _normalize_message_templates(local_payload.get("probe_templates") or [])
     owner_formal = _normalize_message_templates(account_payload.get("templates") or [])
-    owner_probe = _normalize_message_templates(account_payload.get("probe_templates") or [])
 
     if local_formal:
         selected_templates = local_formal
@@ -222,25 +220,16 @@ def resolve_message_templates(local_messages, account_messages=None):
     elif owner_formal:
         selected_templates = owner_formal
         template_source = "db_owner_templates"
-    elif local_probe:
-        selected_templates = local_probe
-        template_source = "local_probe_templates"
-    elif owner_probe:
-        selected_templates = owner_probe
-        template_source = "db_owner_probe_templates"
     else:
         selected_templates = []
         template_source = "missing_templates"
 
     return {
         "templates": selected_templates,
-        "probe_templates": local_probe or owner_probe,
         "template_source": template_source,
         "stats": {
             "local_formal": len(local_formal),
             "owner_formal": len(owner_formal),
-            "local_probe": len(local_probe),
-            "owner_probe": len(owner_probe),
         },
     }
 
@@ -442,12 +431,11 @@ def run_single_session(
     owner_username = (os.environ.get(ENV_OWNER) or "").strip()
     machine_id = str(config.get("machine_id") or "").strip()
     template_resolution = load_runtime_message_templates(db, owner_username, msgs)
-    probe_templates = template_resolution["probe_templates"]
     formal_templates = template_resolution["templates"]
     template_source = template_resolution["template_source"]
     template_stats = template_resolution["stats"]
     startup_gate_released = False
-    close_session_on_exit = True
+    alert_account_id = label or "默认窗口"
 
     def release_startup_gate():
         nonlocal startup_gate_released
@@ -494,21 +482,30 @@ def run_single_session(
                 scraper = Scraper(page, window_label=alert_account_id)
                 sender = Messager(page, task_cfg, window_label=alert_account_id)
                 max_messages = normalize_message_limit(task_cfg.get("max_messages_per_account", 0))
+                page = resolve_active_runtime_page(page, scraper=scraper, sender=sender)
+                checkpoint_url = detect_checkpoint_account_issue(
+                    page,
+                    alert_account_id,
+                    stage="窗口接入后",
+                )
+                if checkpoint_url:
+                    release_startup_gate()
+                    show_account_restricted_alert(alert_account_id)
+                    return {
+                        "account_id": alert_account_id,
+                        "messages_sent": 0,
+                        "finished_groups": 0,
+                        "reason": "account_restricted",
+                    }
                 if template_source == "local_messages_yaml":
                     log.info(f"[{alert_account_id}] 使用本地文案文件 ({len(formal_templates)} 条)")
                 elif template_source == "db_owner_templates":
                     log.info(f"[{alert_account_id}] 本地正式文案为空，回退子账户文案 ({len(formal_templates)} 条)")
-                elif template_source == "local_probe_templates":
-                    log.warning(f"[{alert_account_id}] 正式文案为空，改用本地探针文案发送。")
-                elif template_source == "db_owner_probe_templates":
-                    log.warning(f"[{alert_account_id}] 正式文案为空，改用子账户探针文案发送。")
                 log.info(
                     f"[{alert_account_id}] 文案装载完成：selected={template_source}，"
                     f"local_formal={template_stats['local_formal']}，"
                     f"owner_formal={template_stats['owner_formal']}，"
-                    f"local_probe={template_stats['local_probe']}，"
-                    f"owner_probe={template_stats['owner_probe']}，"
-                    f"active={len(formal_templates)}，probe={len(probe_templates)}"
+                    f"active={len(formal_templates)}"
                 )
                 log.info(
                     f"[{alert_account_id}] 发送频率来源：source=client_yaml.task_settings.send_interval_seconds"
@@ -539,6 +536,21 @@ def run_single_session(
                 )
 
                 group_urls = collect_target_groups(scraper, task_cfg)
+                page = resolve_active_runtime_page(page, scraper=scraper, sender=sender)
+                checkpoint_url = detect_checkpoint_account_issue(
+                    page,
+                    alert_account_id,
+                    stage="收集目标小组",
+                )
+                if checkpoint_url:
+                    release_startup_gate()
+                    show_account_restricted_alert(alert_account_id)
+                    return {
+                        "account_id": alert_account_id,
+                        "messages_sent": 0,
+                        "finished_groups": 0,
+                        "reason": "account_restricted",
+                    }
                 if not group_urls:
                     release_startup_gate()
                     log.error(f"[{alert_account_id}] 未能收集到任何已加入小组，流程结束。")
@@ -552,6 +564,7 @@ def run_single_session(
                 total_sent = 0
                 finished_groups = 0
                 final_reason = "completed"
+                delivery_runtime_state = ensure_delivery_runtime_state()
                 for idx, group_url in enumerate(group_urls, start=1):
                     cont, _ = wait_if_paused(
                         task_cfg,
@@ -563,12 +576,10 @@ def run_single_session(
                     if not cont:
                         log.warning(f"[{alert_account_id}] 检测到停止标记，任务提前结束。")
                         final_reason = "stopped"
-                        close_session_on_exit = False
                         break
                     if should_stop(task_cfg):
                         log.warning(f"[{alert_account_id}] 检测到停止标记，任务提前结束。")
                         final_reason = "stopped"
-                        close_session_on_exit = False
                         break
                     if owner_username and db.is_account_disabled(owner_username):
                         log.warning(f"[{alert_account_id}] 当前账号已禁用，停止任务。")
@@ -578,8 +589,28 @@ def run_single_session(
                         log.info(f"[{alert_account_id}] 当前窗口已达到发送上限。")
                         final_reason = "message_limit"
                         break
+                    page = resolve_active_runtime_page(page, scraper=scraper, sender=sender)
+                    checkpoint_url = detect_checkpoint_account_issue(
+                        page,
+                        alert_account_id,
+                        stage="切换小组前",
+                    )
+                    if checkpoint_url:
+                        show_account_restricted_alert(alert_account_id)
+                        final_reason = "account_restricted"
+                        break
 
                     if not scraper.open_group_members_page(group_url):
+                        page = resolve_active_runtime_page(page, scraper=scraper, sender=sender)
+                        checkpoint_url = detect_checkpoint_account_issue(
+                            page,
+                            alert_account_id,
+                            stage="进入小组成员页",
+                        )
+                        if checkpoint_url:
+                            show_account_restricted_alert(alert_account_id)
+                            final_reason = "account_restricted"
+                            break
                         log.warning(f"[{alert_account_id}] 进入小组成员页失败，跳过当前小组。")
                         continue
                     release_startup_gate()
@@ -603,11 +634,11 @@ def run_single_session(
                         scope_id=scope_id,
                         machine_id=machine_id,
                         owner_username=owner_username,
-                        probe_templates=probe_templates,
                         templates=formal_templates,
                         template_source=template_source,
                         task_cfg=task_cfg,
                         message_budget=remaining_budget,
+                        delivery_runtime_state=delivery_runtime_state,
                     )
                     total_sent += result["messages_sent"]
                     if result["reason"] not in {
@@ -621,7 +652,6 @@ def run_single_session(
                     if result["reason"] == "stopped":
                         log.warning(f"[{alert_account_id}] 收到停止信号，结束当前窗口。")
                         final_reason = "stopped"
-                        close_session_on_exit = False
                         break
                     if result["reason"] == "account_restricted":
                         blocked_targets = result.get("blocked_targets") or []
@@ -640,10 +670,7 @@ def run_single_session(
                         break
                     if result["reason"] in {
                         "message_request_limit_reached",
-                        "account_cannot_message",
                         "send_restricted_ui",
-                        "account_restricted_by_dialog",
-                        "send_blocked_popup",
                     }:
                         show_window_limit_alert(
                             window_token_label,
@@ -684,10 +711,8 @@ def run_single_session(
                 }
             finally:
                 release_startup_gate()
-                if close_session_on_exit:
-                    bm.close(session)
-                elif session:
-                    log.info(f"[{alert_account_id}] 停止任务仅结束系统进程，保留 BitBrowser 窗口。")
+                if session:
+                    log.info(f"[{alert_account_id}] 当前任务结束仅退出执行进程，保留 BitBrowser 窗口。")
     finally:
         db.close()
 
@@ -844,6 +869,168 @@ def build_cursor_search_result(reason, found_cursor, messages_sent, cursor, **ex
     return result
 
 
+def _safe_page_url(page):
+    if page is None:
+        return ""
+    try:
+        return str(page.url or "").strip()
+    except Exception:
+        return ""
+
+
+def _is_checkpoint_page_url(url):
+    return "facebook.com/checkpoint" in str(url or "").strip().lower()
+
+
+def _score_runtime_page_candidate(page, scraper=None, sender=None):
+    url = _safe_page_url(page)
+    if not url:
+        return -1
+    if _is_checkpoint_page_url(url):
+        return 400
+
+    owner_best_score = -1
+    for owner in (scraper, sender):
+        if owner is None:
+            continue
+        scorer = getattr(owner, "_score_runtime_page_candidate", None)
+        if not callable(scorer):
+            continue
+        try:
+            score = int(scorer(page))
+        except Exception:
+            continue
+        if score > owner_best_score:
+            owner_best_score = score
+
+    if owner_best_score >= 0:
+        return owner_best_score
+
+    for owner in (scraper, sender):
+        if owner is None:
+            continue
+        reusable = getattr(owner, "_is_reusable_facebook_url", None)
+        has_surface = getattr(owner, "_has_real_facebook_surface", None)
+        if not callable(reusable) or not callable(has_surface):
+            continue
+        try:
+            if reusable(url) and has_surface(page):
+                return 300
+        except Exception:
+            continue
+
+    lower_url = url.lower()
+    if "facebook.com" in lower_url and not lower_url.startswith("about:blank"):
+        return 120
+    if lower_url.startswith("about:blank"):
+        return 0
+    return -1
+
+
+def _collect_runtime_page_candidates(default_page=None, scraper=None, sender=None):
+    seed_pages = [
+        getattr(scraper, "page", None),
+        getattr(sender, "page", None),
+        default_page,
+    ]
+    contexts = []
+    browsers = []
+    seen_pages = set()
+    seen_contexts = set()
+    seen_browsers = set()
+    candidates = []
+
+    def remember_page(page):
+        if page is None:
+            return
+        marker = id(page)
+        if marker in seen_pages:
+            return
+        seen_pages.add(marker)
+        try:
+            if page.is_closed():
+                return
+        except Exception:
+            pass
+        url = _safe_page_url(page)
+        if not url:
+            return
+        candidates.append(page)
+        context = getattr(page, "context", None)
+        if context is None:
+            return
+        context_marker = id(context)
+        if context_marker not in seen_contexts:
+            seen_contexts.add(context_marker)
+            contexts.append(context)
+        browser = getattr(context, "browser", None)
+        if browser is None:
+            return
+        browser_marker = id(browser)
+        if browser_marker not in seen_browsers:
+            seen_browsers.add(browser_marker)
+            browsers.append(browser)
+
+    for page in seed_pages:
+        remember_page(page)
+
+    for context in list(contexts):
+        try:
+            pages = list(getattr(context, "pages", []) or [])
+        except Exception:
+            pages = []
+        for page in pages:
+            remember_page(page)
+
+    for browser in list(browsers):
+        try:
+            browser_contexts = list(getattr(browser, "contexts", []) or [])
+        except Exception:
+            browser_contexts = []
+        for context in browser_contexts:
+            context_marker = id(context)
+            if context_marker not in seen_contexts:
+                seen_contexts.add(context_marker)
+                contexts.append(context)
+            try:
+                pages = list(getattr(context, "pages", []) or [])
+            except Exception:
+                pages = []
+            for page in pages:
+                remember_page(page)
+
+    return candidates
+
+
+def resolve_active_runtime_page(default_page=None, scraper=None, sender=None):
+    candidates = _collect_runtime_page_candidates(default_page, scraper=scraper, sender=sender)
+    chosen = None
+    best_score = -1
+    fallback = None
+    for candidate in candidates:
+        url = _safe_page_url(candidate)
+        if not url:
+            continue
+        if fallback is None:
+            fallback = candidate
+        score = _score_runtime_page_candidate(candidate, scraper=scraper, sender=sender)
+        if score > best_score:
+            best_score = score
+            chosen = candidate
+    if chosen is None:
+        chosen = fallback or default_page
+    if chosen is None:
+        return default_page
+    for owner in (scraper, sender):
+        if owner is None:
+            continue
+        try:
+            owner.page = chosen
+        except Exception:
+            continue
+    return chosen
+
+
 def resolve_group_root_for_recovery(scraper, group_id):
     current_root = ""
     try:
@@ -858,6 +1045,26 @@ def resolve_group_root_for_recovery(scraper, group_id):
     return f"https://www.facebook.com/groups/{normalized_group_id}"
 
 
+def detect_checkpoint_account_issue(page, window_label="", stage=""):
+    try:
+        current_url = str(page.url or "").strip()
+    except Exception:
+        return ""
+    if "facebook.com/checkpoint" not in current_url.lower():
+        return ""
+    prefix = f"[{window_label}] " if str(window_label or "").strip() else ""
+    stage_text = f" ({stage})" if str(stage or "").strip() else ""
+    log.error(f"{prefix}检测到 Facebook checkpoint 账号异常页{stage_text}: {current_url}")
+    return current_url
+
+
+def ensure_delivery_runtime_state(runtime_state=None):
+    if isinstance(runtime_state, dict):
+        runtime_state.setdefault("delivery_not_confirmed_streak", 0)
+        return runtime_state
+    return {"delivery_not_confirmed_streak": 0}
+
+
 def process_current_group(
     scraper,
     sender,
@@ -868,12 +1075,22 @@ def process_current_group(
     scope_id,
     machine_id,
     owner_username,
-    probe_templates,
     templates,
     task_cfg,
     message_budget,
     template_source="local_messages_yaml",
+    delivery_runtime_state=None,
 ):
+    delivery_runtime_state = ensure_delivery_runtime_state(delivery_runtime_state)
+    current_page = resolve_active_runtime_page(scraper.page, scraper=scraper, sender=sender)
+    checkpoint_url = detect_checkpoint_account_issue(
+        current_page,
+        getattr(scraper, "window_label", ""),
+        stage="进入当前小组前",
+    )
+    if checkpoint_url:
+        return {"messages_sent": 0, "reason": "account_restricted"}
+
     group_id = scraper.get_current_group_id()
     if not group_id:
         log.error("未能识别当前小组 ID，跳过该小组。")
@@ -884,6 +1101,14 @@ def process_current_group(
         max_scroll_rounds=newcomers_search_rounds
     )
     if not newcomers_found:
+        current_page = resolve_active_runtime_page(scraper.page, scraper=scraper, sender=sender)
+        checkpoint_url = detect_checkpoint_account_issue(
+            current_page,
+            getattr(scraper, "window_label", ""),
+            stage="定位小组新人区块",
+        )
+        if checkpoint_url:
+            return {"messages_sent": 0, "reason": "account_restricted"}
         return {"messages_sent": 0, "reason": "newcomers_section_not_found"}
     cursor = db.get_cursor(group_id, account_id=account_id, scope_id=scope_id)
     max_scroll_rounds = task_cfg.get("scroll_times", 60)
@@ -906,7 +1131,6 @@ def process_current_group(
             machine_id=machine_id,
             group_id=group_id,
             owner_username=owner_username,
-            probe_templates=probe_templates,
             templates=templates,
             template_source=template_source,
             task_cfg=task_cfg,
@@ -917,6 +1141,7 @@ def process_current_group(
             cursor=cursor,
             skip_until_cursor=True,
             switch_recovery_cycles=0,
+            delivery_runtime_state=delivery_runtime_state,
         )
         if result["reason"] == "cursor_not_found_required":
             log.error(
@@ -936,7 +1161,6 @@ def process_current_group(
         machine_id=machine_id,
         group_id=group_id,
         owner_username=owner_username,
-        probe_templates=probe_templates,
         templates=templates,
         template_source=template_source,
         task_cfg=task_cfg,
@@ -947,6 +1171,7 @@ def process_current_group(
         cursor=None,
         skip_until_cursor=False,
         switch_recovery_cycles=0,
+        delivery_runtime_state=delivery_runtime_state,
     )
 
 
@@ -961,7 +1186,6 @@ def process_member_targets(
     machine_id,
     group_id,
     owner_username,
-    probe_templates,
     templates,
     task_cfg,
     max_scroll_rounds,
@@ -972,7 +1196,9 @@ def process_member_targets(
     skip_until_cursor=False,
     template_source="local_messages_yaml",
     switch_recovery_cycles=0,
+    delivery_runtime_state=None,
 ):
+    delivery_runtime_state = ensure_delivery_runtime_state(delivery_runtime_state)
     seen_profiles = set()
     found_cursor = not skip_until_cursor
     messages_sent = 0
@@ -989,12 +1215,8 @@ def process_member_targets(
     blocked_target_keys = set()
     silent_targets = []
     silent_target_keys = set()
-    restricted_blocked_threshold = int(
-        task_cfg.get("account_restricted_blocked_threshold", 2) or 2
-    )
-    restricted_signal_threshold = int(
-        task_cfg.get("account_restricted_signal_threshold", 5) or 5
-    )
+    delivery_probe_trigger_threshold = 3
+    delivery_probe_text = "👍"
 
     round_idx = 0
     unlimited_scroll = not max_scroll_rounds or int(max_scroll_rounds) <= 0
@@ -1002,6 +1224,26 @@ def process_member_targets(
     anchor_attempts = 0
     max_group_exhausted_recovery_cycles = 3
     max_cursor_recovery_cycles = 2
+    checkpoint_abort_result = None
+
+    def capture_checkpoint_abort(stage):
+        nonlocal checkpoint_abort_result
+        if checkpoint_abort_result:
+            return True
+        current_page = resolve_active_runtime_page(scraper.page, scraper=scraper, sender=sender)
+        checkpoint_url = detect_checkpoint_account_issue(
+            current_page,
+            getattr(scraper, "window_label", ""),
+            stage=stage,
+        )
+        if not checkpoint_url:
+            return False
+        checkpoint_abort_result = {
+            "found_cursor": found_cursor,
+            "messages_sent": messages_sent,
+            "reason": "account_restricted",
+        }
+        return True
 
     def reset_group_progress_state(restart_cursor_search=False):
         nonlocal idle_rounds, cursor_rounds, cursor_skip_count, no_scroll_rounds
@@ -1046,6 +1288,8 @@ def process_member_targets(
 
     def attempt_leave_group_recovery(trigger_reason):
         nonlocal switch_recovery_cycles
+        if capture_checkpoint_abort(f"换群前复查开始:{trigger_reason}"):
+            return False
         policy = get_switch_recovery_policy(trigger_reason)
         max_cycles = int(policy.get("max_cycles") or 0)
         if max_cycles <= 0 or switch_recovery_cycles >= max_cycles:
@@ -1067,23 +1311,47 @@ def process_member_targets(
                     f"换群前复查：第 {confirm_idx}/{len(recovery_steps)} 次先回到当前 members 视图顶部，并重新定位“小组新人”。"
                 )
                 scraper.scroll_to_top()
+                if capture_checkpoint_abort("换群前复查回到 members 顶部"):
+                    return False
             else:
                 log.info(
                     f"换群前复查：第 {confirm_idx}/{len(recovery_steps)} 次重走当前小组 members 链路，确认是否仍有可加载成员。"
                 )
                 if not scraper.open_group_members_page(group_root):
+                    if capture_checkpoint_abort("换群前复查重走 members 链路"):
+                        return False
                     continue
+                if capture_checkpoint_abort("换群前复查重走 members 链路"):
+                    return False
                 scraper.scroll_to_top()
+                if capture_checkpoint_abort("换群前复查重走后回到顶部"):
+                    return False
             if scraper.focus_newcomers_section(max_scroll_rounds=refocus_rounds):
+                if capture_checkpoint_abort("换群前复查定位小组新人"):
+                    return False
                 switch_recovery_cycles += 1
                 log.info("换群前复查恢复成功，继续留在当前小组。")
                 reset_group_progress_state(
                     restart_cursor_search=bool(skip_until_cursor and not found_cursor)
                 )
                 return True
+            if capture_checkpoint_abort("换群前复查定位小组新人"):
+                return False
         return False
 
     while unlimited_scroll or round_idx <= int(max_scroll_rounds):
+        current_page = resolve_active_runtime_page(scraper.page, scraper=scraper, sender=sender)
+        checkpoint_url = detect_checkpoint_account_issue(
+            current_page,
+            getattr(scraper, "window_label", ""),
+            stage="成员列表扫描",
+        )
+        if checkpoint_url:
+            return {
+                "found_cursor": found_cursor,
+                "messages_sent": messages_sent,
+                "reason": "account_restricted",
+            }
         if should_stop(task_cfg):
             return {
                 "found_cursor": found_cursor,
@@ -1202,6 +1470,8 @@ def process_member_targets(
                 if skip_until_cursor and not found_cursor:
                     if attempt_leave_group_recovery("cursor_not_found_required"):
                         continue
+                    if checkpoint_abort_result:
+                        return checkpoint_abort_result
                     cursor_target = describe_cursor_target(cursor)
                     log.error(
                         f"⛔ 断点搜索结束，未找到断点用户 {cursor_target}，当前规则要求必须命中断点。"
@@ -1214,6 +1484,8 @@ def process_member_targets(
                     )
                 if attempt_leave_group_recovery("group_exhausted"):
                     continue
+                if checkpoint_abort_result:
+                    return checkpoint_abort_result
                 return {
                     "found_cursor": found_cursor,
                     "messages_sent": messages_sent,
@@ -1244,6 +1516,8 @@ def process_member_targets(
                 if skip_until_cursor and not found_cursor:
                     if attempt_leave_group_recovery("cursor_not_found_required"):
                         continue
+                    if checkpoint_abort_result:
+                        return checkpoint_abort_result
                     cursor_target = describe_cursor_target(cursor)
                     log.error(
                         f"⛔ 断点搜索结束，未找到断点用户 {cursor_target}，当前规则要求必须命中断点。"
@@ -1256,6 +1530,8 @@ def process_member_targets(
                     )
                 if attempt_leave_group_recovery("group_exhausted"):
                     continue
+                if checkpoint_abort_result:
+                    return checkpoint_abort_result
                 return {
                     "found_cursor": found_cursor,
                     "messages_sent": messages_sent,
@@ -1267,6 +1543,8 @@ def process_member_targets(
                 if cursor_rounds >= cursor_search_rounds and cursor_rounds % cursor_search_rounds == 0:
                     if attempt_leave_group_recovery("cursor_not_found_required"):
                         continue
+                    if checkpoint_abort_result:
+                        return checkpoint_abort_result
                     cursor_target = describe_cursor_target(cursor)
                     log.error(
                         f"⛔ 未找到断点用户 {cursor_target}，已连续滚动 {cursor_rounds} 轮，当前规则要求必须命中断点。"
@@ -1365,16 +1643,13 @@ def process_member_targets(
                 or latest_templates != templates
             ):
                 templates = latest_templates
-                probe_templates = latest_template_resolution["probe_templates"]
                 template_source = latest_template_source
                 template_stats = latest_template_resolution["stats"]
                 log.info(
                     f"📝 文案热更新：selected={template_source}，"
                     f"local_formal={template_stats['local_formal']}，"
                     f"owner_formal={template_stats['owner_formal']}，"
-                    f"local_probe={template_stats['local_probe']}，"
-                    f"owner_probe={template_stats['owner_probe']}，"
-                    f"active={len(templates)}，probe={len(probe_templates)}"
+                    f"active={len(templates)}"
                 )
 
         template_index = random.randrange(len(templates))
@@ -1384,13 +1659,22 @@ def process_member_targets(
             f"📝 文案选取: source={template_source} "
             f"index={template_index + 1}/{len(templates)} preview={_template_log_preview(selected_template)}"
         )
-        probe_text = ""
+        delivery_not_confirmed_streak = int(
+            delivery_runtime_state.get("delivery_not_confirmed_streak") or 0
+        )
+        delivery_probe_enabled = delivery_not_confirmed_streak >= delivery_probe_trigger_threshold
+        if delivery_probe_enabled:
+            log.info(
+                f"连续 {delivery_not_confirmed_streak} 次发送未确认，当前成员启用点赞型探针验证。"
+            )
+        probe_text = delivery_probe_text if delivery_probe_enabled else ""
         result = None
         try:
             result = sender.send_member_card_dm(
                 target,
                 probe_text,
                 greeting_text,
+                enable_delivery_probe=delivery_probe_enabled,
             )
         finally:
             if not result or result.get("status") != "sent":
@@ -1401,6 +1685,19 @@ def process_member_targets(
                     user_id=target.get("user_id"),
                     scope_id=scope_id,
                 )
+
+        current_page = resolve_active_runtime_page(scraper.page, scraper=scraper, sender=sender)
+        checkpoint_url = detect_checkpoint_account_issue(
+            current_page,
+            getattr(scraper, "window_label", ""),
+            stage=f"成员 {target.get('name') or 'unknown'} 发送后",
+        )
+        if checkpoint_url:
+            return {
+                "found_cursor": found_cursor,
+                "messages_sent": messages_sent,
+                "reason": "account_restricted",
+            }
 
         if result["status"] == "sent":
             _record_delivery_result(
@@ -1414,6 +1711,7 @@ def process_member_targets(
                 scope_id=scope_id,
             )
             messages_sent += 1
+            delivery_runtime_state["delivery_not_confirmed_streak"] = 0
             db.save_cursor(group_id, target, account_id=account_id, scope_id=scope_id)
             if reached_message_limit(message_budget, messages_sent):
                 return {
@@ -1439,6 +1737,16 @@ def process_member_targets(
             silent_targets.clear()
             silent_target_keys.clear()
         elif result["status"] == "skip":
+            if result.get("reason") == "delivery_probe_sent":
+                delivery_runtime_state["delivery_not_confirmed_streak"] = 0
+                silent_targets.clear()
+                silent_target_keys.clear()
+                log.info(
+                    f"点赞型探针发送成功，静默失败计数已清零，继续正常发送: {target['name']}"
+                )
+                ui_settle_sleep(task_cfg)
+                continue
+            delivery_runtime_state["delivery_not_confirmed_streak"] = 0
             log.info(f"跳过成员 {target['name']}: {result['reason']}")
             if should_advance_cursor_for_skip(result.get("reason")):
                 db.save_cursor(group_id, target, account_id=account_id, scope_id=scope_id)
@@ -1461,10 +1769,7 @@ def process_member_targets(
             reason = result.get("reason") or "account_restricted"
             window_block_reasons = {
                 "message_request_limit_reached",
-                "account_cannot_message",
                 "send_restricted_ui",
-                "account_restricted_by_dialog",
-                "send_blocked_popup",
             }
             if reason in window_block_reasons:
                 log.warning(
@@ -1516,6 +1821,8 @@ def process_member_targets(
                 "alert_text": result.get("alert_text"),
             }
         else:
+            if result["reason"] != "delivery_not_confirmed":
+                delivery_runtime_state["delivery_not_confirmed_streak"] = 0
             _record_delivery_result(
                 db=db,
                 config=config,
@@ -1543,18 +1850,22 @@ def process_member_targets(
                             "profile_url": profile_url,
                         }
                     )
-                log.warning(
-                    f"检测到静默失败信号: {target['name']} "
-                    f"(signals={len(blocked_targets) + len(silent_targets)}/{restricted_signal_threshold})"
+                delivery_runtime_state["delivery_not_confirmed_streak"] = (
+                    int(delivery_runtime_state.get("delivery_not_confirmed_streak") or 0) + 1
                 )
-                if len(blocked_targets) + len(silent_targets) >= restricted_signal_threshold:
-                    return {
-                        "found_cursor": found_cursor,
-                        "messages_sent": messages_sent,
-                        "reason": "account_restricted",
-                        "blocked_targets": blocked_targets,
-                        "silent_targets": silent_targets,
-                    }
+                delivery_not_confirmed_streak = int(
+                    delivery_runtime_state.get("delivery_not_confirmed_streak") or 0
+                )
+                if delivery_probe_enabled:
+                    log.warning(
+                        f"点赞型探针未恢复窗口健康，继续保留静默失败计数: "
+                        f"{target['name']} (streak={delivery_not_confirmed_streak})"
+                    )
+                else:
+                    log.warning(
+                        f"检测到静默失败信号: {target['name']} "
+                        f"(streak={delivery_not_confirmed_streak}/{delivery_probe_trigger_threshold})"
+                    )
 
     if skip_until_cursor and not found_cursor:
         if attempt_leave_group_recovery("cursor_not_found_required"):
@@ -1569,7 +1880,6 @@ def process_member_targets(
                 machine_id=machine_id,
                 group_id=group_id,
                 owner_username=owner_username,
-                probe_templates=probe_templates,
                 templates=templates,
                 task_cfg=task_cfg,
                 max_scroll_rounds=max_scroll_rounds,
@@ -1580,7 +1890,10 @@ def process_member_targets(
                 skip_until_cursor=skip_until_cursor,
                 template_source=template_source,
                 switch_recovery_cycles=switch_recovery_cycles,
+                delivery_runtime_state=delivery_runtime_state,
             )
+        if checkpoint_abort_result:
+            return checkpoint_abort_result
         cursor_target = describe_cursor_target(cursor)
         log.error(
             f"⛔ 扫描达到滚动上限后仍未找到断点用户 {cursor_target}，当前规则要求必须命中断点。"
@@ -1606,7 +1919,6 @@ def process_member_targets(
                 machine_id=machine_id,
                 group_id=group_id,
                 owner_username=owner_username,
-                probe_templates=probe_templates,
                 templates=templates,
                 task_cfg=task_cfg,
                 max_scroll_rounds=max_scroll_rounds,
@@ -1617,7 +1929,10 @@ def process_member_targets(
                 skip_until_cursor=skip_until_cursor,
                 template_source=template_source,
                 switch_recovery_cycles=switch_recovery_cycles,
+                delivery_runtime_state=delivery_runtime_state,
             )
+        if checkpoint_abort_result:
+            return checkpoint_abort_result
 
     return {
         "found_cursor": found_cursor,
@@ -1738,6 +2053,7 @@ def should_advance_cursor_for_skip(reason):
         "follow_only",
         "friend_required",
         "invite_only",
+        "account_cannot_message",
         "messenger_login_required",
     }
     return str(reason or "").strip() in permanent_reasons
@@ -2006,7 +2322,7 @@ def show_window_limit_alert(window_token, reason, detail_text=None):
 
 def show_account_restricted_alert(account_id, blocked_targets=None, silent_targets=None):
     window_label = format_window_notice_label(account_id)
-    message = f"温馨提示：{window_label}Facebook账号疑似风控，请更换新的账户。"
+    message = f"温馨提示：{window_label}账号异常，请进行更换。"
     log.error(message.replace("\n", " | "))
     show_desktop_alert("温馨提示", message, critical=True)
 

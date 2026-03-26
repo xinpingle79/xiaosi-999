@@ -1,44 +1,94 @@
 import os
 import time
+from urllib.parse import urlsplit
 
 from core.scraper import Scraper
 from utils.helpers import run_pause_aware_action, wait_if_runtime_paused
 from utils.logger import log
 
 
+ARIA_LABEL_SELECTOR_BASES = (
+    "button",
+    'div[role="button"]',
+    "div",
+    'span[role="button"]',
+    "span",
+)
+
+
+def _build_aria_label_selectors(labels):
+    selectors = []
+    seen = set()
+    for label in labels:
+        safe_label = str(label or "").replace('"', '\\"')
+        if not safe_label:
+            continue
+        for base in ARIA_LABEL_SELECTOR_BASES:
+            selector = f'{base}[aria-label="{safe_label}"]'
+            if selector in seen:
+                continue
+            seen.add(selector)
+            selectors.append(selector)
+    return selectors
+
+
 class Messager:
     ENV_PAUSE_FLAG = "FB_RPA_PAUSE_FLAG"
-    CHAT_CLOSE_SELECTORS = [
-        'button[aria-label="ปิดแชท"]',
-        'button[aria-label="关闭聊天窗口"]',
-        'button[aria-label="关闭聊天"]',
-        'button[aria-label="Close chat window"]',
-        'button[aria-label="Close chat"]',
-        'div[aria-label="ปิดแชท"]',
-        'div[aria-label="关闭聊天窗口"]',
-        'div[aria-label="关闭聊天"]',
-        'div[aria-label="Close chat window"]',
-        'div[aria-label="Close chat"]',
-        'div[role="button"][aria-label="ปิดแชท"]',
-        'div[role="button"][aria-label="关闭聊天窗口"]',
-        'div[role="button"][aria-label="关闭聊天"]',
-        'div[role="button"][aria-label="Close chat window"]',
-        'div[role="button"][aria-label="Close chat"]',
-    ]
-    MEMBER_CARD_CLOSE_SELECTORS = [
-        'button[aria-label="关闭个人资料"]',
-        'button[aria-label="Close profile"]',
-        'div[role="button"][aria-label="关闭个人资料"]',
-        'div[role="button"][aria-label="Close profile"]',
-        'button[aria-label="关闭"]',
-        'button[aria-label="Close"]',
-        'div[role="button"][aria-label="关闭"]',
-        'div[role="button"][aria-label="Close"]',
-        'div[aria-label="关闭"]',
-        'div[aria-label="Close"]',
-        'span[aria-label="关闭"]',
-        'span[aria-label="Close"]',
-    ]
+    GENERIC_CLOSE_LABELS = (
+        "关闭",
+        "關閉",
+        "Close",
+        "Fermer",
+        "Cerrar",
+        "Schließen",
+        "Chiudi",
+        "Fechar",
+        "Đóng",
+        "ปิด",
+        "Закрыть",
+        "Zamknij",
+        "Kapat",
+        "إغلاق",
+        "বন্ধ করুন",
+        "बंद करें",
+        "閉じる",
+        "닫기",
+        "Tutup",
+    )
+    CHAT_CLOSE_LABELS = (
+        "ปิดแชท",
+        "关闭聊天窗口",
+        "关闭聊天",
+        "關閉聊天視窗",
+        "關閉聊天",
+        "Close chat window",
+        "Close chat",
+        "Cerrar chat",
+        "Fechar chat",
+        "Fermer le chat",
+        "Fermer la discussion",
+        "Chat schließen",
+        "Chiudi la chat",
+        "Đóng đoạn chat",
+        "Đóng cuộc trò chuyện",
+        "Tutup chat",
+        "Tutup obrolan",
+        "Закрыть чат",
+        "Zamknij czat",
+        "Sohbeti kapat",
+        "إغلاق الدردشة",
+        "チャットを閉じる",
+        "채팅 닫기",
+    )
+    CHAT_CLOSE_SELECTORS = _build_aria_label_selectors(CHAT_CLOSE_LABELS)
+    MEMBER_CARD_CLOSE_LABELS = (
+        "关闭个人资料",
+        "關閉個人資料",
+        "关闭资料卡",
+        "關閉資料卡",
+        "Close profile",
+    ) + GENERIC_CLOSE_LABELS
+    MEMBER_CARD_CLOSE_SELECTORS = _build_aria_label_selectors(MEMBER_CARD_CLOSE_LABELS)
     ACTION_ELEMENT_SELECTOR = 'button, a, [role="button"], [aria-label]'
     MEMBER_CARD_MESSAGE_TEXTS = [
         "发消息",
@@ -100,6 +150,68 @@ class Messager:
         "বার্তা",
         "मैसेज",
     ]
+    MESSAGE_HEADING_HINT_TOKENS = tuple(
+        dict.fromkeys(tuple(MEMBER_CARD_MESSAGE_TEXTS) + tuple(MEMBER_CARD_MESSAGE_HINT_KEYWORDS))
+    )
+    CHAT_MINIMIZE_TEXTS = (
+        "最小化聊天窗口",
+        "最小化聊天",
+        "Minimize chat window",
+        "Minimize chat",
+        "ย่อหน้าต่างแชท",
+        "Thu nhỏ cửa sổ chat",
+        "Minimalkan chat",
+        "Minimizekan sembang",
+        "Minimiser le chat",
+        "Minimizar chat",
+    )
+    CHAT_REACTION_CONTROL_TEXTS = (
+        "发个赞",
+        "發個讚",
+        "点赞",
+        "按讚",
+        "Like",
+        "Send a like",
+        "Me gusta",
+        "Curtir",
+        "J’aime",
+        "Gefällt mir",
+        "Mi piace",
+        "ถูกใจ",
+        "Thích",
+        "Suka",
+        "Polub",
+        "Beğen",
+        "أعجبني",
+        "いいね",
+        "좋아요",
+    )
+    CHAT_COMPOSER_CONTROL_TEXTS = (
+        "信息",
+        "發送語音留言",
+        "发送语音留言",
+        "附加不超过25MB 的文件",
+        "附加不超過25MB 的檔案",
+        "选择贴图",
+        "選擇貼圖",
+        "选择动图",
+        "選擇動圖",
+        "选择表情",
+        "選擇表情",
+        "Attach files",
+        "Sticker",
+        "GIF",
+        "Emoji",
+    )
+    CHAT_IGNORED_CONTROL_TEXTS = tuple(
+        dict.fromkeys(
+            tuple(MEMBER_CARD_MESSAGE_TEXTS)
+            + CHAT_COMPOSER_CONTROL_TEXTS
+            + CHAT_REACTION_CONTROL_TEXTS
+            + CHAT_CLOSE_LABELS
+            + CHAT_MINIMIZE_TEXTS
+        )
+    )
     MESSAGE_EDITOR_SELECTORS = [
         'div[role="textbox"][aria-label="发消息"]',
         'div[role="textbox"][aria-label="发送消息"]',
@@ -171,6 +283,10 @@ class Messager:
         "You’ve reached the message request limit",
         "There's a limit to how many requests you can send in 24 hours",
         "There’s a limit to how many requests you can send in 24 hours",
+        "You've reached the limit for message requests",
+        "You’ve reached the limit for message requests",
+        "You can only send a limited number of message requests in 24 hours",
+        "You can only send a limited number of requests in 24 hours",
         "你已达到消息请求发送上限",
         "你已達到訊息請求發送上限",
         "Has alcanzado el límite de solicitudes de mensajes",
@@ -178,23 +294,36 @@ class Messager:
         "Vous avez atteint la limite des demandes de message",
         "Bạn đã đạt giới hạn yêu cầu nhắn tin",
         "คุณถึงขีดจำกัดคำขอข้อความแล้ว",
+        "คุณส่งคำขอส่งข้อความถึงขีดจำกัดแล้ว",
+        "คุณสามารถส่งคำขอได้อย่างจำกัดจำนวนครั้งในรอบ 24 ชั่วโมง",
+        "คุณสามารถส่งคำขอได้อย่างจำกัดจำนวนครั้ง ในรอบ 24 ชั่วโมง",
+        "ส่งคำขอได้อย่างจำกัดจำนวนครั้งในรอบ 24 ชั่วโมง",
+        "ส่งคำขอได้อย่างจำกัดจำนวนครั้ง ในรอบ 24 ชั่วโมง",
     ]
     ACCOUNT_CANNOT_MESSAGE_TEXTS = [
         "You can't message this account right now",
         "You can’t message this account right now",
+        "You can't message this account",
+        "You can’t message this account",
         "You can't send messages to this account right now",
         "You can’t send messages to this account right now",
+        "You can't send messages to this account",
+        "You can’t send messages to this account",
         "You can't send a message to this account right now",
         "You can’t send a message to this account right now",
         "当前无法向此用户发送消息",
         "当前无法向此帳號发送消息",
         "当前无法向此账号发送消息",
+        "无法向此帐户发送消息",
+        "无法向此账户发送消息",
         "您无法向此帐户发送消息",
         "您无法向此账户发送消息",
         "您無法向此帳戶傳送訊息",
         "您無法向此帳號傳送訊息",
         "你无法向此帐户发送消息",
         "你无法向此账户发送消息",
+        "無法向此帳戶傳送訊息",
+        "無法向此帳號傳送訊息",
         "你無法向此帳戶傳送訊息",
         "你無法向此帳號傳送訊息",
         "現在無法向此帳戶傳送訊息",
@@ -204,6 +333,7 @@ class Messager:
         "Vous ne pouvez pas envoyer de message à ce compte pour le moment",
         "Bạn không thể nhắn tin cho tài khoản này ngay lúc này",
         "ขณะนี้คุณไม่สามารถส่งข้อความถึงบัญชีนี้ได้",
+        "คุณไม่สามารถส่งข้อความถึงบัญชีนี้",
     ]
     MESSENGER_LOGIN_REQUIRED_TEXTS = [
         "你可以在对方下次登录 Messenger 时发送消息",
@@ -266,8 +396,7 @@ class Messager:
         "คุณถึงขีดจำกัดข้อความถึงคนแปลกหน้าแล้ว",
     ]
     POPUP_CLOSE_LABELS = [
-        "关闭",
-        "Close",
+        *GENERIC_CLOSE_LABELS,
         "Confirm",
         "确认",
         "確認",
@@ -275,9 +404,6 @@ class Messager:
         "確定",
         "关闭个人资料",
         "Close profile",
-        "关闭聊天窗口",
-        "Close chat window",
-        "Close chat",
         "Discard",
         "Leave",
         "Leave chat",
@@ -298,17 +424,9 @@ class Messager:
         "Dismiss",
         "Got it",
         "Understood",
-        "Fermer",
-        "Cerrar",
-        "Schließen",
-        "Chiudi",
-        "Fechar",
-        "Đóng",
-        "ปิด",
         "知道了",
         "我知道了",
         "OK",
-        "确定",
     ]
     STRANGER_LIMIT_ALERT_TEXT = "你的陌生消息已达数量上限\n24 小时内可发送的陌生消息数量有上限。"
     MESSAGE_REQUEST_LIMIT_ALERT_TEXT = (
@@ -401,7 +519,8 @@ class Messager:
         self.delivery_confirm_timeout_ms = int(
             task_cfg.get("delivery_confirm_timeout_ms", 2600) or 2600
         )
-        self.delivery_recheck_timeout_ms = self.delivery_confirm_timeout_ms
+        self.delivery_recheck_timeout_ms = max(self.delivery_confirm_timeout_ms, 4200)
+        self.delivery_probe_trigger_timeout_ms = 3000
         self.delivery_settle_ms = int(
             task_cfg.get("delivery_settle_ms", 900) or 900
         )
@@ -424,15 +543,47 @@ class Messager:
     def _prefix(self):
         return f"[{self.window_label}] " if self.window_label else ""
 
+    def _safe_page_url(self, page=None):
+        target_page = page or self.page
+        if target_page is None:
+            return ""
+        try:
+            return str(target_page.url or "").strip()
+        except Exception:
+            return ""
+
     def _is_reusable_facebook_url(self, url):
         return Scraper._is_reusable_facebook_url(self, url)
+
+    def _is_checkpoint_surface(self, url):
+        return Scraper._is_checkpoint_surface(self, url)
 
     def _has_real_facebook_surface(self, page=None):
         return Scraper._has_real_facebook_surface(self, page)
 
+    def _score_runtime_page_candidate(self, page):
+        url = self._safe_page_url(page)
+        if not url:
+            return -1
+        lower_url = url.lower()
+        if lower_url.startswith("chrome://"):
+            return -1
+        if self._is_checkpoint_surface(url):
+            return 400
+        if self._is_reusable_facebook_url(url) and self._has_real_facebook_surface(page):
+            return 300
+        if "facebook.com" in lower_url and not lower_url.startswith("about:blank"):
+            return 120
+        if lower_url.startswith("about:blank"):
+            return 0
+        return -1
+
     def _adopt_existing_facebook_page(self):
         try:
-            if self._is_reusable_facebook_url(self.page.url) and self._has_real_facebook_surface(self.page):
+            current_url = self._safe_page_url(self.page)
+            if self._is_checkpoint_surface(current_url):
+                return True
+            if self._is_reusable_facebook_url(current_url) and self._has_real_facebook_surface(self.page):
                 return True
             candidate_pages = []
             try:
@@ -448,6 +599,8 @@ class Messager:
                 pass
 
             seen = set()
+            best_page = None
+            best_score = -1
             for candidate in candidate_pages:
                 marker = id(candidate)
                 if marker in seen:
@@ -457,16 +610,20 @@ class Messager:
                     continue
                 if candidate is self.page:
                     continue
-                if not self._is_reusable_facebook_url(candidate.url):
-                    continue
-                if not self._has_real_facebook_surface(candidate):
-                    continue
-                self.page = candidate
+                score = self._score_runtime_page_candidate(candidate)
+                if score > best_score:
+                    best_score = score
+                    best_page = candidate
+            if best_page is not None:
+                self.page = best_page
                 try:
                     self.page.bring_to_front()
                 except Exception:
                     pass
-                log.info(f"{self._prefix()}发送链已切换到真实 Facebook 页面: {self.page.url}")
+                if self._is_checkpoint_surface(self._safe_page_url(self.page)):
+                    log.warning(f"{self._prefix()}发送链已切换到 Facebook checkpoint 页面: {self.page.url}")
+                else:
+                    log.info(f"{self._prefix()}发送链已切换到真实 Facebook 页面: {self.page.url}")
                 return True
         except Exception:
             return False
@@ -647,11 +804,18 @@ class Messager:
                 "has_popup_closer": False,
             }
 
-    def send_member_card_dm(self, target, probe_text, greeting_text):
+    def send_member_card_dm(self, target, probe_text, greeting_text, enable_delivery_probe=False):
         name = target.get("name") or ""
         user_id = target.get("user_id") or ""
         try:
             self._adopt_existing_facebook_page()
+            if self._is_checkpoint_surface(self._safe_page_url(self.page)):
+                log.warning(f"{self._prefix()}发送链起始即命中 Facebook checkpoint，停止当前窗口: {name}")
+                return {
+                    "status": "blocked",
+                    "reason": "account_restricted",
+                    "alert_text": "当前账号命中 Facebook checkpoint，请更换账户。",
+                }
             self._wait_if_paused()
             log.info(f"💬 正在处理成员卡片: {name} ({user_id})")
             cleanup_state = self._inspect_surface_cleanup_state()
@@ -769,6 +933,20 @@ class Messager:
                     button.evaluate("el => el.click()")
                     log.info(f"{self._prefix()}发消息按钮点击成功(JS): {name}")
                 except Exception:
+                    click_failure = self._detect_prechat_restriction_result(
+                        name,
+                        stage="发消息按钮点击失败前复核",
+                    )
+                    if click_failure:
+                        log.warning(click_failure["log"])
+                        self._dismiss_interfering_popups(context=f"成员 {name} 限制对话框收尾")
+                        self._close_visible_chat_windows()
+                        self._dismiss_member_hover_card()
+                        return {
+                            "status": click_failure["status"],
+                            "reason": click_failure["reason"],
+                            "alert_text": click_failure["alert_text"],
+                        }
                     log.warning(f"发消息按钮点击失败，跳过: {name}")
                     self._dismiss_member_hover_card()
                     return {"status": "error", "reason": "message_button_click_failed"}
@@ -779,14 +957,23 @@ class Messager:
                 timeout_ms=min(self.chat_session_wait_timeout_ms, 3600),
             )
             if not chat_session:
-                restriction = self._detect_chat_restriction(expected_name=name)
-                if restriction:
-                    log.warning(f"聊天窗口限制提示命中: {name} ({restriction['reason']})")
-                    self._dismiss_interfering_popups(context=f"成员 {name} 限制对话框收尾")
-                    self._close_visible_chat_windows()
-                    self._dismiss_member_hover_card()
-                    self._log_limit_dialog_page_state(name)
-                    return restriction
+                chat_shell = self._locate_chat_shell(expected_name=name) or self._locate_chat_shell()
+                if chat_shell:
+                    chat_session = self._wait_for_chat_session(
+                        expected_name=name,
+                        timeout_ms=min(self.chat_session_wait_timeout_ms, 1800),
+                    )
+                    if chat_session:
+                        log.info(f"{self._prefix()}检测到聊天壳层已出现，补充等待后聊天窗口恢复可用: {name}")
+                if not chat_session:
+                    restriction = self._detect_chat_restriction(expected_name=name)
+                    if restriction:
+                        log.warning(f"聊天窗口限制提示命中: {name} ({restriction['reason']})")
+                        self._dismiss_interfering_popups(context=f"成员 {name} 限制对话框收尾")
+                        self._close_visible_chat_windows()
+                        self._dismiss_member_hover_card()
+                        self._log_limit_dialog_page_state(name)
+                        return restriction
                 closed_popups = self._dismiss_interfering_popups(context=f"成员 {name} 聊天窗口未打开")
                 if closed_popups:
                     chat_session = self._wait_for_chat_session(
@@ -796,11 +983,46 @@ class Messager:
                     if chat_session:
                         log.info(f"{self._prefix()}关闭干扰弹层后，聊天窗口恢复可用: {name}")
                 if not chat_session:
+                    restriction = self._detect_chat_restriction(expected_name=name)
+                    if restriction:
+                        log.warning(f"聊天窗口二次复核命中限制提示: {name} ({restriction['reason']})")
+                        self._dismiss_interfering_popups(context=f"成员 {name} 限制对话框收尾")
+                        self._close_visible_chat_windows()
+                        self._dismiss_member_hover_card()
+                        self._log_limit_dialog_page_state(name)
+                        return restriction
+                if not chat_session:
                     overlay = self._detect_blocking_overlay()
                     if overlay:
+                        overlay_restriction = self._build_restriction_result(
+                            self._match_restriction_reason_from_text(overlay.get("text") or ""),
+                            overlay.get("text") or "",
+                        )
+                        if overlay_restriction:
+                            log.warning(
+                                f"{self._prefix()}聊天窗口被限制弹层阻断，升级为窗口级限制: "
+                                f"{name} ({overlay_restriction['reason']})"
+                            )
+                            self._dismiss_interfering_popups(context=f"成员 {name} 限制对话框收尾")
+                            self._close_visible_chat_windows()
+                            self._dismiss_member_hover_card()
+                            self._log_limit_dialog_page_state(name)
+                            return overlay_restriction
                         self._dismiss_interfering_popups(context=f"成员 {name} 聊天窗口被弹层阻断")
                         self._close_visible_chat_windows()
                         self._dismiss_member_hover_card()
+                        final_restriction = self._detect_prechat_restriction_result(
+                            name,
+                            stage="聊天窗口被弹层阻断后最终复核",
+                        )
+                        if final_restriction:
+                            log.warning(final_restriction["log"])
+                            self._log_limit_dialog_page_state(name)
+                            return {
+                                "status": final_restriction["status"],
+                                "reason": final_restriction["reason"],
+                                "alert_text": final_restriction["alert_text"],
+                            }
                         log.warning(
                             f"{self._prefix()}聊天窗口被干扰弹层阻断，跳过: {name} ({overlay.get('text') or 'popup'})"
                         )
@@ -812,10 +1034,89 @@ class Messager:
                         "reason": "stranger_message_limit_reached",
                         "alert_text": self.STRANGER_LIMIT_ALERT_TEXT,
                     }
-                self._close_visible_chat_windows()
-                self._dismiss_member_hover_card()
-                log.warning(f"{self._prefix()}聊天窗口未正常打开，跳过: {name}")
-                return {"status": "error", "reason": "chat_editor_not_found"}
+                final_restriction = self._detect_prechat_restriction_result(
+                    name,
+                    stage="聊天窗口未打开前最终复核",
+                )
+                if final_restriction:
+                    log.warning(final_restriction["log"])
+                    self._log_limit_dialog_page_state(name)
+                    return {
+                        "status": final_restriction["status"],
+                        "reason": final_restriction["reason"],
+                        "alert_text": final_restriction["alert_text"],
+                    }
+                postclick_hover_card = self._find_hover_card_container(link)
+                postclick_gate_reason = self._detect_profile_message_gate(
+                    link,
+                    hover_card=postclick_hover_card,
+                    hard_only=False,
+                )
+                if postclick_gate_reason:
+                    gate_failure = self._classify_message_button_failure(
+                        link,
+                        name,
+                        hover_card=postclick_hover_card,
+                        hard_only=False,
+                    )
+                    if gate_failure and gate_failure.get("reason") == postclick_gate_reason:
+                        log.warning(
+                            f"{self._prefix()}聊天窗口未打开后复核资料卡命中限制: "
+                            f"{name} ({gate_failure['reason']})"
+                        )
+                        self._dismiss_member_hover_card()
+                        result = {
+                            "status": gate_failure.get("status", "skip"),
+                            "reason": gate_failure["reason"],
+                        }
+                        if gate_failure.get("alert_text"):
+                            result["alert_text"] = gate_failure["alert_text"]
+                        return result
+                closed_chats = self._close_visible_chat_windows()
+                if closed_chats > 0:
+                    retry_button = None
+                    try:
+                        if button.is_visible(timeout=self._scale_ms(220, min_ms=100)):
+                            retry_button = button
+                    except Exception:
+                        retry_button = None
+                    if retry_button is None:
+                        retry_link = self._find_member_link(target)
+                        if retry_link:
+                            retry_button, retry_failure = self._resolve_member_card_message_button(retry_link, name)
+                            if retry_failure:
+                                log.info(retry_failure["log"])
+                                self._dismiss_member_hover_card()
+                                retry_result = {
+                                    "status": retry_failure.get("status", "skip"),
+                                    "reason": retry_failure["reason"],
+                                }
+                                if retry_failure.get("alert_text"):
+                                    retry_result["alert_text"] = retry_failure["alert_text"]
+                                return retry_result
+                    if retry_button is not None:
+                        try:
+                            self._run_pause_aware_action(
+                                lambda step_timeout: retry_button.click(timeout=step_timeout),
+                                timeout_ms=action_timeout,
+                            )
+                        except Exception:
+                            try:
+                                retry_button.evaluate("el => el.click()")
+                            except Exception:
+                                retry_button = None
+                        if retry_button is not None:
+                            chat_session = self._wait_for_chat_session(
+                                expected_name=name,
+                                timeout_ms=min(self.chat_session_wait_timeout_ms, 1800),
+                            )
+                            if chat_session:
+                                log.info(f"{self._prefix()}关闭残留聊天窗后，按原链重试恢复成功: {name}")
+                
+                if not chat_session:
+                    self._dismiss_member_hover_card()
+                    log.warning(f"{self._prefix()}聊天窗口未正常打开，跳过: {name}")
+                    return {"status": "error", "reason": "chat_editor_not_found"}
 
             delivery_state = "timeout"
             cleanup_result = {"closed_chat": 0, "closed_card": 0}
@@ -847,10 +1148,16 @@ class Messager:
                 if not primary_text:
                     return {"status": "error", "reason": "empty_message"}
 
+                primary_delivery_timeout_ms = (
+                    self.delivery_probe_trigger_timeout_ms
+                    if enable_delivery_probe and self._normalize_text(probe_text)
+                    else None
+                )
                 delivery_state, rebound_session = self._paste_and_send(
                     chat_session["editor"],
                     primary_text,
                     expected_name=name,
+                    total_timeout_ms=primary_delivery_timeout_ms,
                 )
                 if rebound_session:
                     chat_session = rebound_session
@@ -876,26 +1183,19 @@ class Messager:
                     }
 
                 if delivery_state == "account_cannot_message":
-                    log.warning(f"聊天窗明确提示当前账号无法继续联系用户: {name}")
+                    log.info(f"聊天窗明确提示当前无法私聊该成员，直接跳过: {name}")
                     return {
-                        "status": "blocked",
+                        "status": "skip",
                         "reason": "account_cannot_message",
-                        "alert_text": "当前账号已被限制继续向该类用户发起消息。",
+                        "alert_text": "当前无法向该成员发起私聊，已直接跳过。",
                     }
 
-                if delivery_state in ("failed", "send_failed_ui"):
-                    log.warning(f"聊天窗明确提示发送失败，保留当前目标待后续重试: {name}")
-                    return {
-                        "status": "error",
-                        "reason": "send_failed_ui",
-                    }
-
-                if delivery_state == "send_restricted_ui":
-                    log.warning(f"聊天窗明确提示无法发送: {name}")
+                if delivery_state in ("failed", "send_restricted_ui"):
+                    log.warning(f"聊天窗明确提示发送失败，接入既有停窗提醒链: {name}")
                     return {
                         "status": "blocked",
                         "reason": "send_restricted_ui",
-                        "alert_text": "当前窗口已被系统限制继续发送消息，请更换账户。",
+                        "alert_text": "聊天窗口明确提示发送失败，当前窗口停止继续发送，请更换账户。",
                     }
 
                 if delivery_state == "sent":
@@ -903,7 +1203,54 @@ class Messager:
                     return {"status": "sent"}
 
                 if delivery_state == "timeout":
-                    log.warning(f"发送消息确认超时，当前不再执行点赞探针: {name}")
+                    if enable_delivery_probe and self._normalize_text(probe_text):
+                        log.info(f"{self._prefix()}正文未确认，开始发送点赞型探针: {name}")
+                        probe_state, probe_session = self._run_delivery_probe(
+                            chat_session,
+                            probe_text,
+                            expected_name=name,
+                        )
+                        if probe_session:
+                            chat_session = probe_session
+
+                        if probe_state == "sent":
+                            log.success(f"{self._prefix()}点赞型探针发送成功，当前窗口恢复正常: {name}")
+                            return {"status": "skip", "reason": "delivery_probe_sent"}
+
+                        if probe_state == "limit_reached":
+                            log.warning(f"点赞型探针命中陌生消息数量上限: {name}")
+                            return {
+                                "status": "limit",
+                                "reason": "stranger_message_limit_reached",
+                                "alert_text": self.STRANGER_LIMIT_ALERT_TEXT,
+                            }
+
+                        if probe_state == "message_request_limit_reached":
+                            log.warning(f"点赞型探针命中消息请求发送上限: {name}")
+                            return {
+                                "status": "blocked",
+                                "reason": "message_request_limit_reached",
+                                "alert_text": self.MESSAGE_REQUEST_LIMIT_ALERT_TEXT,
+                            }
+
+                        if probe_state == "account_cannot_message":
+                            log.info(f"点赞型探针明确提示当前无法私聊该成员，直接跳过: {name}")
+                            return {
+                                "status": "skip",
+                                "reason": "account_cannot_message",
+                                "alert_text": "当前无法向该成员发起私聊，已直接跳过。",
+                            }
+
+                        if probe_state in ("failed", "send_restricted_ui"):
+                            log.warning(f"点赞型探针明确提示无法发送，接入既有停窗提醒链: {name}")
+                            return {
+                                "status": "blocked",
+                                "reason": "send_restricted_ui",
+                                "alert_text": "聊天窗口明确提示发送失败，当前窗口停止继续发送，请更换账户。",
+                            }
+
+                        log.warning(f"{self._prefix()}点赞型探针未确认成功，保留静默失败计数: {name}")
+                    log.warning(f"发送消息在两轮确认后仍未命中，当前按未确认处理: {name}")
                     return {"status": "error", "reason": "delivery_not_confirmed"}
 
                 log.warning(f"发送状态未确认，不写入历史，等待下次重试: {name}")
@@ -936,10 +1283,56 @@ class Messager:
             log.error(f"⚠️ 成员页发送流程中断: {exc}")
             return {"status": "error", "reason": repr(exc)}
 
+    def _run_delivery_probe(self, chat_session, probe_text, expected_name=None):
+        normalized_probe = self._normalize_text(probe_text)
+        if not normalized_probe:
+            return "timeout", chat_session
+
+        probe_session = None
+        if chat_session and not self._chat_editor_gone(chat_session.get("editor")):
+            probe_session = chat_session
+        if not probe_session:
+            probe_session = self._locate_chat_session(expected_name=expected_name)
+        if not probe_session:
+            probe_session = self._wait_for_chat_session(
+                expected_name=expected_name,
+                timeout_ms=min(self.chat_session_wait_timeout_ms, 2200),
+            )
+        if not probe_session:
+            restriction = self._detect_chat_restriction(expected_name=expected_name)
+            mapped_restriction = self._map_restriction_to_delivery_state(restriction)
+            return mapped_restriction or "timeout", None
+
+        probe_editor = probe_session.get("editor")
+        if not probe_editor:
+            return "timeout", probe_session
+
+        if not self._wait_for_editor_ready(
+            probe_editor,
+            timeout_ms=min(self.editor_ready_wait_timeout_ms, 1800),
+        ):
+            restriction = self._detect_chat_restriction(expected_name=expected_name)
+            mapped_restriction = self._map_restriction_to_delivery_state(restriction)
+            return mapped_restriction or "timeout", probe_session
+
+        probe_state, rebound_session = self._paste_and_send(
+            probe_editor,
+            normalized_probe,
+            expected_name=expected_name,
+        )
+        return probe_state, rebound_session or probe_session
+
     def _paste_text_into_editor(self, editor, text):
         normalized_text = self._normalize_text(text)
         if not normalized_text:
             return False
+        is_macos = (
+            os.name != "nt"
+            and getattr(os, "uname", None) is not None
+            and os.uname().sysname == "Darwin"
+        )
+        select_all_shortcut = "Meta+A" if is_macos else "Control+A"
+        paste_shortcut = "Meta+V" if is_macos else "Control+V"
         try:
             self._run_pause_aware_action(
                 lambda step_timeout: editor.click(timeout=step_timeout),
@@ -951,7 +1344,7 @@ class Messager:
         try:
             self._run_pause_aware_action(
                 lambda step_timeout: editor.press(
-                    "Meta+A" if os.name != "nt" and os.uname().sysname == "Darwin" else "Control+A",
+                    select_all_shortcut,
                     timeout=step_timeout,
                 ),
                 timeout_ms=self._scale_ms(600, min_ms=240),
@@ -964,79 +1357,90 @@ class Messager:
                 slice_ms=180,
             )
         except Exception:
+            pass
+        self._sleep(0.04, min_seconds=0.01)
+        if not self._editor_empty(editor):
             try:
-                editor.evaluate(
-                    """(el) => {
-                        if (!el) return;
-                        if (el.isContentEditable || el.getAttribute('contenteditable') === 'true') {
-                            el.textContent = '';
-                        } else if ('value' in el) {
-                            el.value = '';
-                        } else {
-                            el.textContent = '';
-                        }
-                        try { el.dispatchEvent(new Event('input', { bubbles: true })); } catch (e) {}
-                        try { el.dispatchEvent(new Event('change', { bubbles: true })); } catch (e) {}
-                    }"""
+                clear_timeout_ms = self._scale_ms(900, min_ms=420)
+                self._run_pause_aware_action(
+                    lambda step_timeout: editor.fill("", timeout=step_timeout),
+                    timeout_ms=clear_timeout_ms,
+                    slice_ms=clear_timeout_ms,
                 )
             except Exception:
                 pass
+            self._sleep(0.04, min_seconds=0.01)
+        if not self._editor_empty(editor):
+            return False
         try:
-            self.page.keyboard.insert_text(text)
-            self._sleep(0.05, min_seconds=0.02)
-            inserted = editor.evaluate(
-                """(el, payload) => {
-                    const text = String((payload || {}).text || '');
-                    const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
-                    if (!el || !text) return false;
-                    const actual = el.isContentEditable || el.getAttribute('contenteditable') === 'true'
-                        ? (el.innerText || el.textContent || '')
-                        : ('value' in el ? el.value : (el.textContent || ''));
-                    return normalize(actual).includes(normalize(text));
-                }""",
-                {"text": text},
-            )
-            if inserted:
-                return True
+            if self._write_text_to_clipboard(text):
+                paste_timeout_ms = self._scale_ms(1200, min_ms=720)
+                self._run_pause_aware_action(
+                    lambda step_timeout: editor.press(paste_shortcut, timeout=step_timeout),
+                    timeout_ms=paste_timeout_ms,
+                    slice_ms=paste_timeout_ms,
+                )
+                self._sleep(0.08, min_seconds=0.02)
+                if self._editor_contains_text(editor, text):
+                    return True
         except Exception:
             pass
         try:
-            inserted = editor.evaluate(
-                """(el, payload) => {
-                    const text = String((payload || {}).text || '');
-                    const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
-                    if (!el || !text) return false;
-                    const isEditable = !!(el.isContentEditable || el.getAttribute('contenteditable') === 'true');
-                    el.focus();
-                    try {
-                        if (isEditable) {
-                            el.textContent = text;
-                        } else if ('value' in el) {
-                            el.value = text;
-                        } else {
-                            el.textContent = text;
-                        }
-                    } catch (e) {
-                        return false;
-                    }
-                    try {
-                        el.dispatchEvent(new InputEvent('input', {
-                            bubbles: true,
-                            inputType: 'insertText',
-                            data: text,
-                        }));
-                    } catch (e) {
-                        try { el.dispatchEvent(new Event('input', { bubbles: true })); } catch (_) {}
-                    }
-                    try { el.dispatchEvent(new Event('change', { bubbles: true })); } catch (e) {}
-                    const actual = isEditable
-                        ? (el.innerText || el.textContent || '')
-                        : ('value' in el ? el.value : (el.textContent || ''));
-                    return normalize(actual).includes(normalize(text));
-                }""",
-                {"text": text},
+            fill_timeout_ms = self._scale_ms(max(1200, len(normalized_text) * 24), min_ms=900)
+            self._run_pause_aware_action(
+                lambda step_timeout: editor.fill(text, timeout=step_timeout),
+                timeout_ms=fill_timeout_ms,
+                slice_ms=fill_timeout_ms,
             )
-            return bool(inserted)
+            self._sleep(0.05, min_seconds=0.02)
+            return self._editor_contains_text(editor, text)
+        except Exception:
+            return False
+
+    def _write_text_to_clipboard(self, text):
+        normalized_text = self._normalize_text(text)
+        if not normalized_text or not self.page:
+            return False
+        try:
+            origin = None
+            try:
+                page_url = str(self.page.url or "").strip()
+                if page_url.startswith(("http://", "https://")):
+                    parsed = urlsplit(page_url)
+                    if parsed.scheme and parsed.netloc:
+                        origin = f"{parsed.scheme}://{parsed.netloc}"
+            except Exception:
+                origin = None
+            try:
+                if origin:
+                    self.page.context.grant_permissions(["clipboard-read", "clipboard-write"], origin=origin)
+                else:
+                    self.page.context.grant_permissions(["clipboard-read", "clipboard-write"])
+            except Exception:
+                pass
+
+            copy_timeout_ms = self._scale_ms(max(1200, len(normalized_text) * 18), min_ms=900)
+            copied = self._run_pause_aware_action(
+                lambda step_timeout: self.page.evaluate(
+                    """async (payload) => {
+                        const text = String((payload || {}).text || '');
+                        if (!text) return false;
+                        try {
+                            if (!navigator.clipboard || typeof navigator.clipboard.writeText !== 'function') {
+                                return false;
+                            }
+                            await navigator.clipboard.writeText(text);
+                            return true;
+                        } catch (error) {
+                            return false;
+                        }
+                    }""",
+                    {"text": text},
+                ),
+                timeout_ms=copy_timeout_ms,
+                slice_ms=copy_timeout_ms,
+            )
+            return bool(copied)
         except Exception:
             return False
 
@@ -1051,17 +1455,23 @@ class Messager:
             return "message_request_limit_reached"
         if reason == "account_cannot_message":
             return "account_cannot_message"
-        if reason == "account_restricted_by_dialog":
+        if reason == "send_restricted_ui":
             return "send_restricted_ui"
-        if reason == "send_failed_ui":
-            return "send_failed_ui"
         return None
 
-    def _retry_delivery_confirmation(self, editor, text, before_state, expected_name=None):
+    def _retry_delivery_confirmation(
+        self,
+        editor,
+        text,
+        before_state,
+        expected_name=None,
+        timeout_ms=None,
+    ):
         log.info(
             f"{self._prefix()}发送确认首轮未命中，保留当前聊天窗口并进行二次核对: "
             f"{expected_name or 'unknown'}"
         )
+        timeout_ms = timeout_ms or self.delivery_recheck_timeout_ms
         restriction = self._detect_chat_restriction(expected_name=expected_name)
         mapped_restriction = self._map_restriction_to_delivery_state(restriction)
         if mapped_restriction:
@@ -1105,7 +1515,7 @@ class Messager:
             rebound_editor,
             text,
             before_state,
-            timeout_ms=self.delivery_recheck_timeout_ms,
+            timeout_ms=timeout_ms,
         )
         if second_pass_state == "timeout":
             restriction = self._detect_chat_restriction(expected_name=expected_name)
@@ -1114,20 +1524,48 @@ class Messager:
                 return mapped_restriction, rebound_session
         return second_pass_state, rebound_session
 
-    def _paste_and_send(self, editor, text, expected_name=None):
+    def _paste_and_send(self, editor, text, expected_name=None, total_timeout_ms=None):
         before_state = self._normalize_delivery_state(self._get_delivery_state(editor, text))
         if not self._paste_text_into_editor(editor, text):
             return "paste_failed", None
+        if not self._editor_contains_text(editor, text):
+            return "paste_failed", None
         self._sleep(0.04, min_seconds=0.01)
-        self.page.keyboard.press("Enter")
-        delivery_state = self._wait_for_delivery(editor, text, before_state)
+        try:
+            enter_timeout_ms = self._scale_ms(900, min_ms=360)
+            self._run_pause_aware_action(
+                lambda step_timeout: editor.press("Enter", timeout=step_timeout),
+                timeout_ms=enter_timeout_ms,
+                slice_ms=enter_timeout_ms,
+            )
+        except Exception:
+            return "paste_failed", None
+        first_timeout_ms = self.delivery_confirm_timeout_ms
+        retry_timeout_ms = None
+        if total_timeout_ms is not None:
+            try:
+                bounded_total_timeout_ms = int(total_timeout_ms)
+            except Exception:
+                bounded_total_timeout_ms = None
+            if bounded_total_timeout_ms is not None and bounded_total_timeout_ms > 0:
+                first_timeout_ms = min(self.delivery_confirm_timeout_ms, bounded_total_timeout_ms)
+                retry_timeout_ms = max(bounded_total_timeout_ms - first_timeout_ms, 0)
+        delivery_state = self._wait_for_delivery(
+            editor,
+            text,
+            before_state,
+            timeout_ms=first_timeout_ms,
+        )
         if delivery_state != "timeout":
             return delivery_state, None
+        if retry_timeout_ms is not None and retry_timeout_ms <= 0:
+            return "timeout", None
         return self._retry_delivery_confirmation(
             editor,
             text,
             before_state,
             expected_name=expected_name,
+            timeout_ms=retry_timeout_ms,
         )
 
     def _wait_for_delivery(self, editor, text, before_state, timeout_ms=None):
@@ -1243,6 +1681,28 @@ class Messager:
         except Exception:
             return False
 
+    def _editor_contains_text(self, editor, text):
+        normalized_text = self._normalize_text(text)
+        if not normalized_text:
+            return False
+        try:
+            return bool(
+                editor.evaluate(
+                    """(el, payload) => {
+                        const text = String((payload || {}).text || '');
+                        const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+                        if (!el || !text) return false;
+                        const actual = el.isContentEditable || el.getAttribute('contenteditable') === 'true'
+                            ? (el.innerText || el.textContent || '')
+                            : ('value' in el ? el.value : (el.textContent || ''));
+                        return normalize(actual).includes(normalize(text));
+                    }""",
+                    {"text": text},
+                )
+            )
+        except Exception:
+            return False
+
     def _detect_profile_message_gate(self, link, hover_card=None, hard_only=False):
         if hover_card is not None:
             texts = self._extract_action_texts_from_scope(hover_card)
@@ -1342,6 +1802,8 @@ class Messager:
             "accountCannotMessageTexts": self.ACCOUNT_CANNOT_MESSAGE_TEXTS,
             "sendRestrictedTexts": self.SEND_RESTRICTED_TEXTS,
             "failureTexts": self.DELIVERY_FAILURE_TEXTS,
+            "chatCloseSelectors": self.CHAT_CLOSE_SELECTORS,
+            "editorSelectors": self.MESSAGE_EDITOR_SELECTORS,
             "expectedName": expected_name or "",
         }
         frames = [self.page.main_frame] + [f for f in self.page.frames if f is not self.page.main_frame]
@@ -1361,6 +1823,25 @@ class Messager:
                             }
                             return true;
                         };
+                        const matchesAnySelectorInside = (root, selectors) => {
+                            for (const selector of selectors || []) {
+                                try {
+                                    if (Array.from(root.querySelectorAll(selector)).some((el) => isVisibleArea(el))) {
+                                        return true;
+                                    }
+                                } catch (error) {
+                                }
+                            }
+                            return false;
+                        };
+                        const isChatShell = (root) => {
+                            if (!root || !isVisibleArea(root)) return false;
+                            const rect = root.getBoundingClientRect();
+                            if (rect.right < window.innerWidth * 0.55) return false;
+                            if (matchesAnySelectorInside(root, payload.editorSelectors)) return true;
+                            if (matchesAnySelectorInside(root, payload.chatCloseSelectors)) return true;
+                            return false;
+                        };
                         const areas = Array.from(
                             document.querySelectorAll(
                                 'div[role="dialog"], div[role="alert"], div[role="status"], [aria-live], div[role="presentation"]'
@@ -1371,13 +1852,31 @@ class Messager:
                             if (!isVisibleArea(el)) return false;
                             const rect = el.getBoundingClientRect();
                             if (rect.right < window.innerWidth * 0.45) return false;
+                            if (!isChatShell(el)) return false;
                             return true;
                         });
                         const pickReason = (text) => {
+                            const lowerText = String(text || '').toLowerCase();
                             if (payload.strangerLimitTexts.some((token) => text.includes(token))) {
                                 return {reason: 'stranger_message_limit_reached', alert_text: text};
                             }
                             if (payload.messageRequestLimitTexts.some((token) => text.includes(token))) {
+                                return {reason: 'message_request_limit_reached', alert_text: text};
+                            }
+                            if (
+                                (
+                                    lowerText.includes('24 hours')
+                                    && (lowerText.includes('message request') || lowerText.includes('requests'))
+                                )
+                                || (
+                                    text.includes('24 ชั่วโมง')
+                                    && (
+                                        text.includes('คำขอส่งข้อความ')
+                                        || text.includes('ส่งคำขอ')
+                                        || (text.includes('คำขอ') && text.includes('ขีดจำกัด'))
+                                    )
+                                )
+                            ) {
                                 return {reason: 'message_request_limit_reached', alert_text: text};
                             }
                             if ((payload.messengerLoginRequiredTexts || []).some((token) => text.includes(token))) {
@@ -1387,10 +1886,10 @@ class Messager:
                                 return {reason: 'account_cannot_message', alert_text: text};
                             }
                             if (payload.failureTexts.some((token) => text.includes(token))) {
-                                return {reason: 'send_failed_ui', alert_text: text};
+                                return {reason: 'send_restricted_ui', alert_text: text};
                             }
                             if (payload.sendRestrictedTexts.some((token) => text.includes(token))) {
-                                return {reason: 'account_restricted_by_dialog', alert_text: text};
+                                return {reason: 'send_restricted_ui', alert_text: text};
                             }
                             return null;
                         };
@@ -1405,8 +1904,61 @@ class Messager:
                             if (hit) return hit;
                         }
 
-                        const bodyText = normalize(document.body && document.body.innerText);
-                        return pickReason(bodyText);
+                        const chatShellCandidates = [];
+                        const collectShellCandidate = (seed, rect, bonus = 0) => {
+                            let shell = seed;
+                            let bestShell = null;
+                            let bestArea = Number.POSITIVE_INFINITY;
+                            while (shell) {
+                                if (isChatShell(shell)) {
+                                    const shellRect = shell.getBoundingClientRect();
+                                    const area = shellRect.width * shellRect.height;
+                                    if (area < bestArea) {
+                                        bestArea = area;
+                                        bestShell = shell;
+                                    }
+                                }
+                                shell = shell.parentElement;
+                            }
+                            if (!bestShell) return;
+                            const text = normalize(
+                                `${bestShell.innerText || ''} ${bestShell.getAttribute && bestShell.getAttribute('aria-label') || ''}`
+                            );
+                            if (!text) return;
+                            let score = bonus;
+                            if (expectedName && text.includes(expectedName)) score += 1000;
+                            try {
+                                if (bestShell.contains(document.activeElement)) score += 500;
+                            } catch (error) {
+                            }
+                            score += Math.round((rect && rect.x) || 0);
+                            chatShellCandidates.push({ score, text });
+                        };
+                        for (const selector of payload.chatCloseSelectors || []) {
+                            for (const button of Array.from(document.querySelectorAll(selector))) {
+                                if (!isVisibleArea(button)) continue;
+                                const buttonRect = button.getBoundingClientRect();
+                                if (buttonRect.right < window.innerWidth * 0.55) continue;
+                                collectShellCandidate(button.parentElement, buttonRect, 220);
+                            }
+                        }
+                        for (const selector of payload.editorSelectors || []) {
+                            for (const editor of Array.from(document.querySelectorAll(selector))) {
+                                if (!isVisibleArea(editor)) continue;
+                                const editorRect = editor.getBoundingClientRect();
+                                if (editorRect.right < window.innerWidth * 0.55) continue;
+                                collectShellCandidate(editor.parentElement, editorRect, 320);
+                            }
+                        }
+                        chatShellCandidates.sort((a, b) => b.score - a.score);
+                        const seenShellTexts = new Set();
+                        for (const candidate of chatShellCandidates) {
+                            if (!candidate || !candidate.text || seenShellTexts.has(candidate.text)) continue;
+                            seenShellTexts.add(candidate.text);
+                            const hit = pickReason(candidate.text);
+                            if (hit) return hit;
+                        }
+                        return null;
                     }""",
                     payload,
                 )
@@ -1432,21 +1984,15 @@ class Messager:
                     }
                 if result.get("reason") == "account_cannot_message":
                     return {
-                        "status": "blocked",
+                        "status": "skip",
                         "reason": "account_cannot_message",
-                        "alert_text": result.get("alert_text") or "当前账号已被限制继续向该类用户发起消息。",
+                        "alert_text": result.get("alert_text") or "当前无法向该成员发起私聊，已直接跳过。",
                     }
-                if result.get("reason") == "account_restricted_by_dialog":
+                if result.get("reason") == "send_restricted_ui":
                     return {
                         "status": "blocked",
-                        "reason": "account_restricted_by_dialog",
-                        "alert_text": result.get("alert_text") or "聊天对话框出现限制提示，当前窗口停止继续发送。",
-                    }
-                if result.get("reason") == "send_failed_ui":
-                    return {
-                        "status": "error",
-                        "reason": "send_failed_ui",
-                        "alert_text": result.get("alert_text") or "聊天对话框明确提示本次发送失败。",
+                        "reason": "send_restricted_ui",
+                        "alert_text": result.get("alert_text") or "聊天对话框明确提示本次发送失败，当前窗口停止继续发送。",
                     }
             except Exception:
                 continue
@@ -1522,6 +2068,15 @@ class Messager:
                     const messageRequestLimitTexts = payload.messageRequestLimitTexts || [];
                     const accountCannotMessageTexts = payload.accountCannotMessageTexts || [];
                     const sendRestrictedTexts = payload.sendRestrictedTexts || [];
+                    const messageTexts = payload.messageTexts || [];
+                    const messageHintKeywords = (payload.messageHintKeywords || [])
+                        .map((token) => normalize(token).toLowerCase())
+                        .filter(Boolean);
+                    const ignoredControlTextsLower = new Set(
+                        (payload.ignoredControlTexts || [])
+                            .map((token) => normalize(token).toLowerCase())
+                            .filter(Boolean)
+                    );
                     const isVisibleArea = (el) => {
                         if (!el) return false;
                         const rect = el.getBoundingClientRect();
@@ -1549,7 +2104,9 @@ class Messager:
                     while (current && depth < 16) {
                         const rect = current.getBoundingClientRect();
                         const textValue = normalize(current.innerText || '');
+                        const textValueLower = textValue.toLowerCase();
                         const aria = normalize(current.getAttribute && current.getAttribute('aria-label'));
+                        const ariaLower = aria.toLowerCase();
                         const role = normalize(current.getAttribute && current.getAttribute('role'));
                         const widthOk = (
                             rect.width >= Math.max(editorRect.width + 120, 260)
@@ -1565,8 +2122,8 @@ class Messager:
                             if (rect.height >= 120) score += 2;
                             if (rect.height >= 220) score += 3;
                             if (role === 'group' || role === 'dialog' || role === 'none') score += 2;
-                            if (aria.includes('发消息给') || aria.toLowerCase().includes('message')) score += 4;
-                            if (textValue.includes('发消息给') || textValue.includes('Message')) score += 2;
+                            if (hasAnyToken(aria, messageTexts) || hasAnyToken(ariaLower, messageHintKeywords)) score += 4;
+                            if (hasAnyToken(textValue, messageTexts) || hasAnyToken(textValueLower, messageHintKeywords)) score += 2;
                             if (expectedText && textValue.includes(expectedText)) score += 6;
                             if (hasAnyToken(textValue, statusTexts)) score += 4;
                             if (hasAnyToken(textValue, failureTexts)) score += 4;
@@ -1596,14 +2153,6 @@ class Messager:
                     const seen = new Set();
                     const fingerprintParts = [];
                     const sentTimeRe = /(刚刚发送|剛剛傳送|已發送|\\d+\\s*(秒|分钟|分鐘|小时|小時|天)前发送|\\d+\\s*(seconds?|minutes?|hours?|days?)\\s+ago|hace\\s+\\d+\\s*(segundos?|minutos?|horas?|días?)|há\\s+\\d+\\s*(segundos?|minutos?|horas?|dias?)|il\\s+y\\s+a\\s+\\d+\\s*(secondes?|minutes?|heures?|jours?)|vor\\s+\\d+\\s*(Sekunden?|Minuten?|Stunden?|Tagen?)|\\d+\\s*(secondi|minuti|ore|giorni)\\s+fa|\\d+\\s*(секунд|секунды|минут|минуты|часов|часа|дней|дня)\\s+назад|\\d+\\s*(sekund|minut|godzin|dni)\\s+temu|\\d+\\s*(saniye|dakika|saat|gün)\\s+önce|منذ\\s+\\d+\\s*(ثانية|دقيقة|ساعة|يوم)|\\d+\\s*(秒|分|時間|日)前|\\d+\\s*(초|분|시간|일)\\s*전|\\d+\\s*(วินาที|นาที|ชั่วโมง|วัน)ที่แล้ว|\\d+\\s*(giây|phút|giờ|ngày)\\s+trước|\\d+\\s*(detik|menit|jam|hari)\\s+yang\\s+lalu|\\d+\\s*(saat|minit|jam|hari)\\s+yang\\s+lalu|\\d+\\s*(সেকেন্ড|মিনিট|ঘণ্টা|দিন)\\s+আগে|\\d+\\s*(सेकंड|मिनट|घंटे|दिन)\\s+पहले)/i;
-                    const ignoredControls = new Set([
-                        '发消息', 'Message', '信息',
-                        '发送语音留言', '附加不超过25MB 的文件', '附加不超過25MB 的檔案',
-                        '选择贴图', '選擇貼圖', '选择动图', '選擇動圖',
-                        '选择表情', '選擇表情', '发个赞', '發個讚', 'Like', 'Send a like',
-                        '关闭聊天窗口', 'Close chat window', 'Close chat',
-                        '最小化聊天窗口', 'Minimize chat window'
-                    ]);
 
                     for (const el of Array.from(root.querySelectorAll('div, span, a, svg, img'))) {
                         if (el === node || node.contains(el)) continue;
@@ -1617,8 +2166,9 @@ class Messager:
                         const text = normalize(el.innerText || '');
                         const aria = (el.getAttribute && el.getAttribute('aria-label')) || '';
                         const combined = normalize(text || aria || '');
+                        const combinedLower = combined.toLowerCase();
                         if (!combined) continue;
-                        if (ignoredControls.has(combined)) continue;
+                        if (ignoredControlTextsLower.has(combinedLower)) continue;
 
                         if (expectedText && text.includes(expectedText)) {
                             const key = `${Math.round(rect.x)}:${Math.round(rect.y)}:${text}`;
@@ -1639,7 +2189,7 @@ class Messager:
                         }
                         if (!hasFailure && failureTexts.some((status) => combined.includes(status))) {
                             hasFailure = true;
-                            failureReason = 'send_failed_ui';
+                            failureReason = 'send_restricted_ui';
                         }
                         if (
                             !hasStrangerLimit
@@ -1676,7 +2226,7 @@ class Messager:
 
                     if (!hasFailure && failureTexts.some((status) => windowText.includes(status))) {
                         hasFailure = true;
-                        failureReason = failureReason || 'send_failed_ui';
+                        failureReason = failureReason || 'send_restricted_ui';
                     }
                     if (
                         !hasStrangerLimit
@@ -1741,7 +2291,7 @@ class Messager:
                             }
                             if (!hasFailure && failureTexts.some((status) => areaText.includes(status))) {
                                 hasFailure = true;
-                                failureReason = failureReason || 'send_failed_ui';
+                                failureReason = failureReason || 'send_restricted_ui';
                             }
                             if (!hasStrangerLimit && strangerLimitTexts.some((status) => areaText.includes(status))) {
                                 hasStrangerLimit = true;
@@ -1796,6 +2346,9 @@ class Messager:
                     "messageRequestLimitTexts": self.MESSAGE_REQUEST_LIMIT_TEXTS,
                     "accountCannotMessageTexts": self.ACCOUNT_CANNOT_MESSAGE_TEXTS,
                     "sendRestrictedTexts": self.SEND_RESTRICTED_TEXTS,
+                    "messageTexts": self.MEMBER_CARD_MESSAGE_TEXTS,
+                    "messageHintKeywords": self.MESSAGE_HEADING_HINT_TOKENS,
+                    "ignoredControlTexts": self.CHAT_IGNORED_CONTROL_TEXTS,
                 },
             )
         except Exception:
@@ -1810,6 +2363,111 @@ class Messager:
     def _normalize_text(self, value):
         return " ".join((value or "").split())
 
+    def _match_restriction_reason_from_text(self, text):
+        normalized = self._normalize_text(text)
+        if not normalized:
+            return None
+        lower_text = normalized.lower()
+        if self._matches_any_text(normalized, self.STRANGER_LIMIT_TEXTS):
+            return "stranger_message_limit_reached"
+        if self._matches_any_text(normalized, self.MESSAGE_REQUEST_LIMIT_TEXTS):
+            return "message_request_limit_reached"
+        if (
+            (
+                "24 hours" in lower_text
+                and ("message request" in lower_text or "requests" in lower_text)
+            )
+            or (
+                "24 ชั่วโมง" in normalized
+                and (
+                    "คำขอส่งข้อความ" in normalized
+                    or "ส่งคำขอ" in normalized
+                    or ("คำขอ" in normalized and "ขีดจำกัด" in normalized)
+                )
+            )
+        ):
+            return "message_request_limit_reached"
+        if self._matches_any_text(normalized, self.MESSENGER_LOGIN_REQUIRED_TEXTS):
+            return "messenger_login_required"
+        if self._matches_any_text(normalized, self.ACCOUNT_CANNOT_MESSAGE_TEXTS):
+            return "account_cannot_message"
+        if self._matches_any_text(normalized, self.DELIVERY_FAILURE_TEXTS):
+            return "send_restricted_ui"
+        if self._matches_any_text(normalized, self.SEND_RESTRICTED_TEXTS):
+            return "send_restricted_ui"
+        return None
+
+    def _build_restriction_result(self, reason, alert_text=None):
+        normalized_reason = str(reason or "").strip()
+        if not normalized_reason:
+            return None
+        if normalized_reason == "stranger_message_limit_reached":
+            return {
+                "status": "limit",
+                "reason": "stranger_message_limit_reached",
+                "alert_text": alert_text or self.STRANGER_LIMIT_ALERT_TEXT,
+            }
+        if normalized_reason == "message_request_limit_reached":
+            return {
+                "status": "blocked",
+                "reason": "message_request_limit_reached",
+                "alert_text": alert_text or self.MESSAGE_REQUEST_LIMIT_ALERT_TEXT,
+            }
+        if normalized_reason == "messenger_login_required":
+            return {
+                "status": "skip",
+                "reason": "messenger_login_required",
+                "alert_text": alert_text or "对方当前未登录 Messenger，暂时无法发起对话。",
+            }
+        if normalized_reason == "account_cannot_message":
+            return {
+                "status": "skip",
+                "reason": "account_cannot_message",
+                "alert_text": alert_text or "当前无法向该成员发起私聊，已直接跳过。",
+            }
+        if normalized_reason == "send_restricted_ui":
+            return {
+                "status": "blocked",
+                "reason": "send_restricted_ui",
+                "alert_text": alert_text or "当前窗口已被系统限制继续发送消息，请更换账户。",
+            }
+        return None
+
+    def _detect_prechat_restriction_result(self, name="", stage=""):
+        if self._check_stranger_limit_global():
+            return {
+                "status": "limit",
+                "reason": "stranger_message_limit_reached",
+                "alert_text": self.STRANGER_LIMIT_ALERT_TEXT,
+                "log": f"{self._prefix()}{stage}命中陌生消息上限，停止当前窗口: {name}",
+            }
+
+        page_restriction = self._detect_chat_restriction(expected_name=name)
+        if page_restriction:
+            restriction_result = self._build_restriction_result(
+                page_restriction.get("reason"),
+                page_restriction.get("alert_text"),
+            )
+            if restriction_result:
+                restriction_result["log"] = (
+                    f"{self._prefix()}{stage}命中页面限制，停止当前窗口: "
+                    f"{name} ({restriction_result['reason']})"
+                )
+                return restriction_result
+
+        overlay = self._detect_blocking_overlay()
+        overlay_restriction = self._build_restriction_result(
+            self._match_restriction_reason_from_text((overlay or {}).get("text") or ""),
+            (overlay or {}).get("text") or "",
+        )
+        if overlay_restriction:
+            overlay_restriction["log"] = (
+                f"{self._prefix()}{stage}命中限制弹层，停止当前窗口: "
+                f"{name} ({overlay_restriction['reason']})"
+            )
+            return overlay_restriction
+        return None
+
     def _detect_blocking_overlay(self):
         try:
             if self.page.is_closed():
@@ -1820,6 +2478,8 @@ class Messager:
             result = self.page.evaluate(
                 """(payload) => {
                     const labels = payload.labels || [];
+                    const chatCloseSelectors = payload.chatCloseSelectors || [];
+                    const editorSelectors = payload.editorSelectors || [];
                     const normalize = (value) => (value || '').replace(/\\s+/g, ' ').trim();
                     const isVisibleArea = (el) => {
                         if (!el) return false;
@@ -1832,6 +2492,22 @@ class Messager:
                         }
                         return true;
                     };
+                    const matchesAnySelectorInside = (root, selectors) => {
+                        for (const selector of selectors || []) {
+                            try {
+                                if (Array.from(root.querySelectorAll(selector)).some((el) => isVisibleArea(el))) {
+                                    return true;
+                                }
+                            } catch (e) {}
+                        }
+                        return false;
+                    };
+                    const isChatContainer = (root) => {
+                        if (!root) return false;
+                        if (matchesAnySelectorInside(root, editorSelectors)) return true;
+                        if (matchesAnySelectorInside(root, chatCloseSelectors)) return true;
+                        return false;
+                    };
                     const dialogs = Array.from(
                         document.querySelectorAll(
                             'div[role="dialog"], div[aria-modal="true"], div[role="alertdialog"], div[role="alert"]'
@@ -1843,6 +2519,7 @@ class Messager:
                         return rect.right > window.innerWidth * 0.4;
                     });
                     for (const dialog of dialogs) {
+                        if (isChatContainer(dialog)) continue;
                         const text = normalize(
                             `${dialog.innerText || ''} ${dialog.getAttribute && dialog.getAttribute('aria-label') || ''}`
                         );
@@ -1858,13 +2535,17 @@ class Messager:
                         });
                         if (!hasCloser) continue;
                         return {
-                            text: text.slice(0, 160),
+                            text: text.slice(0, 1200),
                             hasCloser: true,
                         };
                     }
                     return null;
                 }""",
-                {"labels": self.POPUP_CLOSE_LABELS},
+                {
+                    "labels": self.POPUP_CLOSE_LABELS,
+                    "chatCloseSelectors": self.CHAT_CLOSE_SELECTORS,
+                    "editorSelectors": self.MESSAGE_EDITOR_SELECTORS,
+                },
             )
             return result or None
         except Exception:
@@ -1887,8 +2568,69 @@ class Messager:
             try:
                 closed_round += int(
                     self.page.evaluate(
-                        """(labels) => {
+                        """(payload) => {
+                            const labels = payload.labels || [];
+                            const chatCloseSelectors = payload.chatCloseSelectors || [];
+                            const editorSelectors = payload.editorSelectors || [];
+                            const strangerLimitTexts = payload.strangerLimitTexts || [];
+                            const messageRequestLimitTexts = payload.messageRequestLimitTexts || [];
+                            const messengerLoginRequiredTexts = payload.messengerLoginRequiredTexts || [];
+                            const accountCannotMessageTexts = payload.accountCannotMessageTexts || [];
+                            const sendRestrictedTexts = payload.sendRestrictedTexts || [];
+                            const failureTexts = payload.failureTexts || [];
                             const normalize = (value) => (value || '').replace(/\\s+/g, ' ').trim();
+                            const matchesProtectedText = (text) => {
+                                const normalized = normalize(text);
+                                if (!normalized) return false;
+                                const lowerText = normalized.toLowerCase();
+                                if (strangerLimitTexts.some((token) => normalized.includes(token))) return true;
+                                if (messageRequestLimitTexts.some((token) => normalized.includes(token))) return true;
+                                if (messengerLoginRequiredTexts.some((token) => normalized.includes(token))) return true;
+                                if (accountCannotMessageTexts.some((token) => normalized.includes(token))) return true;
+                                if (sendRestrictedTexts.some((token) => normalized.includes(token))) return true;
+                                if (failureTexts.some((token) => normalized.includes(token))) return true;
+                                if (
+                                    (
+                                        lowerText.includes('24 hours')
+                                        && (lowerText.includes('message request') || lowerText.includes('requests'))
+                                    )
+                                    || (
+                                        normalized.includes('24 ชั่วโมง')
+                                        && (
+                                            normalized.includes('คำขอส่งข้อความ')
+                                            || normalized.includes('ส่งคำขอ')
+                                            || (normalized.includes('คำขอ') && normalized.includes('ขีดจำกัด'))
+                                        )
+                                    )
+                                ) {
+                                    return true;
+                                }
+                                return false;
+                            };
+                            const isVisible = (el) => {
+                                if (!el) return false;
+                                const rect = el.getBoundingClientRect();
+                                if (!rect.width || !rect.height) return false;
+                                const style = window.getComputedStyle(el);
+                                if (!style) return false;
+                                return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+                            };
+                            const matchesAnySelectorInside = (root, selectors) => {
+                                for (const selector of selectors || []) {
+                                    try {
+                                        if (Array.from(root.querySelectorAll(selector)).some((el) => isVisible(el))) {
+                                            return true;
+                                        }
+                                    } catch (e) {}
+                                }
+                                return false;
+                            };
+                            const isChatContainer = (root) => {
+                                if (!root) return false;
+                                if (matchesAnySelectorInside(root, editorSelectors)) return true;
+                                if (matchesAnySelectorInside(root, chatCloseSelectors)) return true;
+                                return false;
+                            };
                             let closed = 0;
                             const nodes = Array.from(document.querySelectorAll('button, div[role="button"], [aria-label]'));
                             for (const el of nodes) {
@@ -1897,6 +2639,17 @@ class Messager:
                                 const aria = normalize(el.getAttribute && el.getAttribute('aria-label'));
                                 const combined = `${aria} ${text}`.trim();
                                 if (!labels.some((token) => combined.includes(token))) continue;
+                                const container = el.closest('[role="dialog"], [role="alertdialog"], [role="alert"], [role="status"], [aria-live], [role="presentation"]');
+                                if (!container) continue;
+                                const rect = container.getBoundingClientRect();
+                                if (rect.width < 180 || rect.height < 60) continue;
+                                if (rect.right < window.innerWidth * 0.4) continue;
+                                if (isChatContainer(container)) continue;
+                                const containerText = normalize(
+                                    `${container.innerText || ''} ${container.getAttribute && container.getAttribute('aria-label') || ''}`
+                                );
+                                if (!containerText) continue;
+                                if (matchesProtectedText(containerText)) continue;
                                 try {
                                     el.click();
                                     closed += 1;
@@ -1904,7 +2657,17 @@ class Messager:
                             }
                             return closed;
                         }""",
-                        self.POPUP_CLOSE_LABELS,
+                        {
+                            "labels": self.POPUP_CLOSE_LABELS,
+                            "chatCloseSelectors": self.CHAT_CLOSE_SELECTORS,
+                            "editorSelectors": self.MESSAGE_EDITOR_SELECTORS,
+                            "strangerLimitTexts": self.STRANGER_LIMIT_TEXTS,
+                            "messageRequestLimitTexts": self.MESSAGE_REQUEST_LIMIT_TEXTS,
+                            "messengerLoginRequiredTexts": self.MESSENGER_LOGIN_REQUIRED_TEXTS,
+                            "accountCannotMessageTexts": self.ACCOUNT_CANNOT_MESSAGE_TEXTS,
+                            "sendRestrictedTexts": self.SEND_RESTRICTED_TEXTS,
+                            "failureTexts": self.DELIVERY_FAILURE_TEXTS,
+                        },
                     )
                     or 0
                 )
@@ -1944,11 +2707,7 @@ class Messager:
         }
 
     def _classify_message_button_failure(self, link, name, hover_card=None, timed_out=False, hard_only=False):
-        gate_reason = (
-            self._detect_profile_message_gate(link, hover_card=hover_card, hard_only=hard_only)
-            if hover_card is not None
-            else None
-        )
+        gate_reason = self._detect_profile_message_gate(link, hover_card=hover_card, hard_only=hard_only)
         if gate_reason:
             if gate_reason == "stranger_message_limit_reached":
                 return {
@@ -1966,10 +2725,10 @@ class Messager:
                 }
             if gate_reason == "account_cannot_message":
                 return {
-                    "status": "blocked",
+                    "status": "skip",
                     "reason": "account_cannot_message",
-                    "alert_text": "当前账号已被限制继续向该类用户发起消息。",
-                    "log": f"{self._prefix()}成员资料卡明确提示当前无法联系该成员，停止当前窗口: {name}",
+                    "alert_text": "当前无法向该成员发起私聊，已直接跳过。",
+                    "log": f"{self._prefix()}成员资料卡明确提示当前无法私聊该成员，直接跳过: {name}",
                 }
             if gate_reason == "send_restricted_ui":
                 return {
@@ -1986,6 +2745,13 @@ class Messager:
 
         if hard_only:
             return None
+
+        prechat_restriction = self._detect_prechat_restriction_result(
+            name,
+            stage="成员资料卡失败前复核",
+        )
+        if prechat_restriction:
+            return prechat_restriction
 
         if hover_card is None:
             return {
@@ -2083,18 +2849,20 @@ class Messager:
                     continue
             try:
                 js_closed = self.page.evaluate(
-                    """() => {
-                        const labels = ['关闭','Close'];
+                    """(payload) => {
+                        const normalize = (value) => (value || '').trim().toLowerCase();
+                        const labels = new Set((payload.labels || []).map(normalize).filter(Boolean));
                         const nodes = Array.from(document.querySelectorAll('[aria-label]'));
                         let closed = false;
                         for (const el of nodes) {
-                            const label = el.getAttribute('aria-label') || '';
-                            if (!labels.includes(label)) continue;
+                            const label = normalize(el.getAttribute('aria-label') || '');
+                            if (!labels.has(label)) continue;
                             if (el.offsetParent === null) continue;
                             if (el.click) { el.click(); closed = true; }
                         }
                         return closed;
-                    }"""
+                    }""",
+                    {"labels": self.GENERIC_CLOSE_LABELS},
                 )
                 if js_closed:
                     closed_any = True
@@ -2318,6 +3086,10 @@ class Messager:
                 timed_out=False,
             )
 
+        hover_wait_total_ms = max(1, int(self.hover_card_wait_timeout_ms or 0))
+        first_hover_wait_ms = max(1, int(hover_wait_total_ms * 0.65))
+        second_hover_wait_ms = max(1, hover_wait_total_ms - first_hover_wait_ms)
+
         state = {
             "link_box": link_box,
             "hover_card": self._find_hover_card_container(link_box),
@@ -2332,7 +3104,7 @@ class Messager:
                 "成员资料卡",
                 "等待资料卡区域渲染完成",
                 lambda: self._find_hover_card_container(state["link_box"]),
-                timeout_ms=min(self.hover_card_wait_timeout_ms, self._scale_ms(1400, min_ms=700)),
+                timeout_ms=first_hover_wait_ms,
                 interval=0.12,
             )
 
@@ -2356,7 +3128,7 @@ class Messager:
                     "成员资料卡",
                     "二次等待资料卡区域渲染完成",
                     lambda: self._find_hover_card_container(state["link_box"]),
-                    timeout_ms=min(self.hover_card_wait_timeout_ms, self._scale_ms(900, min_ms=450)),
+                    timeout_ms=second_hover_wait_ms,
                     interval=0.12,
                 )
                 state["rehovered"] = True
@@ -2393,54 +3165,61 @@ class Messager:
 
     def _collect_action_candidates_in_container(self, container):
         try:
-            locator = container.locator(self.ACTION_ELEMENT_SELECTOR)
-            count = locator.count()
+            return container.evaluate(
+                """(node, payload) => {
+                    const normalize = (value) => (value || '').replace(/\\s+/g, ' ').trim();
+                    const isVisible = (el) => {
+                        if (!el) return false;
+                        const rect = el.getBoundingClientRect();
+                        if (!rect.width || !rect.height) return false;
+                        const style = window.getComputedStyle(el);
+                        if (!style) return false;
+                        if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
+                            return false;
+                        }
+                        return true;
+                    };
+                    const results = [];
+                    const seen = new Set();
+                    const nodes = Array.from(node.querySelectorAll(payload.selector));
+                    for (let idx = 0; idx < nodes.length; idx += 1) {
+                        const el = nodes[idx];
+                        if (!isVisible(el)) continue;
+                        if ((el.getAttribute && el.getAttribute('aria-disabled')) === 'true') continue;
+                        const label = normalize(el.getAttribute && el.getAttribute('aria-label'));
+                        const text = normalize(el.innerText || el.textContent || '');
+                        const combined = normalize(`${label} ${text}`);
+                        if (!combined) continue;
+                        const dedupeKey = combined.toLowerCase();
+                        if (seen.has(dedupeKey)) continue;
+                        seen.add(dedupeKey);
+                        results.push({index: idx, combined});
+                    }
+                    return results;
+                }""",
+                {"selector": self.ACTION_ELEMENT_SELECTOR},
+            ) or []
         except Exception:
             return []
-        candidates = []
-        seen = set()
-        for idx in range(count):
-            element = locator.nth(idx)
-            try:
-                if not element.is_visible(timeout=self._visible_timeout()):
-                    continue
-                if element.get_attribute("aria-disabled") == "true":
-                    continue
-                label = self._normalize_text(element.get_attribute("aria-label") or "")
-                text = self._normalize_text(element.inner_text() or "")
-                combined = self._normalize_text(f"{label} {text}")
-                if not combined:
-                    continue
-                dedupe_key = combined.lower()
-                if dedupe_key in seen:
-                    continue
-                seen.add(dedupe_key)
-                candidates.append({"locator": element, "combined": combined})
-            except Exception:
-                continue
-        return candidates
 
     def _find_message_button_in_container(self, container):
         candidates = self._collect_action_candidates_in_container(container)
         if not candidates:
             return None
-        gate_detected = False
+        candidate_locator = container.locator(self.ACTION_ELEMENT_SELECTOR)
         for candidate in candidates:
-            combined = candidate["combined"]
+            combined = self._normalize_text(candidate.get("combined") or "")
+            candidate_index = candidate.get("index")
+            if candidate_index is None:
+                continue
             if (
                 self._matches_any_text(combined, self.MEMBER_CARD_MESSAGE_TEXTS)
                 or any(keyword in combined.lower() for keyword in self.MEMBER_CARD_MESSAGE_HINT_KEYWORDS)
             ):
-                return candidate["locator"]
-            if (
-                self._matches_any_text(combined, self.ADD_FRIEND_TEXTS)
-                or self._matches_any_text(combined, self.FOLLOW_ONLY_TEXTS)
-                or self._matches_any_text(combined, self.CONNECT_TEXTS)
-                or self._matches_any_text(combined, self.INVITE_TEXTS)
-            ):
-                gate_detected = True
-        if gate_detected:
-            return None
+                try:
+                    return candidate_locator.nth(int(candidate_index))
+                except Exception:
+                    return None
         return None
 
     def _matches_any_text(self, text, tokens):
@@ -2480,19 +3259,19 @@ class Messager:
                     box = self._safe_bounding_box(card, timeout_ms=400)
                     if not box:
                         continue
-                    if box["width"] < 120 or box["height"] < 60:
+                    if box["width"] < 96 or box["height"] < 52:
                         continue
-                    if viewport_w and box["width"] > viewport_w * 0.78:
+                    if viewport_w and box["width"] > viewport_w * 0.88:
                         continue
-                    if viewport_h and box["height"] > viewport_h * 0.72:
+                    if viewport_h and box["height"] > viewport_h * 0.82:
                         continue
                     if viewport_w and viewport_h:
-                        if (box["width"] * box["height"]) > (viewport_w * viewport_h * 0.36):
+                        if (box["width"] * box["height"]) > (viewport_w * viewport_h * 0.48):
                             continue
                     card_cx = box["x"] + (box["width"] / 2)
                     card_cy = box["y"] + (box["height"] / 2)
                     dist = abs(card_cy - link_cy) + abs(card_cx - link_cx)
-                    if dist > 1200:
+                    if dist > 1500:
                         continue
                     candidates.append((dist, box["y"], box["x"], card))
                 except Exception:
@@ -2560,9 +3339,67 @@ class Messager:
         )
         return result
 
+    def _locate_chat_shell(self, expected_name=None):
+        candidates = []
+        try:
+            viewport_size = self.page.viewport_size
+            viewport_width = (
+                viewport_size["width"]
+                if viewport_size
+                else self.page.evaluate("window.innerWidth")
+            )
+        except Exception:
+            viewport_width = None
+        for selector in self.CHAT_CLOSE_SELECTORS:
+            locator = self.page.locator(selector)
+            count = locator.count()
+            for idx in range(count - 1, -1, -1):
+                button = locator.nth(idx)
+                try:
+                    if not button.is_visible(timeout=self._scale_ms(200, min_ms=80)):
+                        continue
+                    box = self._safe_bounding_box(button, timeout_ms=320)
+                    if not box:
+                        continue
+                    if viewport_width is not None and box["x"] < viewport_width * 0.55:
+                        continue
+                    shell_matches_name = False
+                    if expected_name:
+                        try:
+                            shell_matches_name = bool(
+                                button.evaluate(
+                                    """(node, expectedName) => {
+                                        const normalize = (value) => (value || '').replace(/\\s+/g, ' ').trim();
+                                        let el = node;
+                                        while (el) {
+                                            const rect = el.getBoundingClientRect();
+                                            if (rect.width && rect.height && rect.right > window.innerWidth * 0.55) {
+                                                const text = normalize(el.innerText || '');
+                                                if (text && text.includes(expectedName)) return true;
+                                            }
+                                            el = el.parentElement;
+                                        }
+                                        return false;
+                                    }""",
+                                    expected_name,
+                                )
+                            )
+                        except Exception:
+                            shell_matches_name = False
+                    score = 0
+                    if shell_matches_name:
+                        score += 1000
+                    score += int(box["x"] or 0)
+                    candidates.append((score, int(box["x"] or 0), -int(box["y"] or 0), {"close_button": button}))
+                except Exception:
+                    continue
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+        return candidates[0][3]
+
     def _locate_chat_session(self, expected_name=None):
-        fallback_sessions = []
-        bare_sessions = []
+        candidates = []
         for selector in self.MESSAGE_EDITOR_SELECTORS:
             locator = self.page.locator(selector)
             count = locator.count()
@@ -2583,23 +3420,44 @@ class Messager:
                     if editor_box["x"] < viewport_width * 0.35:
                         continue
 
-                    close_button = self._find_chat_close_button(editor, expected_name)
-                    if close_button:
-                        return {"editor": editor, "close_button": close_button}
+                    mentions_expected_name = (
+                        bool(expected_name)
+                        and self._editor_window_mentions_name(editor, expected_name)
+                    )
+                    active_window = self._editor_window_is_active(editor)
+                    close_button = None
+                    if mentions_expected_name:
+                        close_button = self._find_chat_close_button(editor, expected_name)
+                    generic_close_button = self._find_chat_close_button(editor, None)
+                    close_button = close_button or generic_close_button
 
-                    close_button = self._find_chat_close_button(editor, None)
-                    if close_button:
-                        fallback_sessions.append({"editor": editor, "close_button": close_button})
+                    if not close_button and not mentions_expected_name and not active_window:
                         continue
 
-                    if expected_name and self._editor_window_mentions_name(editor, expected_name):
-                        bare_sessions.append({"editor": editor, "close_button": None})
+                    score = 0
+                    if mentions_expected_name:
+                        score += 1000
+                    if active_window:
+                        score += 500
+                    if close_button:
+                        score += 220
+                    score += int(editor_box["x"] or 0)
+                    candidates.append(
+                        (
+                            score,
+                            int(editor_box["x"] or 0),
+                            -int(editor_box["y"] or 0),
+                            {
+                                "editor": editor,
+                                "close_button": close_button,
+                            },
+                        )
+                    )
                 except Exception:
                     continue
-        if expected_name and len(fallback_sessions) == 1:
-            return fallback_sessions[0]
-        if expected_name and len(bare_sessions) == 1:
-            return bare_sessions[0]
+        if candidates:
+            candidates.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+            return candidates[0][3]
         return None
 
     def _wait_for_editor_ready(self, editor, timeout_ms=None):
@@ -2694,6 +3552,33 @@ class Messager:
                         return false;
                     }""",
                     expected_name,
+                )
+            )
+        except Exception:
+            return False
+
+    def _editor_window_is_active(self, editor):
+        try:
+            return bool(
+                editor.evaluate(
+                    """(node) => {
+                        if (!node) return false;
+                        const active = document.activeElement;
+                        if (!active) return false;
+                        if (node === active) return true;
+                        if (node.contains && node.contains(active)) return true;
+                        let el = node;
+                        while (el) {
+                            if (el === active) return true;
+                            if (el.contains && el.contains(active)) return true;
+                            const rect = el.getBoundingClientRect();
+                            if (rect.width && rect.height && rect.right > window.innerWidth * 0.55) {
+                                if (el.contains && el.contains(active)) return true;
+                            }
+                            el = el.parentElement;
+                        }
+                        return false;
+                    }"""
                 )
             )
         except Exception:
