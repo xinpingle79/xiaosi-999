@@ -854,11 +854,15 @@ class Messager:
                 f"residual_chat={preclear_chat_left}。"
             )
             if self._check_stranger_limit_global():
-                log.warning(f"检测到陌生消息数量已达上限: {name}")
+                result = self._build_stranger_limit_result(
+                    name=name,
+                    stage="preflight",
+                )
+                log.warning(result["log"])
                 return {
-                    "status": "limit",
-                    "reason": "stranger_message_limit_reached",
-                    "alert_text": self.STRANGER_LIMIT_ALERT_TEXT,
+                    "status": result["status"],
+                    "reason": result["reason"],
+                    "alert_text": result["alert_text"],
                 }
 
             link = self._find_member_link(target)
@@ -952,57 +956,54 @@ class Messager:
                     return {"status": "error", "reason": "message_button_click_failed"}
             self._wait_if_paused()
 
-            chat_session = self._wait_for_chat_session(
+            chat_open_result = self._wait_for_chat_open_result(
                 expected_name=name,
                 timeout_ms=min(self.chat_session_wait_timeout_ms, 3600),
+                stage="聊天窗口首次复核",
             )
+            chat_session = chat_open_result.get("chat_session")
+            chat_shell_seen = bool(chat_open_result.get("shell_seen"))
             if not chat_session:
-                chat_shell = self._locate_chat_shell(expected_name=name) or self._locate_chat_shell()
-                if chat_shell:
-                    chat_session = self._wait_for_chat_session(
-                        expected_name=name,
-                        timeout_ms=min(self.chat_session_wait_timeout_ms, 1800),
-                    )
-                    if chat_session:
-                        log.info(f"{self._prefix()}检测到聊天壳层已出现，补充等待后聊天窗口恢复可用: {name}")
-                if not chat_session:
-                    restriction = self._detect_chat_restriction(expected_name=name)
-                    if restriction:
-                        log.warning(f"聊天窗口限制提示命中: {name} ({restriction['reason']})")
-                        self._dismiss_interfering_popups(context=f"成员 {name} 限制对话框收尾")
-                        self._close_visible_chat_windows()
-                        self._dismiss_member_hover_card()
-                        self._log_limit_dialog_page_state(name)
-                        return restriction
+                restriction = chat_open_result.get("restriction")
+                if restriction:
+                    log.warning(restriction["log"])
+                    self._dismiss_interfering_popups(context=f"成员 {name} 限制对话框收尾")
+                    self._close_visible_chat_windows()
+                    self._dismiss_member_hover_card()
+                    self._log_limit_dialog_page_state(name)
+                    return restriction
                 closed_popups = self._dismiss_interfering_popups(context=f"成员 {name} 聊天窗口未打开")
-                if closed_popups:
-                    chat_session = self._wait_for_chat_session(
+                if closed_popups or chat_open_result.get("shell_seen"):
+                    chat_open_result = self._wait_for_chat_open_result(
                         expected_name=name,
                         timeout_ms=min(self.chat_session_wait_timeout_ms, 1800),
+                        stage="聊天窗口二次复核",
                     )
+                    chat_session = chat_open_result.get("chat_session")
+                    chat_shell_seen = chat_shell_seen or bool(chat_open_result.get("shell_seen"))
                     if chat_session:
-                        log.info(f"{self._prefix()}关闭干扰弹层后，聊天窗口恢复可用: {name}")
-                if not chat_session:
-                    restriction = self._detect_chat_restriction(expected_name=name)
-                    if restriction:
-                        log.warning(f"聊天窗口二次复核命中限制提示: {name} ({restriction['reason']})")
-                        self._dismiss_interfering_popups(context=f"成员 {name} 限制对话框收尾")
-                        self._close_visible_chat_windows()
-                        self._dismiss_member_hover_card()
-                        self._log_limit_dialog_page_state(name)
-                        return restriction
+                        if closed_popups:
+                            log.info(f"{self._prefix()}关闭干扰弹层后，聊天窗口恢复可用: {name}")
+                    else:
+                        restriction = chat_open_result.get("restriction")
+                        if restriction:
+                            log.warning(restriction["log"])
+                            self._dismiss_interfering_popups(context=f"成员 {name} 限制对话框收尾")
+                            self._close_visible_chat_windows()
+                            self._dismiss_member_hover_card()
+                            self._log_limit_dialog_page_state(name)
+                            return restriction
                 if not chat_session:
                     overlay = self._detect_blocking_overlay()
                     if overlay:
                         overlay_restriction = self._build_restriction_result(
                             self._match_restriction_reason_from_text(overlay.get("text") or ""),
                             overlay.get("text") or "",
+                            name=name,
+                            stage="聊天窗口被限制弹层阻断",
                         )
                         if overlay_restriction:
-                            log.warning(
-                                f"{self._prefix()}聊天窗口被限制弹层阻断，升级为窗口级限制: "
-                                f"{name} ({overlay_restriction['reason']})"
-                            )
+                            log.warning(overlay_restriction["log"])
                             self._dismiss_interfering_popups(context=f"成员 {name} 限制对话框收尾")
                             self._close_visible_chat_windows()
                             self._dismiss_member_hover_card()
@@ -1014,6 +1015,10 @@ class Messager:
                         final_restriction = self._detect_prechat_restriction_result(
                             name,
                             stage="聊天窗口被弹层阻断后最终复核",
+                            link=link,
+                            hover_card=None,
+                            include_profile_gate=False,
+                            hard_only=False,
                         )
                         if final_restriction:
                             log.warning(final_restriction["log"])
@@ -1028,15 +1033,23 @@ class Messager:
                         )
                         return {"status": "error", "reason": "chat_popup_blocking"}
                 if self._check_stranger_limit_global():
-                    log.warning(f"未找到输入框但检测到陌生消息上限: {name}")
+                    result = self._build_stranger_limit_result(
+                        name=name,
+                        stage="聊天窗口未打开前最终复核",
+                    )
+                    log.warning(result["log"])
                     return {
-                        "status": "limit",
-                        "reason": "stranger_message_limit_reached",
-                        "alert_text": self.STRANGER_LIMIT_ALERT_TEXT,
+                        "status": result["status"],
+                        "reason": result["reason"],
+                        "alert_text": result["alert_text"],
                     }
                 final_restriction = self._detect_prechat_restriction_result(
                     name,
                     stage="聊天窗口未打开前最终复核",
+                    link=link,
+                    hover_card=None,
+                    include_profile_gate=False,
+                    hard_only=False,
                 )
                 if final_restriction:
                     log.warning(final_restriction["log"])
@@ -1046,32 +1059,6 @@ class Messager:
                         "reason": final_restriction["reason"],
                         "alert_text": final_restriction["alert_text"],
                     }
-                postclick_hover_card = self._find_hover_card_container(link)
-                postclick_gate_reason = self._detect_profile_message_gate(
-                    link,
-                    hover_card=postclick_hover_card,
-                    hard_only=False,
-                )
-                if postclick_gate_reason:
-                    gate_failure = self._classify_message_button_failure(
-                        link,
-                        name,
-                        hover_card=postclick_hover_card,
-                        hard_only=False,
-                    )
-                    if gate_failure and gate_failure.get("reason") == postclick_gate_reason:
-                        log.warning(
-                            f"{self._prefix()}聊天窗口未打开后复核资料卡命中限制: "
-                            f"{name} ({gate_failure['reason']})"
-                        )
-                        self._dismiss_member_hover_card()
-                        result = {
-                            "status": gate_failure.get("status", "skip"),
-                            "reason": gate_failure["reason"],
-                        }
-                        if gate_failure.get("alert_text"):
-                            result["alert_text"] = gate_failure["alert_text"]
-                        return result
                 closed_chats = self._close_visible_chat_windows()
                 if closed_chats > 0:
                     retry_button = None
@@ -1085,15 +1072,11 @@ class Messager:
                         if retry_link:
                             retry_button, retry_failure = self._resolve_member_card_message_button(retry_link, name)
                             if retry_failure:
-                                log.info(retry_failure["log"])
+                                log.warning(
+                                    f"{self._prefix()}聊天重试阶段未重新获取到发消息按钮，不再回退资料卡限制: {name}"
+                                )
                                 self._dismiss_member_hover_card()
-                                retry_result = {
-                                    "status": retry_failure.get("status", "skip"),
-                                    "reason": retry_failure["reason"],
-                                }
-                                if retry_failure.get("alert_text"):
-                                    retry_result["alert_text"] = retry_failure["alert_text"]
-                                return retry_result
+                                retry_button = None
                     if retry_button is not None:
                         try:
                             self._run_pause_aware_action(
@@ -1106,15 +1089,30 @@ class Messager:
                             except Exception:
                                 retry_button = None
                         if retry_button is not None:
-                            chat_session = self._wait_for_chat_session(
+                            retry_open_result = self._wait_for_chat_open_result(
                                 expected_name=name,
                                 timeout_ms=min(self.chat_session_wait_timeout_ms, 1800),
+                                stage="聊天窗口重试复核",
                             )
+                            chat_session = retry_open_result.get("chat_session")
+                            chat_shell_seen = chat_shell_seen or bool(retry_open_result.get("shell_seen"))
+                            retry_restriction = retry_open_result.get("restriction")
+                            if retry_restriction:
+                                log.warning(retry_restriction["log"])
+                                self._dismiss_interfering_popups(context=f"成员 {name} 限制对话框收尾")
+                                self._close_visible_chat_windows()
+                                self._dismiss_member_hover_card()
+                                self._log_limit_dialog_page_state(name)
+                                return retry_restriction
                             if chat_session:
                                 log.info(f"{self._prefix()}关闭残留聊天窗后，按原链重试恢复成功: {name}")
                 
                 if not chat_session:
                     self._dismiss_member_hover_card()
+                    if chat_shell_seen:
+                        log.warning(
+                            f"{self._prefix()}右侧聊天壳已出现，但未识别到可用输入框或限制提示，不再回退资料卡限制: {name}"
+                        )
                     log.warning(f"{self._prefix()}聊天窗口未正常打开，跳过: {name}")
                     return {"status": "error", "reason": "chat_editor_not_found"}
 
@@ -1129,15 +1127,22 @@ class Messager:
                     return {"status": "error", "reason": "chat_editor_not_ready"}
 
                 if self._check_stranger_limit_global():
-                    log.warning(f"进入聊天后检测到陌生消息数量已达上限: {name}")
+                    result = self._build_stranger_limit_result(
+                        name=name,
+                        stage="chat_open",
+                    )
+                    log.warning(result["log"])
                     return {
-                        "status": "limit",
-                        "reason": "stranger_message_limit_reached",
-                        "alert_text": self.STRANGER_LIMIT_ALERT_TEXT,
+                        "status": result["status"],
+                        "reason": result["reason"],
+                        "alert_text": result["alert_text"],
                     }
-                restriction = self._detect_chat_restriction(expected_name=name)
+                restriction = self._detect_chat_restriction(
+                    expected_name=name,
+                    stage="聊天窗口发送前复核",
+                )
                 if restriction:
-                    log.warning(f"聊天窗口限制提示命中: {name} ({restriction['reason']})")
+                    log.warning(restriction["log"])
                     self._dismiss_interfering_popups(context=f"成员 {name} 限制对话框收尾")
                     self._close_visible_chat_windows()
                     self._dismiss_member_hover_card()
@@ -1167,35 +1172,53 @@ class Messager:
                     return {"status": "error", "reason": "chat_editor_paste_failed"}
 
                 if delivery_state == "limit_reached":
-                    log.warning(f"聊天窗提示陌生消息数量已达上限: {name}")
+                    result = self._build_stranger_limit_result(
+                        name=name,
+                        stage="postsend",
+                    )
+                    log.warning(result["log"])
                     return {
-                        "status": "limit",
-                        "reason": "stranger_message_limit_reached",
-                        "alert_text": self.STRANGER_LIMIT_ALERT_TEXT,
+                        "status": result["status"],
+                        "reason": result["reason"],
+                        "alert_text": result["alert_text"],
                     }
 
                 if delivery_state == "message_request_limit_reached":
-                    log.warning(f"聊天窗提示消息请求发送达到上限: {name}")
+                    result = self._build_message_request_limit_result(
+                        name=name,
+                        stage="postsend",
+                    )
+                    log.warning(result["log"])
                     return {
-                        "status": "blocked",
-                        "reason": "message_request_limit_reached",
-                        "alert_text": self.MESSAGE_REQUEST_LIMIT_ALERT_TEXT,
+                        "status": result["status"],
+                        "reason": result["reason"],
+                        "alert_text": result["alert_text"],
                     }
 
-                if delivery_state == "account_cannot_message":
-                    log.info(f"聊天窗明确提示当前无法私聊该成员，直接跳过: {name}")
+                if delivery_state in ("messenger_login_required", "account_cannot_message"):
+                    result = self._build_skip_restriction_result(
+                        delivery_state,
+                        name=name,
+                        stage="postsend",
+                    )
+                    log.info(result["log"])
                     return {
-                        "status": "skip",
-                        "reason": "account_cannot_message",
-                        "alert_text": "当前无法向该成员发起私聊，已直接跳过。",
+                        "status": result["status"],
+                        "reason": result["reason"],
+                        "alert_text": result.get("alert_text"),
                     }
 
                 if delivery_state in ("failed", "send_restricted_ui"):
-                    log.warning(f"聊天窗明确提示发送失败，接入既有停窗提醒链: {name}")
+                    result = self._build_send_restricted_result(
+                        name=name,
+                        stage="postsend",
+                        alert_text="聊天窗口明确提示发送失败，当前窗口停止继续发送，请更换账户。",
+                    )
+                    log.warning(result["log"])
                     return {
-                        "status": "blocked",
-                        "reason": "send_restricted_ui",
-                        "alert_text": "聊天窗口明确提示发送失败，当前窗口停止继续发送，请更换账户。",
+                        "status": result["status"],
+                        "reason": result["reason"],
+                        "alert_text": result["alert_text"],
                     }
 
                 if delivery_state == "sent":
@@ -1218,35 +1241,53 @@ class Messager:
                             return {"status": "skip", "reason": "delivery_probe_sent"}
 
                         if probe_state == "limit_reached":
-                            log.warning(f"点赞型探针命中陌生消息数量上限: {name}")
+                            result = self._build_stranger_limit_result(
+                                name=name,
+                                stage="probe",
+                            )
+                            log.warning(result["log"])
                             return {
-                                "status": "limit",
-                                "reason": "stranger_message_limit_reached",
-                                "alert_text": self.STRANGER_LIMIT_ALERT_TEXT,
+                                "status": result["status"],
+                                "reason": result["reason"],
+                                "alert_text": result["alert_text"],
                             }
 
                         if probe_state == "message_request_limit_reached":
-                            log.warning(f"点赞型探针命中消息请求发送上限: {name}")
+                            result = self._build_message_request_limit_result(
+                                name=name,
+                                stage="probe",
+                            )
+                            log.warning(result["log"])
                             return {
-                                "status": "blocked",
-                                "reason": "message_request_limit_reached",
-                                "alert_text": self.MESSAGE_REQUEST_LIMIT_ALERT_TEXT,
-                            }
+                                "status": result["status"],
+                        "reason": result["reason"],
+                        "alert_text": result["alert_text"],
+                    }
 
-                        if probe_state == "account_cannot_message":
-                            log.info(f"点赞型探针明确提示当前无法私聊该成员，直接跳过: {name}")
+                        if probe_state in ("messenger_login_required", "account_cannot_message"):
+                            result = self._build_skip_restriction_result(
+                                probe_state,
+                                name=name,
+                                stage="probe",
+                            )
+                            log.info(result["log"])
                             return {
-                                "status": "skip",
-                                "reason": "account_cannot_message",
-                                "alert_text": "当前无法向该成员发起私聊，已直接跳过。",
+                                "status": result["status"],
+                                "reason": result["reason"],
+                                "alert_text": result.get("alert_text"),
                             }
 
                         if probe_state in ("failed", "send_restricted_ui"):
-                            log.warning(f"点赞型探针明确提示无法发送，接入既有停窗提醒链: {name}")
+                            result = self._build_send_restricted_result(
+                                name=name,
+                                stage="probe",
+                                alert_text="点赞探针发送后明确提示当前无法发送，当前窗口停止继续发送，请更换账户。",
+                            )
+                            log.warning(result["log"])
                             return {
-                                "status": "blocked",
-                                "reason": "send_restricted_ui",
-                                "alert_text": "聊天窗口明确提示发送失败，当前窗口停止继续发送，请更换账户。",
+                                "status": result["status"],
+                                "reason": result["reason"],
+                                "alert_text": result["alert_text"],
                             }
 
                         log.warning(f"{self._prefix()}点赞型探针未确认成功，保留静默失败计数: {name}")
@@ -1299,9 +1340,10 @@ class Messager:
                 timeout_ms=min(self.chat_session_wait_timeout_ms, 2200),
             )
         if not probe_session:
-            restriction = self._detect_chat_restriction(expected_name=expected_name)
-            mapped_restriction = self._map_restriction_to_delivery_state(restriction)
-            return mapped_restriction or "timeout", None
+            postsend_restriction = self._check_postsend_delivery_restriction(
+                expected_name=expected_name,
+            )
+            return postsend_restriction or "timeout", None
 
         probe_editor = probe_session.get("editor")
         if not probe_editor:
@@ -1311,9 +1353,10 @@ class Messager:
             probe_editor,
             timeout_ms=min(self.editor_ready_wait_timeout_ms, 1800),
         ):
-            restriction = self._detect_chat_restriction(expected_name=expected_name)
-            mapped_restriction = self._map_restriction_to_delivery_state(restriction)
-            return mapped_restriction or "timeout", probe_session
+            postsend_restriction = self._check_postsend_delivery_restriction(
+                expected_name=expected_name,
+            )
+            return postsend_restriction or "timeout", probe_session
 
         probe_state, rebound_session = self._paste_and_send(
             probe_editor,
@@ -1444,7 +1487,7 @@ class Messager:
         except Exception:
             return False
 
-    def _map_restriction_to_delivery_state(self, restriction):
+    def _map_postsend_restriction_to_delivery_state(self, restriction):
         if not restriction:
             return None
         reason = str(restriction.get("reason") or "").strip()
@@ -1453,11 +1496,22 @@ class Messager:
             return "limit_reached"
         if reason == "message_request_limit_reached":
             return "message_request_limit_reached"
+        if reason == "messenger_login_required":
+            return "messenger_login_required"
         if reason == "account_cannot_message":
             return "account_cannot_message"
         if reason == "send_restricted_ui":
             return "send_restricted_ui"
         return None
+
+    def _check_postsend_delivery_restriction(self, expected_name=None):
+        if self._check_stranger_limit_global():
+            return "limit_reached"
+        restriction = self._detect_chat_restriction(
+            expected_name=expected_name,
+            stage="postsend",
+        )
+        return self._map_postsend_restriction_to_delivery_state(restriction)
 
     def _retry_delivery_confirmation(
         self,
@@ -1472,10 +1526,11 @@ class Messager:
             f"{expected_name or 'unknown'}"
         )
         timeout_ms = timeout_ms or self.delivery_recheck_timeout_ms
-        restriction = self._detect_chat_restriction(expected_name=expected_name)
-        mapped_restriction = self._map_restriction_to_delivery_state(restriction)
-        if mapped_restriction:
-            return mapped_restriction, None
+        postsend_restriction = self._check_postsend_delivery_restriction(
+            expected_name=expected_name,
+        )
+        if postsend_restriction:
+            return postsend_restriction, None
 
         rebound_session = None
         if not self._chat_editor_gone(editor):
@@ -1489,12 +1544,11 @@ class Messager:
                 timeout_ms=min(self.chat_session_wait_timeout_ms, 2200),
             )
         if not rebound_session:
-            restriction = self._detect_chat_restriction(expected_name=expected_name)
-            mapped_restriction = self._map_restriction_to_delivery_state(restriction)
-            if mapped_restriction:
-                return mapped_restriction, None
-            if self._check_stranger_limit_global():
-                return "limit_reached", None
+            postsend_restriction = self._check_postsend_delivery_restriction(
+                expected_name=expected_name,
+            )
+            if postsend_restriction:
+                return postsend_restriction, None
             return "timeout", None
 
         rebound_editor = rebound_session.get("editor")
@@ -1505,23 +1559,26 @@ class Messager:
             rebound_editor,
             timeout_ms=min(self.editor_ready_wait_timeout_ms, 1800),
         ):
-            restriction = self._detect_chat_restriction(expected_name=expected_name)
-            mapped_restriction = self._map_restriction_to_delivery_state(restriction)
-            if mapped_restriction:
-                return mapped_restriction, rebound_session
+            postsend_restriction = self._check_postsend_delivery_restriction(
+                expected_name=expected_name,
+            )
+            if postsend_restriction:
+                return postsend_restriction, rebound_session
             return "timeout", rebound_session
 
         second_pass_state = self._wait_for_delivery(
             rebound_editor,
             text,
             before_state,
+            expected_name=expected_name,
             timeout_ms=timeout_ms,
         )
         if second_pass_state == "timeout":
-            restriction = self._detect_chat_restriction(expected_name=expected_name)
-            mapped_restriction = self._map_restriction_to_delivery_state(restriction)
-            if mapped_restriction:
-                return mapped_restriction, rebound_session
+            postsend_restriction = self._check_postsend_delivery_restriction(
+                expected_name=expected_name,
+            )
+            if postsend_restriction:
+                return postsend_restriction, rebound_session
         return second_pass_state, rebound_session
 
     def _paste_and_send(self, editor, text, expected_name=None, total_timeout_ms=None):
@@ -1554,6 +1611,7 @@ class Messager:
             editor,
             text,
             before_state,
+            expected_name=expected_name,
             timeout_ms=first_timeout_ms,
         )
         if delivery_state != "timeout":
@@ -1568,7 +1626,7 @@ class Messager:
             timeout_ms=retry_timeout_ms,
         )
 
-    def _wait_for_delivery(self, editor, text, before_state, timeout_ms=None):
+    def _wait_for_delivery(self, editor, text, before_state, expected_name=None, timeout_ms=None):
         timeout_ms = timeout_ms or self.delivery_confirm_timeout_ms
         before_state = self._normalize_delivery_state(before_state)
         before_hits = before_state["message_hits"]
@@ -1609,6 +1667,11 @@ class Messager:
                 return state.get("failure_reason") or "failed"
 
             if state["has_status"] or state["has_sent_time"]:
+                postsend_restriction = self._check_postsend_delivery_restriction(
+                    expected_name=expected_name,
+                )
+                if postsend_restriction:
+                    return postsend_restriction
                 return "sent"
 
             if state["message_hits"] > before_hits:
@@ -1622,6 +1685,11 @@ class Messager:
                     success_seen_at = time.time()
                     success_mode = current_mode
                 elif (time.time() - success_seen_at) * 1000 >= settle_ms:
+                    postsend_restriction = self._check_postsend_delivery_restriction(
+                        expected_name=expected_name,
+                    )
+                    if postsend_restriction:
+                        return postsend_restriction
                     return "sent"
             elif editor_empty and fingerprint_changed:
                 current_mode = "editor_commit"
@@ -1629,13 +1697,21 @@ class Messager:
                     success_seen_at = time.time()
                     success_mode = current_mode
                 elif (time.time() - success_seen_at) * 1000 >= commit_settle_ms:
+                    postsend_restriction = self._check_postsend_delivery_restriction(
+                        expected_name=expected_name,
+                    )
+                    if postsend_restriction:
+                        return postsend_restriction
                     return "sent"
             else:
                 success_seen_at = None
                 success_mode = None
             self._sleep(0.12)
-        if self._check_stranger_limit_global():
-            return "limit_reached"
+        postsend_restriction = self._check_postsend_delivery_restriction(
+            expected_name=expected_name,
+        )
+        if postsend_restriction:
+            return postsend_restriction
         return "timeout"
 
     def _normalize_delivery_state(self, state):
@@ -1794,7 +1870,7 @@ class Messager:
         except Exception:
             return []
 
-    def _detect_chat_restriction(self, expected_name=None):
+    def _detect_chat_restriction(self, expected_name=None, stage=""):
         payload = {
             "strangerLimitTexts": self.STRANGER_LIMIT_TEXTS,
             "messageRequestLimitTexts": self.MESSAGE_REQUEST_LIMIT_TEXTS,
@@ -1834,12 +1910,46 @@ class Messager:
                             }
                             return false;
                         };
+                        const containsRestrictionText = (text) => {
+                            if (!text) return false;
+                            const lowerText = String(text || '').toLowerCase();
+                            if ((payload.strangerLimitTexts || []).some((token) => text.includes(token))) return true;
+                            if ((payload.messageRequestLimitTexts || []).some((token) => text.includes(token))) return true;
+                            if ((payload.messengerLoginRequiredTexts || []).some((token) => text.includes(token))) return true;
+                            if ((payload.accountCannotMessageTexts || []).some((token) => text.includes(token))) return true;
+                            if ((payload.failureTexts || []).some((token) => text.includes(token))) return true;
+                            if ((payload.sendRestrictedTexts || []).some((token) => text.includes(token))) return true;
+                            if (
+                                (
+                                    lowerText.includes('24 hours')
+                                    && (lowerText.includes('message request') || lowerText.includes('requests'))
+                                )
+                                || (
+                                    text.includes('24 ชั่วโมง')
+                                    && (
+                                        text.includes('คำขอส่งข้อความ')
+                                        || text.includes('ส่งคำขอ')
+                                        || (text.includes('คำขอ') && text.includes('ขีดจำกัด'))
+                                    )
+                                )
+                            ) {
+                                return true;
+                            }
+                            return false;
+                        };
                         const isChatShell = (root) => {
                             if (!root || !isVisibleArea(root)) return false;
                             const rect = root.getBoundingClientRect();
                             if (rect.right < window.innerWidth * 0.55) return false;
                             if (matchesAnySelectorInside(root, payload.editorSelectors)) return true;
                             if (matchesAnySelectorInside(root, payload.chatCloseSelectors)) return true;
+                            const expectedName = normalize(payload.expectedName);
+                            const shellText = normalize(
+                                `${root.innerText || ''} ${root.getAttribute && root.getAttribute('aria-label') || ''}`
+                            );
+                            if (expectedName && shellText.includes(expectedName) && containsRestrictionText(shellText)) {
+                                return true;
+                            }
                             return false;
                         };
                         const areas = Array.from(
@@ -1958,42 +2068,53 @@ class Messager:
                             const hit = pickReason(candidate.text);
                             if (hit) return hit;
                         }
+
+                        if (expectedName) {
+                            const genericShellCandidates = [];
+                            for (const root of Array.from(document.querySelectorAll('div, aside, section, article'))) {
+                                if (!isVisibleArea(root)) continue;
+                                const rect = root.getBoundingClientRect();
+                                if (!rect.width || !rect.height) continue;
+                                if (rect.right < window.innerWidth * 0.55) continue;
+                                if (rect.width < 180 || rect.height < 120) continue;
+                                const text = normalize(
+                                    `${root.innerText || ''} ${root.getAttribute && root.getAttribute('aria-label') || ''}`
+                                );
+                                if (!text || !text.includes(expectedName) || !containsRestrictionText(text)) continue;
+                                genericShellCandidates.push({
+                                    area: rect.width * rect.height,
+                                    x: rect.x,
+                                    y: rect.y,
+                                    text,
+                                });
+                            }
+                            genericShellCandidates.sort((a, b) => {
+                                if (a.area !== b.area) return a.area - b.area;
+                                if (a.x !== b.x) return b.x - a.x;
+                                return a.y - b.y;
+                            });
+                            const seenGenericTexts = new Set();
+                            for (const candidate of genericShellCandidates) {
+                                if (!candidate || !candidate.text || seenGenericTexts.has(candidate.text)) continue;
+                                seenGenericTexts.add(candidate.text);
+                                const hit = pickReason(candidate.text);
+                                if (hit) return hit;
+                            }
+                        }
                         return null;
                     }""",
                     payload,
                 )
                 if not result:
                     continue
-                if result.get("reason") == "stranger_message_limit_reached":
-                    return {
-                        "status": "limit",
-                        "reason": "stranger_message_limit_reached",
-                        "alert_text": self.STRANGER_LIMIT_ALERT_TEXT,
-                    }
-                if result.get("reason") == "message_request_limit_reached":
-                    return {
-                        "status": "blocked",
-                        "reason": "message_request_limit_reached",
-                        "alert_text": self.MESSAGE_REQUEST_LIMIT_ALERT_TEXT,
-                    }
-                if result.get("reason") == "messenger_login_required":
-                    return {
-                        "status": "skip",
-                        "reason": "messenger_login_required",
-                        "alert_text": result.get("alert_text") or "对方当前未登录 Messenger，暂时无法发起对话。",
-                    }
-                if result.get("reason") == "account_cannot_message":
-                    return {
-                        "status": "skip",
-                        "reason": "account_cannot_message",
-                        "alert_text": result.get("alert_text") or "当前无法向该成员发起私聊，已直接跳过。",
-                    }
-                if result.get("reason") == "send_restricted_ui":
-                    return {
-                        "status": "blocked",
-                        "reason": "send_restricted_ui",
-                        "alert_text": result.get("alert_text") or "聊天对话框明确提示本次发送失败，当前窗口停止继续发送。",
-                    }
+                restriction_result = self._build_restriction_result(
+                    result.get("reason"),
+                    result.get("alert_text"),
+                    name=expected_name or "",
+                    stage=stage,
+                )
+                if restriction_result:
+                    return restriction_result
             except Exception:
                 continue
         return None
@@ -2088,11 +2209,6 @@ class Messager:
                         }
                         return true;
                     };
-                    const overlayAreas = Array.from(
-                        document.querySelectorAll(
-                            'div[role="dialog"], div[role="alert"], div[role="status"], [aria-live], div[role="presentation"]'
-                        )
-                    );
                     const editorRect = node.getBoundingClientRect();
                     const hasAnyToken = (textValue, tokens) => tokens.some((token) => textValue.includes(token));
 
@@ -2261,67 +2377,6 @@ class Messager:
                         hasSentTime = true;
                     }
 
-                    const shouldFallbackToOverlay = (
-                        messageHits <= 0
-                        && !hasStatus
-                        && !hasFailure
-                        && !hasStrangerLimit
-                        && !hasMessageRequestLimit
-                        && !hasSentTime
-                    );
-
-                    if (shouldFallbackToOverlay) {
-                        const candidates = overlayAreas.filter((el) => {
-                            if (!el || el === root || !isVisibleArea(el)) return false;
-                            const rect = el.getBoundingClientRect();
-                            if (rect.right < window.innerWidth * 0.45) return false;
-                            if (rect.bottom < editorRect.top - 260 || rect.top > editorRect.bottom + 260) return false;
-                            return true;
-                        });
-                        for (const area of candidates) {
-                            const areaText = normalize(
-                                `${area.innerText || ''} ${area.getAttribute && area.getAttribute('aria-label') || ''}`
-                            );
-                            if (!areaText) continue;
-                            if (expectedText && areaText.includes(expectedText) && messageHits <= 0) {
-                                messageHits = 1;
-                            }
-                            if (!hasStatus && statusTexts.some((status) => areaText.includes(status))) {
-                                hasStatus = true;
-                            }
-                            if (!hasFailure && failureTexts.some((status) => areaText.includes(status))) {
-                                hasFailure = true;
-                                failureReason = failureReason || 'send_restricted_ui';
-                            }
-                            if (!hasStrangerLimit && strangerLimitTexts.some((status) => areaText.includes(status))) {
-                                hasStrangerLimit = true;
-                            }
-                            if (
-                                !hasMessageRequestLimit
-                                && messageRequestLimitTexts.some((status) => areaText.includes(status))
-                            ) {
-                                hasMessageRequestLimit = true;
-                            }
-                            if (
-                                !hasFailure
-                                && accountCannotMessageTexts.some((status) => areaText.includes(status))
-                            ) {
-                                hasFailure = true;
-                                failureReason = 'account_cannot_message';
-                            }
-                            if (
-                                !hasFailure
-                                && sendRestrictedTexts.some((status) => areaText.includes(status))
-                            ) {
-                                hasFailure = true;
-                                failureReason = 'send_restricted_ui';
-                            }
-                            if (!hasSentTime && sentTimeRe.test(areaText)) {
-                                hasSentTime = true;
-                            }
-                        }
-                    }
-
                     if (expectedText && windowText.includes(expectedText) && messageHits <= 0) {
                         messageHits = 1;
                     }
@@ -2397,75 +2452,279 @@ class Messager:
             return "send_restricted_ui"
         return None
 
-    def _build_restriction_result(self, reason, alert_text=None):
+    def _build_restriction_result(self, reason, alert_text=None, name="", stage=""):
         normalized_reason = str(reason or "").strip()
         if not normalized_reason:
             return None
         if normalized_reason == "stranger_message_limit_reached":
-            return {
-                "status": "limit",
-                "reason": "stranger_message_limit_reached",
-                "alert_text": alert_text or self.STRANGER_LIMIT_ALERT_TEXT,
-            }
+            return self._build_stranger_limit_result(
+                name=name,
+                stage=stage,
+                alert_text=alert_text,
+            )
         if normalized_reason == "message_request_limit_reached":
-            return {
-                "status": "blocked",
-                "reason": "message_request_limit_reached",
-                "alert_text": alert_text or self.MESSAGE_REQUEST_LIMIT_ALERT_TEXT,
-            }
+            return self._build_message_request_limit_result(
+                name=name,
+                stage=stage,
+                alert_text=alert_text,
+            )
         if normalized_reason == "messenger_login_required":
-            return {
-                "status": "skip",
-                "reason": "messenger_login_required",
-                "alert_text": alert_text or "对方当前未登录 Messenger，暂时无法发起对话。",
-            }
+            return self._build_skip_restriction_result(
+                normalized_reason,
+                name=name,
+                stage=stage,
+                alert_text=alert_text,
+            )
         if normalized_reason == "account_cannot_message":
-            return {
-                "status": "skip",
-                "reason": "account_cannot_message",
-                "alert_text": alert_text or "当前无法向该成员发起私聊，已直接跳过。",
-            }
+            return self._build_skip_restriction_result(
+                normalized_reason,
+                name=name,
+                stage=stage,
+                alert_text=alert_text,
+            )
         if normalized_reason == "send_restricted_ui":
-            return {
-                "status": "blocked",
-                "reason": "send_restricted_ui",
-                "alert_text": alert_text or "当前窗口已被系统限制继续发送消息，请更换账户。",
-            }
+            return self._build_send_restricted_result(
+                name=name,
+                stage=stage,
+                alert_text=alert_text,
+            )
         return None
 
-    def _detect_prechat_restriction_result(self, name="", stage=""):
-        if self._check_stranger_limit_global():
-            return {
-                "status": "limit",
-                "reason": "stranger_message_limit_reached",
-                "alert_text": self.STRANGER_LIMIT_ALERT_TEXT,
-                "log": f"{self._prefix()}{stage}命中陌生消息上限，停止当前窗口: {name}",
-            }
+    def _normalize_restriction_stage(self, stage):
+        normalized_stage = str(stage or "").strip()
+        if not normalized_stage:
+            return ""
+        stage_map = {
+            "preflight": "成员开始前",
+            "profile_gate": "成员资料卡",
+            "chat_open": "进入聊天后",
+            "postsend": "发送后聊天窗",
+            "probe": "点赞探针发送后",
+            "发消息按钮点击失败前复核": "发消息按钮点击失败前复核",
+            "聊天窗口首次复核": "聊天窗口首次复核",
+            "聊天窗口二次复核": "聊天窗口二次复核",
+            "聊天窗口被限制弹层阻断": "聊天窗口被限制弹层阻断",
+            "聊天窗口被弹层阻断后最终复核": "聊天窗口被弹层阻断后最终复核",
+            "聊天窗口未打开前最终复核": "聊天窗口未打开前最终复核",
+            "聊天窗口发送前复核": "聊天窗口发送前复核",
+            "成员资料卡失败前复核": "成员资料卡失败前复核",
+        }
+        return stage_map.get(normalized_stage, normalized_stage)
 
-        page_restriction = self._detect_chat_restriction(expected_name=name)
-        if page_restriction:
-            restriction_result = self._build_restriction_result(
-                page_restriction.get("reason"),
-                page_restriction.get("alert_text"),
+    def _build_skip_restriction_result(self, reason, name="", stage="", alert_text=None):
+        normalized_reason = str(reason or "").strip()
+        if not normalized_reason:
+            return None
+        normalized_stage = self._normalize_restriction_stage(stage)
+        normalized_name = str(name or "").strip()
+        detail = self._sanitize_restriction_alert_text(normalized_reason, alert_text)
+        if not detail:
+            if normalized_reason == "messenger_login_required":
+                detail = "对方当前未登录 Messenger，暂时无法发起对话。"
+            elif normalized_reason == "account_cannot_message":
+                detail = "当前无法向该成员发起私聊，已直接跳过。"
+        reason_label_map = {
+            "messenger_login_required": "未登录 Messenger",
+            "account_cannot_message": "当前无法私聊该成员",
+            "add_friend_required": "需要先添加好友",
+            "follow_only": "当前仅支持关注",
+            "friend_required": "当前仅好友可私聊",
+            "invite_only": "当前仅支持邀请加入对话",
+        }
+        reason_label = reason_label_map.get(normalized_reason, normalized_reason)
+        log_text = ""
+        if normalized_stage == "profile_gate":
+            log_text = f"{self._prefix()}成员资料卡命中{reason_label}限制，直接跳过: {normalized_name}"
+        elif normalized_stage:
+            log_text = f"{self._prefix()}{normalized_stage}命中{reason_label}限制，直接跳过: {normalized_name}"
+        return {
+            "status": "skip",
+            "reason": normalized_reason,
+            **({"alert_text": detail} if detail else {}),
+            **({"log": log_text} if log_text else {}),
+        }
+
+    def _build_stranger_limit_result(self, name="", stage="", alert_text=None):
+        normalized_stage = self._normalize_restriction_stage(stage)
+        normalized_name = str(name or "").strip()
+        detail = self._sanitize_restriction_alert_text("stranger_message_limit_reached", alert_text)
+        if not detail:
+            if normalized_stage == "成员资料卡":
+                detail = "成员资料卡明确提示陌生消息数量已达上限，当前窗口停止继续发送，请更换账户。"
+            elif normalized_stage == "发送后聊天窗":
+                detail = "聊天窗口在发送后明确提示陌生消息数量已达上限，当前窗口停止继续发送，请更换账户。"
+            elif normalized_stage == "点赞探针发送后":
+                detail = "点赞探针发送后明确提示陌生消息数量已达上限，当前窗口停止继续发送，请更换账户。"
+            elif normalized_stage == "成员开始前":
+                detail = self.STRANGER_LIMIT_ALERT_TEXT
+            elif normalized_stage == "进入聊天后":
+                detail = self.STRANGER_LIMIT_ALERT_TEXT
+            else:
+                detail = self.STRANGER_LIMIT_ALERT_TEXT
+        log_text = ""
+        if normalized_stage == "成员资料卡":
+            log_text = f"{self._prefix()}成员资料卡明确提示陌生消息数量已达上限，停止当前窗口: {normalized_name}"
+        elif normalized_stage == "发送后聊天窗":
+            log_text = f"{self._prefix()}发送后聊天窗明确提示陌生消息数量已达上限，停止当前窗口: {normalized_name}"
+        elif normalized_stage == "点赞探针发送后":
+            log_text = f"{self._prefix()}点赞探针发送后明确提示陌生消息数量已达上限，停止当前窗口: {normalized_name}"
+        elif normalized_stage == "成员开始前":
+            log_text = f"{self._prefix()}成员开始前检测到陌生消息数量已达上限，停止当前窗口: {normalized_name}"
+        elif normalized_stage == "进入聊天后":
+            log_text = f"{self._prefix()}进入聊天后检测到陌生消息数量已达上限，停止当前窗口: {normalized_name}"
+        elif normalized_stage:
+            log_text = f"{self._prefix()}{normalized_stage}命中陌生消息上限，停止当前窗口: {normalized_name}"
+        return {
+            "status": "limit",
+            "reason": "stranger_message_limit_reached",
+            "alert_text": detail,
+            **({"log": log_text} if log_text else {}),
+        }
+
+    def _build_message_request_limit_result(self, name="", stage="", alert_text=None):
+        normalized_stage = self._normalize_restriction_stage(stage)
+        normalized_name = str(name or "").strip()
+        detail = self._sanitize_restriction_alert_text("message_request_limit_reached", alert_text)
+        if not detail:
+            if normalized_stage == "成员资料卡":
+                detail = "成员资料卡明确提示消息请求发送达到上限，当前窗口停止继续发送，请更换账户。"
+            elif normalized_stage == "发送后聊天窗":
+                detail = "聊天窗口在发送后明确提示消息请求发送达到上限，当前窗口停止继续发送，请更换账户。"
+            elif normalized_stage == "点赞探针发送后":
+                detail = "点赞探针发送后明确提示消息请求发送达到上限，当前窗口停止继续发送，请更换账户。"
+            else:
+                detail = self.MESSAGE_REQUEST_LIMIT_ALERT_TEXT
+        log_text = ""
+        if normalized_stage == "成员资料卡":
+            log_text = f"{self._prefix()}成员资料卡明确提示消息请求发送达到上限，停止当前窗口: {normalized_name}"
+        elif normalized_stage == "发送后聊天窗":
+            log_text = f"{self._prefix()}发送后聊天窗明确提示消息请求发送达到上限，停止当前窗口: {normalized_name}"
+        elif normalized_stage == "点赞探针发送后":
+            log_text = f"{self._prefix()}点赞探针发送后明确提示消息请求发送达到上限，停止当前窗口: {normalized_name}"
+        elif normalized_stage:
+            log_text = f"{self._prefix()}{normalized_stage}命中消息请求发送上限，停止当前窗口: {normalized_name}"
+        return {
+            "status": "blocked",
+            "reason": "message_request_limit_reached",
+            "alert_text": detail,
+            **({"log": log_text} if log_text else {}),
+        }
+
+    def _build_send_restricted_result(self, name="", stage="", alert_text=None):
+        normalized_stage = self._normalize_restriction_stage(stage)
+        normalized_name = str(name or "").strip()
+        detail = self._sanitize_restriction_alert_text("send_restricted_ui", alert_text)
+        if not detail:
+            if normalized_stage == "成员资料卡":
+                detail = "成员资料卡明确提示当前无法发送，当前窗口停止继续发送，请更换账户。"
+            elif normalized_stage == "发送后聊天窗":
+                detail = "聊天窗口在发送后明确提示当前无法发送，当前窗口停止继续发送，请更换账户。"
+            elif normalized_stage == "点赞探针发送后":
+                detail = "点赞探针发送后明确提示当前无法发送，当前窗口停止继续发送，请更换账户。"
+            else:
+                detail = "当前窗口已被系统限制继续发送消息，请更换账户。"
+        log_text = ""
+        if normalized_stage == "成员资料卡":
+            log_text = f"{self._prefix()}成员资料卡明确提示当前无法发送，停止当前窗口: {normalized_name}"
+        elif normalized_stage == "发送后聊天窗":
+            log_text = f"{self._prefix()}发送后聊天窗明确提示无法发送，停止当前窗口: {normalized_name}"
+        elif normalized_stage == "点赞探针发送后":
+            log_text = f"{self._prefix()}点赞探针发送后明确提示无法发送，停止当前窗口: {normalized_name}"
+        elif normalized_stage:
+            log_text = f"{self._prefix()}{normalized_stage}命中当前无法发送提示，停止当前窗口: {normalized_name}"
+        return {
+            "status": "blocked",
+            "reason": "send_restricted_ui",
+            "alert_text": detail,
+            **({"log": log_text} if log_text else {}),
+        }
+
+    def _sanitize_restriction_alert_text(self, reason, alert_text):
+        normalized_reason = str(reason or "").strip()
+        detail = self._normalize_text(alert_text)
+        if not detail:
+            return ""
+        if normalized_reason == "stranger_message_limit_reached":
+            return self.STRANGER_LIMIT_ALERT_TEXT
+        if normalized_reason == "message_request_limit_reached":
+            return self.MESSAGE_REQUEST_LIMIT_ALERT_TEXT
+        if normalized_reason == "send_restricted_ui":
+            if (
+                self._matches_any_text(detail, self.DELIVERY_FAILURE_TEXTS)
+                or self._matches_any_text(detail, self.SEND_RESTRICTED_TEXTS)
+            ):
+                return "当前窗口已被系统限制继续发送消息，请更换账户。"
+        return detail
+
+    def _build_profile_gate_result(self, gate_reason, name="", stage=""):
+        normalized_reason = str(gate_reason or "").strip()
+        if not normalized_reason:
+            return None
+        if normalized_reason == "stranger_message_limit_reached":
+            return self._build_stranger_limit_result(
+                name=name,
+                stage="profile_gate",
             )
-            if restriction_result:
-                restriction_result["log"] = (
-                    f"{self._prefix()}{stage}命中页面限制，停止当前窗口: "
-                    f"{name} ({restriction_result['reason']})"
-                )
-                return restriction_result
+        if normalized_reason == "message_request_limit_reached":
+            return self._build_message_request_limit_result(
+                name=name,
+                stage="profile_gate",
+            )
+        if normalized_reason == "send_restricted_ui":
+            return self._build_send_restricted_result(
+                name=name,
+                stage="profile_gate",
+            )
+        return self._build_skip_restriction_result(
+            normalized_reason,
+            name=name,
+            stage="profile_gate",
+        )
+
+    def _detect_prechat_restriction_result(
+        self,
+        name="",
+        stage="",
+        link=None,
+        hover_card=None,
+        include_profile_gate=False,
+        hard_only=False,
+    ):
+        if self._check_stranger_limit_global():
+            return self._build_stranger_limit_result(
+                name=name,
+                stage=stage,
+            )
+
+        page_restriction = self._detect_chat_restriction(
+            expected_name=name,
+            stage=stage,
+        )
+        if page_restriction:
+            return page_restriction
 
         overlay = self._detect_blocking_overlay()
         overlay_restriction = self._build_restriction_result(
             self._match_restriction_reason_from_text((overlay or {}).get("text") or ""),
             (overlay or {}).get("text") or "",
+            name=name,
+            stage=stage,
         )
         if overlay_restriction:
-            overlay_restriction["log"] = (
-                f"{self._prefix()}{stage}命中限制弹层，停止当前窗口: "
-                f"{name} ({overlay_restriction['reason']})"
-            )
             return overlay_restriction
+
+        if include_profile_gate and link is not None:
+            gate_reason = self._detect_profile_message_gate(
+                link,
+                hover_card=hover_card,
+                hard_only=hard_only,
+            )
+            if gate_reason:
+                return self._build_profile_gate_result(
+                    gate_reason,
+                    name=name,
+                    stage=stage,
+                )
         return None
 
     def _detect_blocking_overlay(self):
@@ -2710,38 +2969,25 @@ class Messager:
         gate_reason = self._detect_profile_message_gate(link, hover_card=hover_card, hard_only=hard_only)
         if gate_reason:
             if gate_reason == "stranger_message_limit_reached":
-                return {
-                    "status": "limit",
-                    "reason": "stranger_message_limit_reached",
-                    "alert_text": self.STRANGER_LIMIT_ALERT_TEXT,
-                    "log": f"{self._prefix()}成员资料卡命中陌生消息上限提示，停止当前窗口: {name}",
-                }
+                return self._build_stranger_limit_result(
+                    name=name,
+                    stage="profile_gate",
+                )
             if gate_reason == "message_request_limit_reached":
-                return {
-                    "status": "blocked",
-                    "reason": "message_request_limit_reached",
-                    "alert_text": self.MESSAGE_REQUEST_LIMIT_ALERT_TEXT,
-                    "log": f"{self._prefix()}成员资料卡命中消息请求上限提示，停止当前窗口: {name}",
-                }
-            if gate_reason == "account_cannot_message":
-                return {
-                    "status": "skip",
-                    "reason": "account_cannot_message",
-                    "alert_text": "当前无法向该成员发起私聊，已直接跳过。",
-                    "log": f"{self._prefix()}成员资料卡明确提示当前无法私聊该成员，直接跳过: {name}",
-                }
+                return self._build_message_request_limit_result(
+                    name=name,
+                    stage="profile_gate",
+                )
             if gate_reason == "send_restricted_ui":
-                return {
-                    "status": "blocked",
-                    "reason": "send_restricted_ui",
-                    "alert_text": "当前窗口已被系统限制继续发送消息，请更换账户。",
-                    "log": f"{self._prefix()}成员资料卡明确提示当前无法发送，停止当前窗口: {name}",
-                }
-            return {
-                "status": "skip",
-                "reason": gate_reason,
-                "log": f"{self._prefix()}成员资料卡限制，跳过: {name} ({gate_reason})",
-            }
+                return self._build_send_restricted_result(
+                    name=name,
+                    stage="profile_gate",
+                )
+            return self._build_skip_restriction_result(
+                gate_reason,
+                name=name,
+                stage="profile_gate",
+            )
 
         if hard_only:
             return None
@@ -3281,6 +3527,16 @@ class Messager:
         candidates.sort(key=lambda item: (item[0], item[1], item[2]))
         return candidates[0][3]
 
+    def _find_hover_card_for_link(self, link):
+        if not link:
+            return None
+        link_box = self._wait_for_stable_box(link, max_rounds=2, delay=0.06)
+        if not link_box:
+            link_box = self._safe_bounding_box(link, timeout_ms=650)
+        if not link_box:
+            return None
+        return self._find_hover_card_container(link_box)
+
     def _trigger_hover_card(self, link):
         triggered = False
         try:
@@ -3338,6 +3594,51 @@ class Messager:
             interval=0.12,
         )
         return result
+
+    def _wait_for_chat_open_result(self, expected_name=None, timeout_ms=10000, stage=""):
+        timeout_ms = self._scale_ms(timeout_ms, min_ms=1600)
+        start = time.time()
+        shell_seen = False
+        log.info(f"{self._prefix()}聊天窗口，等待聊天输入框或限制提示出现...")
+        while (time.time() - start) * 1000 < timeout_ms:
+            paused_seconds = self._wait_if_paused()
+            if paused_seconds:
+                start += paused_seconds
+            chat_session = self._locate_chat_session(expected_name=expected_name)
+            if chat_session:
+                waited = time.time() - start
+                log.info(f"{self._prefix()}聊天窗口等待成功，耗时 {waited:.1f} 秒。")
+                return {
+                    "chat_session": chat_session,
+                    "restriction": None,
+                    "shell_seen": True,
+                }
+            restriction = self._detect_chat_restriction(
+                expected_name=expected_name,
+                stage=stage,
+            )
+            if restriction:
+                waited = time.time() - start
+                log.info(f"{self._prefix()}聊天窗口限制识别完成，耗时 {waited:.1f} 秒。")
+                return {
+                    "chat_session": None,
+                    "restriction": restriction,
+                    "shell_seen": True,
+                }
+            shell = self._locate_chat_shell(expected_name=expected_name) or self._locate_chat_shell()
+            if shell:
+                shell_seen = True
+            self._sleep(0.12, min_seconds=0.02)
+        waited = time.time() - start
+        detail = "等待聊天输入框或限制提示出现失败"
+        if shell_seen:
+            detail = "右侧聊天壳已出现，但未识别到可用输入框或限制提示"
+        log.warning(f"{self._prefix()}聊天窗口等待超时，已等待 {waited:.1f} 秒，{detail}")
+        return {
+            "chat_session": None,
+            "restriction": None,
+            "shell_seen": shell_seen,
+        }
 
     def _locate_chat_shell(self, expected_name=None):
         candidates = []

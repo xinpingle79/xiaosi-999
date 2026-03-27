@@ -1,4 +1,5 @@
 import argparse
+import json
 import os
 import random
 import re
@@ -44,6 +45,7 @@ ENV_API_TOKEN = "FB_RPA_API_TOKEN"
 ENV_OWNER = "FB_RPA_OWNER"
 ENV_STOP_FLAG = "FB_RPA_STOP_FLAG"
 ENV_PAUSE_FLAG = "FB_RPA_PAUSE_FLAG"
+ENV_SELECTED_WINDOW_GROUPS_FILE = "FB_RPA_SELECTED_WINDOW_GROUPS_FILE"
 CLEANUP_HISTORY_DAYS = 15
 CLEANUP_LOG_DAYS = 7
 ALERT_COOLDOWN_SECONDS = 60
@@ -116,6 +118,77 @@ def _normalize_message_templates(templates):
         for item in (templates or [])
         if str(item).strip()
     ]
+
+
+def _extract_group_id(group_url):
+    url = str(group_url or "").strip()
+    if not url:
+        return ""
+    match = re.search(r"/groups/([^/?#]+)/?", url, re.IGNORECASE)
+    if not match:
+        return ""
+    return str(match.group(1) or "").strip()
+
+
+def _load_selected_window_groups():
+    path_text = str(os.environ.get(ENV_SELECTED_WINDOW_GROUPS_FILE) or "").strip()
+    if not path_text:
+        return None
+    path = Path(path_text).expanduser()
+    if not path.exists():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        log.warning(f"读取窗口级群白名单失败: {exc}")
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    normalized = {}
+    for raw_window_token, raw_groups in raw.items():
+        window_token = str(raw_window_token or "").strip()
+        if not window_token or not isinstance(raw_groups, list):
+            continue
+        normalized_groups = []
+        seen_group_ids = set()
+        for item in raw_groups:
+            if not isinstance(item, dict):
+                continue
+            group_id = str(item.get("group_id") or "").strip()
+            if not group_id or group_id in seen_group_ids:
+                continue
+            seen_group_ids.add(group_id)
+            normalized_groups.append(
+                {
+                    "group_id": group_id,
+                    "group_name": str(item.get("group_name") or "").strip(),
+                    "group_url": str(item.get("group_url") or "").strip(),
+                }
+            )
+        normalized[window_token] = normalized_groups
+    return normalized
+
+
+def _format_group_log_items(items):
+    parts = []
+    for item in items or []:
+        if isinstance(item, dict):
+            name = str(item.get("group_name") or "").strip()
+            group_id = str(item.get("group_id") or "").strip()
+            group_url = str(item.get("group_url") or "").strip()
+            if name and group_id:
+                parts.append(f"{name}({group_id})")
+            elif name:
+                parts.append(name)
+            elif group_id:
+                parts.append(group_id)
+            elif group_url:
+                parts.append(group_url)
+            continue
+        text = str(item or "").strip()
+        if text:
+            parts.append(text)
+    return "、".join(parts)
 
 
 def _sync_delivery_event(
@@ -258,28 +331,16 @@ def _runtime_dir(config=None):
 def _runtime_path(config, *parts):
     return _runtime_dir(config).joinpath(*parts)
 
-
-def _resolve_runtime_path(config, path_value):
-    if not path_value:
-        return ""
-    path_str = str(path_value)
-    if os.path.isabs(path_str):
-        return path_str
-    return str(_runtime_path(config, path_str))
-
-
 def _restart_requests_file(config):
     return _runtime_path(config, "data", "restart_window_requests.txt")
 
 
 def build_browser_settings(config):
-    browser_cfg = config.get("browser", {})
     bit_api_override = (os.environ.get(ENV_BIT_API) or "").strip()
     api_token_override = (os.environ.get(ENV_API_TOKEN) or "").strip()
     return {
         "bit_api": bit_api_override or config.get("bit_api"),
         "api_token": api_token_override or config.get("api_token"),
-        "auto_discover_bitbrowser": browser_cfg.get("auto_discover_bitbrowser", True),
         "bitbrowser_open_timeout_seconds": config.get("bitbrowser_open_timeout_seconds"),
         "bitbrowser_active_poll_seconds": config.get("bitbrowser_active_poll_seconds"),
         "bitbrowser_active_poll_interval_seconds": config.get("bitbrowser_active_poll_interval_seconds"),
@@ -535,7 +596,12 @@ def run_single_session(
                     f"[{alert_account_id}] 已成功接入 BitBrowser 会话，开始按小组顺序执行成员私聊..."
                 )
 
-                group_urls = collect_target_groups(scraper, task_cfg)
+                group_urls = collect_target_groups(
+                    scraper,
+                    task_cfg,
+                    window_token=window_token_label,
+                    account_label=alert_account_id,
+                )
                 page = resolve_active_runtime_page(page, scraper=scraper, sender=sender)
                 checkpoint_url = detect_checkpoint_account_issue(
                     page,
@@ -567,7 +633,6 @@ def run_single_session(
                 delivery_runtime_state = ensure_delivery_runtime_state()
                 for idx, group_url in enumerate(group_urls, start=1):
                     cont, _ = wait_if_paused(
-                        task_cfg,
                         db=db,
                         group_id=None,
                         account_id=account_id,
@@ -577,7 +642,7 @@ def run_single_session(
                         log.warning(f"[{alert_account_id}] 检测到停止标记，任务提前结束。")
                         final_reason = "stopped"
                         break
-                    if should_stop(task_cfg):
+                    if should_stop():
                         log.warning(f"[{alert_account_id}] 检测到停止标记，任务提前结束。")
                         final_reason = "stopped"
                         break
@@ -619,10 +684,9 @@ def run_single_session(
                         log.info(f"[{alert_account_id}] 当前小组已标记完成，跳过: {group_url}")
                         continue
                     log.info(f"[{alert_account_id}] 开始处理第 {idx}/{len(group_urls)} 个小组: {group_url}")
-
-                    remaining_budget = None
+                    group_message_budget = None
                     if max_messages is not None:
-                        remaining_budget = max_messages - total_sent
+                        group_message_budget = max(max_messages - total_sent, 0)
 
                     result = process_current_group(
                         scraper=scraper,
@@ -637,7 +701,7 @@ def run_single_session(
                         templates=formal_templates,
                         template_source=template_source,
                         task_cfg=task_cfg,
-                        message_budget=remaining_budget,
+                        message_budget=group_message_budget,
                         delivery_runtime_state=delivery_runtime_state,
                     )
                     total_sent += result["messages_sent"]
@@ -654,9 +718,7 @@ def run_single_session(
                         final_reason = "stopped"
                         break
                     if result["reason"] == "account_restricted":
-                        blocked_targets = result.get("blocked_targets") or []
-                        silent_targets = result.get("silent_targets") or []
-                        show_account_restricted_alert(alert_account_id, blocked_targets, silent_targets)
+                        show_account_restricted_alert(alert_account_id)
                         final_reason = "account_restricted"
                         break
                     if result["reason"] == "stranger_message_limit_reached":
@@ -822,7 +884,7 @@ def resolve_window_scope_id(profile=None, browser_id=None, window_token=None, ac
     return ""
 
 
-def collect_target_groups(scraper, task_cfg):
+def collect_target_groups(scraper, task_cfg, window_token="", account_label=""):
     current_group_root = scraper.get_current_group_root_url() if scraper.is_group_members_page() else None
     group_urls = scraper.collect_joined_group_urls(
         max_scrolls=task_cfg.get("group_list_scroll_times", 8)
@@ -843,7 +905,59 @@ def collect_target_groups(scraper, task_cfg):
             continue
         seen.add(url)
         ordered.append(url)
-    return ordered
+
+    selected_window_groups = _load_selected_window_groups()
+    normalized_window_token = str(window_token or "").strip()
+    account_prefix = f"[{account_label}] " if str(account_label or "").strip() else ""
+    if selected_window_groups is None:
+        return ordered
+
+    current_window_selected = list(selected_window_groups.get(normalized_window_token, []))
+    if not current_window_selected:
+        if normalized_window_token:
+            log.info(f"{account_prefix}当前窗口未配置任何已选群，跳过正式运行。")
+        else:
+            log.info(f"{account_prefix}当前运行未命中窗口白名单，跳过正式运行。")
+        return []
+
+    allowed_group_ids = {
+        str(item.get("group_id") or "").strip()
+        for item in current_window_selected
+        if str(item.get("group_id") or "").strip()
+    }
+    log.info(
+        f"{account_prefix}当前窗口允许运行的群组 {len(current_window_selected)} 个："
+        f"{_format_group_log_items(current_window_selected)}"
+    )
+
+    filtered = []
+    skipped = []
+    seen_allowed = set()
+    for group_url in ordered:
+        group_id = _extract_group_id(group_url)
+        if group_id and group_id in allowed_group_ids:
+            filtered.append(group_url)
+            seen_allowed.add(group_id)
+        else:
+            skipped.append(group_url)
+
+    if skipped:
+        log.info(
+            f"{account_prefix}以下小组未在白名单中，已跳过："
+            f"{_format_group_log_items(skipped)}"
+        )
+
+    missing_selected = [
+        item
+        for item in current_window_selected
+        if str(item.get("group_id") or "").strip() not in seen_allowed
+    ]
+    if missing_selected:
+        log.warning(
+            f"{account_prefix}白名单中的以下群未出现在当前窗口已加入小组列表中："
+            f"{_format_group_log_items(missing_selected)}"
+        )
+    return filtered
 
 
 def describe_cursor_target(cursor):
@@ -1211,10 +1325,6 @@ def process_member_targets(
     confirm_exhausted = False
     last_anchor_was_tail = False
     allow_anchor_reseed = False
-    blocked_targets = []
-    blocked_target_keys = set()
-    silent_targets = []
-    silent_target_keys = set()
     delivery_probe_trigger_threshold = 3
     delivery_probe_text = "👍"
 
@@ -1352,14 +1462,13 @@ def process_member_targets(
                 "messages_sent": messages_sent,
                 "reason": "account_restricted",
             }
-        if should_stop(task_cfg):
+        if should_stop():
             return {
                 "found_cursor": found_cursor,
                 "messages_sent": messages_sent,
                 "reason": "stopped",
             }
         cont, _ = wait_if_paused(
-            task_cfg,
             db=db,
             group_id=group_id,
             account_id=account_id,
@@ -1579,7 +1688,6 @@ def process_member_targets(
         last_anchor_was_tail = bool(target.get("is_tail"))
         log.info(f"➡️ 正在处理成员卡片: {target.get('name')}")
         cont, _ = wait_if_paused(
-            task_cfg,
             db=db,
             group_id=group_id,
             account_id=account_id,
@@ -1615,7 +1723,7 @@ def process_member_targets(
         ):
             log.info(f"已发过，跳过: {target['name']} ({profile_url})")
             db.save_cursor(group_id, target, account_id=account_id, scope_id=scope_id)
-            ui_settle_sleep(task_cfg)
+            ui_settle_sleep()
             continue
 
         if not db.try_claim_target(
@@ -1627,7 +1735,7 @@ def process_member_targets(
         ):
             log.info(f"其他窗口正在处理，跳过: {target['name']} ({profile_url})")
             db.save_cursor(group_id, target, account_id=account_id, scope_id=scope_id)
-            ui_settle_sleep(task_cfg)
+            ui_settle_sleep()
             continue
 
         latest_template_resolution = load_runtime_message_templates(
@@ -1719,32 +1827,26 @@ def process_member_targets(
                     "messages_sent": messages_sent,
                     "reason": "message_limit",
                 }
-            min_wait, max_wait, interval_meta = get_send_interval_detail(task_cfg)
+            min_wait, max_wait, interval_meta = get_send_interval_detail()
             wait_seconds = random.randint(min_wait, max_wait)
             log.info(
                 f"⏱ 发送频率读取: source={interval_meta.get('source')} "
                 f"value=[{min_wait}, {max_wait}] next_wait={wait_seconds}"
             )
             log.info(f"任务间歇休息 {wait_seconds} 秒后继续下一位...")
-            if not interruptible_sleep(task_cfg, wait_seconds):
+            if not interruptible_sleep(wait_seconds):
                 return {
                     "found_cursor": found_cursor,
                     "messages_sent": messages_sent,
                     "reason": "stopped",
                 }
-            blocked_targets.clear()
-            blocked_target_keys.clear()
-            silent_targets.clear()
-            silent_target_keys.clear()
         elif result["status"] == "skip":
             if result.get("reason") == "delivery_probe_sent":
                 delivery_runtime_state["delivery_not_confirmed_streak"] = 0
-                silent_targets.clear()
-                silent_target_keys.clear()
                 log.info(
                     f"点赞型探针发送成功，静默失败计数已清零，继续正常发送: {target['name']}"
                 )
-                ui_settle_sleep(task_cfg)
+                ui_settle_sleep()
                 continue
             delivery_runtime_state["delivery_not_confirmed_streak"] = 0
             log.info(f"跳过成员 {target['name']}: {result['reason']}")
@@ -1753,7 +1855,7 @@ def process_member_targets(
                 log.info(f"断点推进：成员 {target['name']} 属于永久跳过，已更新 cursor。")
             else:
                 log.warning(f"断点保留：成员 {target['name']} 属于暂时性失败，当前不推进 cursor。")
-            ui_settle_sleep(task_cfg)
+            ui_settle_sleep()
         elif result["status"] == "blocked":
             _record_delivery_result(
                 db=db,
@@ -1782,16 +1884,6 @@ def process_member_targets(
                     "alert_text": result.get("alert_text"),
                 }
 
-            block_key = target.get("user_id") or profile_url
-            if block_key not in blocked_target_keys:
-                blocked_target_keys.add(block_key)
-                blocked_targets.append(
-                    {
-                        "name": target.get("name"),
-                        "user_id": target.get("user_id"),
-                        "profile_url": profile_url,
-                    }
-                )
             log.warning(
                 f"检测到消息被拒绝，按单次明确失败立即停号: {target['name']}"
             )
@@ -1799,8 +1891,6 @@ def process_member_targets(
                 "found_cursor": found_cursor,
                 "messages_sent": messages_sent,
                 "reason": "account_restricted",
-                "blocked_targets": blocked_targets,
-                "silent_targets": silent_targets,
             }
         elif result["status"] == "limit":
             _record_delivery_result(
@@ -1838,18 +1928,8 @@ def process_member_targets(
                 f"处理成员失败，保留原断点等待下次重试: {target['name']} - {result['reason']}"
             )
             log.info(f"断点保留：成员 {target['name']} 失败类型为 {result['reason']}，当前不推进 cursor。")
-            ui_settle_sleep(task_cfg)
+            ui_settle_sleep()
             if result["reason"] == "delivery_not_confirmed":
-                silent_key = target.get("user_id") or profile_url
-                if silent_key not in silent_target_keys:
-                    silent_target_keys.add(silent_key)
-                    silent_targets.append(
-                        {
-                            "name": target.get("name"),
-                            "user_id": target.get("user_id"),
-                            "profile_url": profile_url,
-                        }
-                    )
                 delivery_runtime_state["delivery_not_confirmed_streak"] = (
                     int(delivery_runtime_state.get("delivery_not_confirmed_streak") or 0) + 1
                 )
@@ -1988,13 +2068,7 @@ def reached_message_limit(message_budget, sent_now):
     return message_budget is not None and sent_now >= message_budget
 
 
-def remaining_budget(message_budget, sent_now):
-    if message_budget is None:
-        return None
-    return max(message_budget - sent_now, 0)
-
-
-def get_send_interval_detail(task_cfg):
+def get_send_interval_detail():
     raw = None
     settings_path = _client_config_path()
     try:
@@ -2002,14 +2076,14 @@ def get_send_interval_detail(task_cfg):
     except Exception:
         mtime = None
 
-    cache = getattr(get_send_interval_seconds, "_cache", {"mtime": None, "value": None})
+    cache = getattr(get_send_interval_detail, "_cache", {"mtime": None, "value": None})
     if mtime and cache.get("mtime") != mtime:
         try:
             with open(settings_path, "r", encoding="utf-8") as f:
                 settings = yaml.safe_load(f) or {}
             raw = settings.get("task_settings", {}).get("send_interval_seconds")
             cache = {"mtime": mtime, "value": raw}
-            setattr(get_send_interval_seconds, "_cache", cache)
+            setattr(get_send_interval_detail, "_cache", cache)
         except Exception:
             raw = None
     elif cache.get("value") is not None:
@@ -2035,11 +2109,6 @@ def get_send_interval_detail(task_cfg):
     }
 
 
-def get_send_interval_seconds(task_cfg):
-    min_seconds, max_seconds, _ = get_send_interval_detail(task_cfg)
-    return min_seconds, max_seconds
-
-
 def _template_log_preview(template, limit=60):
     text = str(template or "").replace("\n", " ").strip()
     if len(text) <= limit:
@@ -2059,14 +2128,14 @@ def should_advance_cursor_for_skip(reason):
     return str(reason or "").strip() in permanent_reasons
 
 
-def should_stop(task_cfg):
+def should_stop():
     return runtime_flag_active(ENV_STOP_FLAG)
 
-def should_pause(task_cfg):
+def should_pause():
     return runtime_flag_active(ENV_PAUSE_FLAG)
 
-def wait_if_paused(task_cfg, db=None, group_id=None, account_id=None, scope_id=None, anchor=None):
-    if not should_pause(task_cfg):
+def wait_if_paused(db=None, group_id=None, account_id=None, scope_id=None, anchor=None):
+    if not should_pause():
         return True, False
     pause_logged = False
     cursor_saved = False
@@ -2097,22 +2166,22 @@ def wait_if_paused(task_cfg, db=None, group_id=None, account_id=None, scope_id=N
     return (not stopped), stopped
 
 
-def interruptible_sleep(task_cfg, seconds, step=0.2):
+def interruptible_sleep(seconds, step=0.2):
     deadline = time.time() + max(0, seconds)
     while time.time() < deadline:
-        cont, _ = wait_if_paused(task_cfg)
+        cont, _ = wait_if_paused()
         if not cont:
             return False
-        if should_stop(task_cfg):
+        if should_stop():
             return False
         remaining = deadline - time.time()
         time.sleep(min(step, max(0.01, remaining)))
     return True
 
 
-def ui_settle_sleep(task_cfg, base_ms=60, jitter_ms=80):
+def ui_settle_sleep(base_ms=60, jitter_ms=80):
     delay = (base_ms + random.randint(0, jitter_ms)) / 1000
-    interruptible_sleep(task_cfg, delay, step=0.05)
+    interruptible_sleep(delay, step=0.05)
 
 
 def _seconds_until_next_midnight(now=None):
@@ -2320,7 +2389,7 @@ def show_window_limit_alert(window_token, reason, detail_text=None):
     return shown
 
 
-def show_account_restricted_alert(account_id, blocked_targets=None, silent_targets=None):
+def show_account_restricted_alert(account_id):
     window_label = format_window_notice_label(account_id)
     message = f"温馨提示：{window_label}账号异常，请进行更换。"
     log.error(message.replace("\n", " | "))

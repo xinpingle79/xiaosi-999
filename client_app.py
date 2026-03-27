@@ -9,13 +9,12 @@ import uuid
 import ctypes
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import urlparse
 
 import requests
 import tkinter as tk
 import yaml
 from tkinter import font as tkfont
-from tkinter import messagebox, ttk
+from tkinter import messagebox
 
 from utils.logger import log
 APP_NAME = "小四客户端"
@@ -106,26 +105,16 @@ def _default_client_config() -> dict:
         "server_url": DEFAULT_SERVER_URL,
         "machine_id": _default_machine_id(),
         "agent_token": "",
-        "token_expires_at": None,
         "bit_api": DEFAULT_BIT_API,
         "api_token": "",
         "bitbrowser_cdp_connect_retry_count": 120,
         "bitbrowser_cdp_connect_retry_delay": 0.6,
         "bitbrowser_cdp_refresh_every": 6,
-        "browser": {
-            "auto_discover_bitbrowser": True,
-        },
         "window_no": "",
         "task_settings": {
-            "max_messages_per_account": 0,
-            "scroll_times": 0,
-            "group_list_scroll_times": 0,
-            "idle_scroll_limit": 3,
             "speed_factor": 0.85,
             "stranger_limit_cache_ms": 1200,
             "send_interval_seconds": [0, 0],
-            "max_windows": 0,
-            "resume_search_times": 20,
         },
     }
 
@@ -138,6 +127,7 @@ def _sanitize_client_config(data: dict) -> dict:
     cleaned["api_token"] = str(cleaned.get("api_token") or "").strip()
     cleaned["agent_token"] = str(cleaned.get("agent_token") or "").strip()
     cleaned["window_no"] = str(cleaned.get("window_no") or "").strip()
+    cleaned.pop("browser", None)
     cleaned.pop("message_templates", None)
     task_settings = cleaned.get("task_settings")
     if isinstance(task_settings, dict):
@@ -153,15 +143,9 @@ def _sanitize_client_config(data: dict) -> dict:
             "typing_delay",
         ):
             task_settings.pop(key, None)
-    if cleaned.get("token_expires_at") in ("", []):
-        cleaned["token_expires_at"] = None
     for key in ("activation_code", "register_token", "owner", "expire_at", "max_devices"):
         cleaned.pop(key, None)
     return cleaned
-
-
-def _should_migrate_server_url(server_url: str) -> bool:
-    return False
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
@@ -236,9 +220,6 @@ def load_client_config() -> dict:
     migrated_legacy_templates = _migrate_legacy_message_templates(loaded)
     merged = _sanitize_client_config(_deep_merge(config, loaded))
     should_rewrite = False
-    if _should_migrate_server_url(loaded.get("server_url") or ""):
-        merged["server_url"] = DEFAULT_SERVER_URL
-        should_rewrite = True
     if "message_templates" in loaded or migrated_legacy_templates:
         should_rewrite = True
     if any(key in loaded for key in ("activation_code", "register_token", "owner", "expire_at", "max_devices")):
@@ -435,15 +416,6 @@ def _parse_expire_at(value):
             continue
     return None
 
-
-def _format_expire_at(value):
-    ts = _parse_expire_at(value)
-    if ts is None:
-        raw = str(value or "").strip()
-        return raw or "-"
-    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
-
-
 def _license_is_expired(license_data):
     ts = _parse_expire_at((license_data or {}).get("expire_at"))
     return ts is not None and time.time() >= ts
@@ -544,7 +516,6 @@ class ClientApp:
         self._action_button_styles = {}
         self._action_lock_until = {}
         self._taskbar_style_ready = False
-        self._taskbar_shell_refresh_pending = False
         self._button_state_snapshot = {
             "agent_online": False,
             "task_running": False,
@@ -568,7 +539,7 @@ class ClientApp:
             value=str(self.client_config.get("api_token") or "").strip()
         )
         self.activation_notice_text = tk.StringVar(value="")
-        self.window_count_text = tk.StringVar(value=self._initial_window_count())
+        self.window_count_text = tk.StringVar(value=self._format_window_count_display(0))
         self.window_no_text = tk.StringVar(value=str(self.client_config.get("window_no") or ""))
         self.sent_count_text = tk.StringVar(value="0")
         self.failed_count_text = tk.StringVar(value="0")
@@ -1013,15 +984,7 @@ class ClientApp:
             except Exception:
                 continue
 
-    def _deiconify_then_iconify(self):
-        try:
-            self.root.deiconify()
-            self.root.update_idletasks()
-            self.root.iconify()
-        finally:
-            self._taskbar_shell_refresh_pending = False
-
-    def _ensure_taskbar_window(self, refresh_shell=False, iconify_after_refresh=False):
+    def _ensure_taskbar_window(self, refresh_shell=False):
         if not sys.platform.startswith("win"):
             return
         try:
@@ -1054,25 +1017,14 @@ class ClientApp:
             if refresh_shell or style_changed or not self._taskbar_style_ready:
                 self._taskbar_style_ready = True
                 self.root.withdraw()
-                if iconify_after_refresh:
-                    self._taskbar_shell_refresh_pending = True
-                    self.root.after(30, self._deiconify_then_iconify)
-                else:
-                    self.root.after(30, self.root.deiconify)
+                self.root.after(30, self.root.deiconify)
         except Exception:
-            self._taskbar_shell_refresh_pending = False
-            if iconify_after_refresh:
-                self.root.iconify()
-
-    def _initial_window_count(self):
-        return self._format_window_count_display(
-            (self.client_config.get("task_settings") or {}).get("max_windows")
-        )
+            pass
 
     def _format_window_count_display(self, raw_value):
         raw_text = str("" if raw_value is None else raw_value).strip()
         if raw_text == "":
-            return "10"
+            return "0"
         return str(max(0, _parse_int(raw_value, 0)))
 
     def _build_ui(self):
@@ -1248,8 +1200,6 @@ class ClientApp:
         self._drag_origin = None
 
     def _handle_window_map(self, _event=None):
-        if self._taskbar_shell_refresh_pending:
-            return
         if self._is_minimizing:
             self._is_minimizing = False
             self.root.after(10, self._restore_custom_window_chrome)
@@ -1267,7 +1217,8 @@ class ClientApp:
             self.root.iconify()
             return
         self.root.overrideredirect(False)
-        self._ensure_taskbar_window(refresh_shell=True, iconify_after_refresh=True)
+        self._ensure_taskbar_window(refresh_shell=False)
+        self.root.iconify()
 
     def _toggle_maximize(self):
         if self._is_maximized:
@@ -2095,16 +2046,12 @@ class ClientApp:
         send_interval = (
             self.client_config.get("task_settings", {}).get("send_interval_seconds") or [0, 0]
         )
-        task_settings = self.client_config.get("task_settings") or {}
         min_value = str(_parse_int(send_interval[0] if len(send_interval) > 0 else 0, 0))
         max_value = str(_parse_int(send_interval[1] if len(send_interval) > 1 else 0, 0))
         self.min_interval.delete(0, tk.END)
         self.min_interval.insert(0, min_value)
         self.max_interval.delete(0, tk.END)
         self.max_interval.insert(0, max_value)
-        self.window_count_text.set(
-            self._format_window_count_display(task_settings.get("max_windows"))
-        )
         self.window_no_text.set(str(self.client_config.get("window_no") or "").strip())
         license_expired = _license_is_expired(self.license_data)
         self.verified = _client_can_use_token(self.client_config, self.license_data)
@@ -2175,7 +2122,7 @@ class ClientApp:
             "max_devices": info.get("max_devices"),
         }
         save_license(self.license_data)
-        self._store_local_auth(info.get("agent_token"), info.get("token_expires_at"))
+        self._store_local_auth(info.get("agent_token"))
         self.verified = bool(self._current_agent_token())
         if self.verified and not silent:
             self._set_activation_notice("已自动恢复当前设备的登录状态", error=False)
@@ -2184,7 +2131,6 @@ class ClientApp:
     def _clear_local_auth(self, preserve_license=True):
         config = load_client_config()
         config["agent_token"] = ""
-        config["token_expires_at"] = None
         save_client_config(config)
         self.client_config = config
         self.verified = False
@@ -2195,10 +2141,9 @@ class ClientApp:
         self.server_url = _normalize_server_url(config.get("server_url") or DEFAULT_SERVER_URL)
         self.machine_id = str(config.get("machine_id") or self.machine_id).strip()
 
-    def _store_local_auth(self, agent_token, token_expires_at):
+    def _store_local_auth(self, agent_token):
         config = self._build_client_config()
         config["agent_token"] = str(agent_token or "").strip()
-        config["token_expires_at"] = token_expires_at
         save_client_config(config)
         self.client_config = config
         self.server_url = _normalize_server_url(config.get("server_url") or DEFAULT_SERVER_URL)
@@ -2219,17 +2164,11 @@ class ClientApp:
         config["server_url"] = self.server_url or DEFAULT_SERVER_URL
         config["machine_id"] = self.machine_id
         config["agent_token"] = str(config.get("agent_token") or self.client_config.get("agent_token") or "").strip()
-        config["token_expires_at"] = config.get("token_expires_at", self.client_config.get("token_expires_at"))
         config["bit_api"] = _normalize_bit_api(self.bit_api.get())
         config["api_token"] = str(self.api_token.get() or "").strip()
         config["window_no"] = str(self.window_no_text.get() or "").strip()
         config.setdefault("task_settings", {})
         config["task_settings"]["send_interval_seconds"] = interval
-        current_max_windows = config["task_settings"].get("max_windows")
-        if current_max_windows is not None:
-            config["task_settings"]["max_windows"] = max(0, _parse_int(current_max_windows, 0))
-        else:
-            config["task_settings"].pop("max_windows", None)
         return config
 
     def _save_local_config(self, require_connection_fields=False):
@@ -2731,7 +2670,7 @@ class ClientApp:
             "max_devices": info.get("max_devices"),
         }
         save_license(self.license_data)
-        self._store_local_auth(info.get("agent_token"), info.get("token_expires_at"))
+        self._store_local_auth(info.get("agent_token"))
         self.activation_code.set("")
         self.verified = bool(self._current_agent_token())
         if not self._save_local_config(require_connection_fields=False):

@@ -33,7 +33,7 @@
           <header class="page-header">
             <div id="page-title" class="page-title">任务管理</div>
             <div class="page-actions">
-              <button id="save-btn" class="ghost">保存</button>
+              <button id="save-btn" class="ghost hidden">保存</button>
             </div>
           </header>
 
@@ -119,10 +119,9 @@
                   <button id="stop-btn" class="danger">停止</button>
                   <button id="pause-btn" class="ghost">暂停</button>
                   <button id="resume-btn" class="ghost">继续</button>
+                  <button id="collect-btn" class="ghost">采集</button>
                 </div>
                 <div class="control-group">
-                  <label class="inline-label" for="max-windows">窗口数量</label>
-                  <input id="max-windows" class="mini-inline-input" type="number" min="0" />
                   <label class="inline-label" for="restart-window-token">窗口号</label>
                   <input
                     id="restart-window-token"
@@ -191,6 +190,37 @@
               </div>
             </section>
 
+            <section class="card device-detail-card" data-page="device-detail">
+              <div class="card-header">
+                <div class="card-title">设备详情</div>
+                <div id="device-detail-meta" class="device-detail-meta">请选择设备查看窗口采集结果。</div>
+                <div class="card-actions">
+                  <button id="device-detail-back-btn" class="ghost">返回设备管理</button>
+                  <button id="device-detail-save-btn" class="primary">保存选择</button>
+                </div>
+              </div>
+              <div class="table-wrap table-scroll-y">
+                <table class="data-table table-nowrap">
+                  <thead>
+                    <tr>
+                      <th class="col-index">序号</th>
+                      <th>窗口号</th>
+                      <th>窗口名称</th>
+                      <th>群组名称</th>
+                      <th>群链接</th>
+                      <th>采集时间</th>
+                      <th>选中</th>
+                    </tr>
+                  </thead>
+                  <tbody id="device-detail-table-body">
+                    <tr class="empty-row">
+                      <td colspan="7">请先从设备管理查看详情</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </section>
+
             <section class="card sub-device-info-card" data-page="device-info">
               <div class="card-header">
                 <div class="card-title">设备信息</div>
@@ -237,23 +267,6 @@
         </div>
       </div>
     </div>
-    <div id="prompt-modal" class="modal hidden" aria-hidden="true">
-      <div class="modal-backdrop"></div>
-      <div class="modal-card">
-        <div id="prompt-title" class="modal-title">输入</div>
-        <div class="modal-body">
-          <div id="prompt-body" class="modal-field"></div>
-          <div class="modal-field">
-            <label>请输入</label>
-            <input id="prompt-input" type="text" />
-          </div>
-        </div>
-        <div class="modal-actions">
-          <button id="prompt-cancel" class="ghost">取消</button>
-          <button id="prompt-ok" class="primary">确定</button>
-        </div>
-      </div>
-    </div>
-    <script src="/app.js?v=20260323a"></script>
+    <script src="/app.js?v=20260327b"></script>
   </body>
 </html>

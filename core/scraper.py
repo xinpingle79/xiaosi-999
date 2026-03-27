@@ -1,4 +1,3 @@
-import os
 import random
 import time
 from urllib.parse import parse_qs, urljoin, urlparse
@@ -1209,15 +1208,15 @@ class Scraper:
         self._scroll_joined_groups_container(to_top=True)
         return self._wait_for_groups_list_ready(timeout=timeout, step_name=step_name)
 
-    def collect_joined_group_urls(self, max_scrolls=8):
+    def collect_joined_groups(self, max_scrolls=8):
         if not self.open_groups_feed():
             return []
         if not self._open_joined_groups_listing():
             return []
         self._scroll_joined_groups_container(to_top=True)
 
-        group_urls = []
-        seen_urls = set()
+        groups = []
+        seen_group_ids = set()
         idle_rounds = 0
         round_idx = 0
         recovery_attempts = 0
@@ -1225,26 +1224,34 @@ class Scraper:
         unlimited = not max_scrolls or int(max_scrolls) <= 0
 
         while unlimited or round_idx < int(max_scrolls):
-            batch = self._extract_joined_group_urls()
-            if not batch:
+            batch = self._joined_groups_snapshot()
+            if not batch.get("ready"):
                 self._wait_for_groups_list_ready(timeout=3.0, step_name="已加入小组列表")
-                batch = self._extract_joined_group_urls()
+                batch = self._joined_groups_snapshot()
+            items = list(batch.get("items") or [])
             added = 0
-            for item in batch:
-                group_root = self._extract_group_root_url(item.get("href"))
-                if not group_root or group_root in seen_urls:
+            for item in items:
+                group_url = self._extract_group_root_url(item.get("href"))
+                group_id = self._extract_group_id(group_url)
+                if not group_id or group_id in seen_group_ids:
                     continue
-                seen_urls.add(group_root)
-                group_urls.append(group_root)
+                seen_group_ids.add(group_id)
+                groups.append(
+                    {
+                        "group_id": group_id,
+                        "group_name": str(item.get("text") or "").strip(),
+                        "group_url": group_url,
+                    }
+                )
                 added += 1
 
             log.info(
-                f"正在收集已加入小组 (轮次: {round_idx + 1}{'' if unlimited else '/' + str(max_scrolls)})，"
-                f"本轮新增 {added} 个，累计 {len(group_urls)} 个"
+                f"正在采集已加入小组 (轮次: {round_idx + 1}{'' if unlimited else '/' + str(max_scrolls)})，"
+                f"本轮新增 {added} 个，累计 {len(groups)} 个"
             )
 
             idle_rounds = idle_rounds + 1 if added == 0 else 0
-            list_ready = bool(batch) or self._has_groups_list_ready()
+            list_ready = bool(items) or self._has_groups_list_ready()
             if added == 0 and idle_rounds >= 2 and not list_ready and recovery_attempts < max_recovery_attempts:
                 recovery_attempts += 1
                 log.info(
@@ -1265,7 +1272,15 @@ class Scraper:
                 break
             round_idx += 1
 
-        return group_urls
+        return groups
+
+    def collect_joined_group_urls(self, max_scrolls=8):
+        groups = self.collect_joined_groups(max_scrolls=max_scrolls)
+        return [
+            str(item.get("group_url") or "").strip()
+            for item in groups
+            if str(item.get("group_url") or "").strip()
+        ]
 
     def open_group_members_page(self, group_url):
         group_root = self._extract_group_root_url(group_url)
@@ -2589,7 +2604,7 @@ class Scraper:
                             if (/\\/members(\\/|\\?|$)/i.test(normalizedHref)) return false;
                             return /\\/groups\\/[0-9A-Za-z_-]+(\\/|\\?|$)/i.test(normalizedHref);
                         };
-                        const visibleGroupLinks = Array.from(document.querySelectorAll('a[href]'))
+                        const visibleGroupLinks = Array.from(main.querySelectorAll('a[href]'))
                             .filter((el) => {
                                 if (!visible(el)) return false;
                                 const href = (el.getAttribute && (el.getAttribute('href') || '')) || '';
@@ -2606,8 +2621,8 @@ class Scraper:
                             })
                             .length;
                         const mainText = normalize(main.innerText || document.body.innerText || '');
-                        const richMainText = mainText.length >= 220;
-                        const structuredSurface = visibleHeadings >= 2 && mainText.length >= 120;
+                        const richMainText = visibleGroupLinks >= 1 && mainText.length >= 220;
+                        const structuredSurface = visibleGroupLinks >= 1 && visibleHeadings >= 2 && mainText.length >= 120;
                         return (visibleGroupLinks >= 2 && mainText.length >= 80) || structuredSurface || richMainText;
                     }"""
                 )
@@ -3304,6 +3319,16 @@ class Scraper:
         segments = [segment for segment in parsed.path.split("/") if segment]
         if len(segments) >= 2 and segments[0] == "groups":
             return f"https://www.facebook.com/groups/{segments[1]}"
+        return None
+
+    def _extract_group_id(self, url):
+        group_root = self._extract_group_root_url(url)
+        if not group_root:
+            return None
+        parsed = urlparse(group_root)
+        segments = [segment for segment in parsed.path.split("/") if segment]
+        if len(segments) >= 2 and segments[0] == "groups":
+            return segments[1].strip() or None
         return None
 
     def _is_group_root_url(self, url, expected_root=None):

@@ -245,6 +245,12 @@ select {
   color: var(--title-text);
 }
 
+.card-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
 .control-card {
   padding: 12px 16px;
 }
@@ -890,12 +896,14 @@ button:disabled {
 
 /* 子账户设备信息页顶部留白与设备管理一致 */
 .card[data-page="device-info"],
-.card[data-page="device"] {
+.card[data-page="device"],
+.card[data-page="device-detail"] {
   padding-top: 12px;
 }
 
 .card[data-page="device-info"] .card-header,
-.card[data-page="device"] .card-header {
+.card[data-page="device"] .card-header,
+.card[data-page="device-detail"] .card-header {
   margin-bottom: 8px;
 }
 
@@ -1436,6 +1444,33 @@ body {
   color: var(--muted-text);
   font-size: 14px;
   margin-top: 12px;
+}
+
+.device-detail-card .card-header {
+  gap: 12px;
+  margin-bottom: 6px;
+}
+
+.device-detail-card .card-title {
+  font-size: 16px;
+}
+
+.device-detail-meta {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--muted-text);
+  font-size: 13px;
+  line-height: 1.25;
+}
+
+.device-detail-card .card-actions {
+  gap: 8px;
+}
+
+.device-detail-card .card-actions button {
+  height: 32px;
+  padding: 0 12px;
+  font-size: 13px;
 }
 
 .hidden {

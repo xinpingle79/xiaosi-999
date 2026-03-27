@@ -8,6 +8,7 @@ const startBtn = document.getElementById("start-btn");
 const stopBtn = document.getElementById("stop-btn");
 const pauseBtn = document.getElementById("pause-btn");
 const resumeBtn = document.getElementById("resume-btn");
+const collectBtn = document.getElementById("collect-btn");
 const restartWindowBtn = document.getElementById("restart-window-btn");
 const currentAccountName = document.getElementById("current-account-name");
 const currentAccountRole = document.getElementById("current-account-role");
@@ -34,6 +35,10 @@ const trendAxis = document.getElementById("trend-axis");
 const userTableBody = document.getElementById("user-table-body");
 const deviceTableBody = document.getElementById("device-table-body");
 const deviceInfoTableBody = document.getElementById("device-info-table-body");
+const deviceDetailMeta = document.getElementById("device-detail-meta");
+const deviceDetailTableBody = document.getElementById("device-detail-table-body");
+const deviceDetailBackBtn = document.getElementById("device-detail-back-btn");
+const deviceDetailSaveBtn = document.getElementById("device-detail-save-btn");
 const addUserBtn = document.getElementById("add-user-btn");
 const userModal = document.getElementById("user-modal");
 const userModalTitle = document.getElementById("user-modal-title");
@@ -47,17 +52,13 @@ const userModalSave = document.getElementById("user-modal-save");
 const userModalCancel = document.getElementById("user-modal-cancel");
 const userModalToggle = document.getElementById("user-modal-toggle");
 let lastTrend = null;
-let lastUserPayload = null;
 let logUserInteracting = false;
 let tableUserInteracting = false;
 let dashboardLabelsReady = false;
-let currentAccountInfo = {
-  username: "",
-  role_label: "",
-};
 let latestStatusPayload = null;
 let latestAgentRows = [];
 let latestDeviceInfoRows = [];
+let currentDeviceDetail = null;
 
 function isLogSelectionActive() {
   if (!logOutput) return false;
@@ -137,7 +138,6 @@ function translateErrorMessage(value) {
 }
 
 const fields = {
-  maxWindows: document.getElementById("max-windows"),
   templates: document.getElementById("templates"),
 };
 
@@ -156,6 +156,9 @@ if (pauseBtn) {
 }
 if (resumeBtn) {
   resumeBtn.addEventListener("click", resumeTask);
+}
+if (collectBtn) {
+  collectBtn.addEventListener("click", collectGroups);
 }
 if (restartWindowToken) {
   restartWindowToken.addEventListener("input", () => applyTaskButtonState());
@@ -195,7 +198,15 @@ if (userTableBody) {
 if (deviceTableBody) {
   deviceTableBody.addEventListener("click", handleDeviceTableClick);
 }
-const tableSelectionRoots = [userTableBody, deviceTableBody, deviceInfoTableBody].filter(Boolean);
+if (deviceDetailBackBtn) {
+  deviceDetailBackBtn.addEventListener("click", () => {
+    setActivePage("device", "设备管理", false);
+  });
+}
+if (deviceDetailSaveBtn) {
+  deviceDetailSaveBtn.addEventListener("click", saveDeviceDetailSelections);
+}
+const tableSelectionRoots = [userTableBody, deviceTableBody, deviceInfoTableBody, deviceDetailTableBody].filter(Boolean);
 
 function isTableSelectionActive() {
   const selection = window.getSelection();
@@ -264,22 +275,14 @@ async function loadCurrentAccount() {
       redirectToLogin();
       return;
     }
-    currentAccountInfo = {
-      username: IS_SUB ? "-" : "admin",
-      role_label: IS_SUB ? "子账户" : "管理员",
-    };
-    currentAccountName.textContent = currentAccountInfo.username;
-    currentAccountRole.textContent = currentAccountInfo.role_label;
+    currentAccountName.textContent = IS_SUB ? "-" : "admin";
+    currentAccountRole.textContent = IS_SUB ? "子账户" : "管理员";
     applyTaskButtonState();
     return;
   }
   const account = response.data?.account || {};
-  currentAccountInfo = {
-    username: account.username || (IS_SUB ? "-" : "admin"),
-    role_label: account.role_label || (IS_SUB ? "子账户" : "管理员"),
-  };
-  currentAccountName.textContent = currentAccountInfo.username;
-  currentAccountRole.textContent = currentAccountInfo.role_label;
+  currentAccountName.textContent = account.username || (IS_SUB ? "-" : "admin");
+  currentAccountRole.textContent = account.role_label || (IS_SUB ? "子账户" : "管理员");
   applyTaskButtonState();
 }
 
@@ -307,19 +310,14 @@ async function loadConfig() {
   const response = await api("/config");
   if (!response.ok) return;
 
-  const settings = response.data.settings || {};
   const messages = response.data.messages || {};
-  const account = response.data.account || {};
-  const task = settings.task_settings || {};
 
-  if (fields.maxWindows) {
-    fields.maxWindows.value = task.max_windows ?? 0;
-  }
   if (fields.templates) {
     fields.templates.value = (messages.templates || []).join("\n");
   }
 
   if (IS_SUB) {
+    const account = response.data.account || {};
     updateExpiryInfo(account);
   }
 }
@@ -345,21 +343,6 @@ function formatTimestamp(value) {
   const hh = pad(dt.getHours());
   const mi = pad(dt.getMinutes());
   return `${yyyy}/${mm}/${dd} ${hh}:${mi}`;
-}
-
-function toDatetimeLocal(value) {
-  if (value === null || value === undefined || value === "") return "";
-  const num = Number(value);
-  if (!Number.isFinite(num)) return "";
-  const dt = new Date(num * 1000);
-  if (Number.isNaN(dt.getTime())) return "";
-  const pad = (v) => String(v).padStart(2, "0");
-  const yyyy = dt.getFullYear();
-  const mm = pad(dt.getMonth() + 1);
-  const dd = pad(dt.getDate());
-  const hh = pad(dt.getHours());
-  const mi = pad(dt.getMinutes());
-  return `${yyyy}-${mm}-${dd}T${hh}:${mi}`;
 }
 
 function updateExpiryInfo(account) {
@@ -404,13 +387,6 @@ const confirmBody = document.getElementById("confirm-body");
 const confirmOk = document.getElementById("confirm-ok");
 const confirmCancel = document.getElementById("confirm-cancel");
 let confirmResolver = null;
-const promptModal = document.getElementById("prompt-modal");
-const promptTitle = document.getElementById("prompt-title");
-const promptBody = document.getElementById("prompt-body");
-const promptInput = document.getElementById("prompt-input");
-const promptOk = document.getElementById("prompt-ok");
-const promptCancel = document.getElementById("prompt-cancel");
-let promptResolver = null;
 
 function showAlert(message, title = "提示") {
   if (!alertModal || !alertBody || !alertTitle || !alertOk) {
@@ -474,53 +450,6 @@ if (confirmModal) {
   confirmModal.addEventListener("click", (event) => {
     if (event.target.classList.contains("modal-backdrop")) {
       closeConfirm(false);
-    }
-  });
-}
-
-function showPrompt(message, defaultValue = "", title = "输入") {
-  if (
-    !promptModal ||
-    !promptBody ||
-    !promptTitle ||
-    !promptInput ||
-    !promptOk ||
-    !promptCancel
-  ) {
-    console.warn("Prompt modal missing:", message);
-    return Promise.resolve(null);
-  }
-  promptTitle.textContent = title;
-  promptBody.textContent = message;
-  promptInput.value = defaultValue;
-  promptModal.classList.remove("hidden");
-  promptModal.setAttribute("aria-hidden", "false");
-  promptInput.focus();
-  return new Promise((resolve) => {
-    promptResolver = resolve;
-  });
-}
-
-function closePrompt(result) {
-  if (!promptModal) return;
-  promptModal.classList.add("hidden");
-  promptModal.setAttribute("aria-hidden", "true");
-  if (promptResolver) {
-    promptResolver(result);
-    promptResolver = null;
-  }
-}
-
-if (promptOk) {
-  promptOk.addEventListener("click", () => closePrompt(promptInput?.value ?? ""));
-}
-if (promptCancel) {
-  promptCancel.addEventListener("click", () => closePrompt(null));
-}
-if (promptModal) {
-  promptModal.addEventListener("click", (event) => {
-    if (event.target.classList.contains("modal-backdrop")) {
-      closePrompt(null);
     }
   });
 }
@@ -590,6 +519,15 @@ async function restartWindow() {
   await refreshStatus();
 }
 
+async function collectGroups() {
+  const response = await api("/collect-groups", { method: "POST", body: {} });
+  if (!response.ok) {
+    showAlert(translateErrorMessage(response.data?.error) || "采集失败");
+    return;
+  }
+  await refreshStatus();
+}
+
 function ensureDashboardLabels() {
   if (dashboardLabelsReady) return;
 
@@ -645,9 +583,7 @@ async function refreshStatus() {
   const dbStats = status.stats?.db || {};
   const runtimeStats = status.stats?.runtime || {};
   ensureDashboardLabels();
-  const runningWindowCount =
-    runtimeStats.running_windows ??
-    (status.pid ? 1 : 0) + (status.single_window_tokens?.length || 0);
+  const runningWindowCount = Number(runtimeStats.running_windows ?? 0);
 
   if (dashSendToday) dashSendToday.textContent = String(dbStats.sent_today ?? 0);
   if (dashSendYesterday) dashSendYesterday.textContent = `昨日 ${dbStats.sent_yesterday ?? 0}`;
@@ -701,30 +637,20 @@ async function refreshStatus() {
 }
 
 async function saveConfigSilently() {
-  const settingsResponse = await api("/config");
-  if (!settingsResponse.ok) return { ok: false };
-  const settings = settingsResponse.data.settings || {};
-  const messages = settingsResponse.data.messages || {};
-
-  settings.browser = { auto_discover_bitbrowser: true };
-
-  settings.task_settings = settings.task_settings || {};
-  if (fields.maxWindows) {
-    settings.task_settings.max_windows = toInt(fields.maxWindows.value, 0);
-  }
-
-  messages.templates = splitLines(fields.templates ? fields.templates.value : "");
+  const messages = {
+    templates: splitLines(fields.templates ? fields.templates.value : ""),
+  };
   if (!messages.templates.length) {
     showAlert("正式打招呼文案不能为空");
-    return false;
+    return { ok: false };
   }
 
   const response = await api("/config", {
     method: "POST",
-    body: { settings, messages },
+    body: { messages },
   });
   if (!response.ok) {
-    showAlert(response.data?.error || "保存失败");
+    showAlert(translateErrorMessage(response.data?.error) || "保存失败");
     return response;
   }
   return response;
@@ -737,25 +663,15 @@ function splitLines(value) {
     .filter(Boolean);
 }
 
-function toInt(value, fallback) {
-  const parsed = parseInt(String(value).trim(), 10);
-  return Number.isFinite(parsed) ? parsed : fallback;
-}
-
 function setActivePage(pageKey, title, persist = true) {
-  navItems.forEach((item) => item.classList.toggle("active", item.dataset.page === pageKey));
+  const activeNavPage = pageKey === "device-detail" ? "device" : pageKey;
+  navItems.forEach((item) => item.classList.toggle("active", item.dataset.page === activeNavPage));
   pageCards.forEach((card) => card.classList.toggle("active", card.dataset.page === pageKey));
   if (pageTitle && title) {
     pageTitle.textContent = title;
   }
   if (saveBtn) {
-    saveBtn.classList.toggle(
-      "hidden",
-      pageKey === "dashboard" ||
-        pageKey === "user" ||
-        pageKey === "device" ||
-        pageKey === "device-info"
-    );
+    saveBtn.classList.toggle("hidden", pageKey !== "template");
   }
   if (persist) {
     try {
@@ -909,8 +825,7 @@ async function refreshUsers() {
   const response = await api("/users");
   if (!response.ok) return;
   const payload = response.data || {};
-  lastUserPayload = payload;
-  renderUserTable(payload.users || [], payload.defaults || {});
+  renderUserTable(payload.users || []);
 }
 
 async function refreshDevices() {
@@ -951,28 +866,6 @@ function setButtonDisabled(button, disabled, reason = "") {
   }
 }
 
-function inferTaskPending(status) {
-  const logs = Array.isArray(status?.logs) ? status.logs.slice(-20) : [];
-  const pendingTokens = [
-    "=== 已下发 start 指令到执行端",
-    "=== 已下发 resume 指令到执行端",
-    "=== 已下发 restart_window 指令到执行端",
-    "任务排队中",
-  ];
-  const settledTokens = [
-    "当前窗口处理结束",
-    "单独窗口任务结束",
-    "未绑定执行端",
-    "执行端离线",
-    "设备配置缺少接口参数",
-    "账号不存在",
-    "=== 已下发 stop 指令到执行端",
-  ];
-  const pendingHit = logs.some((line) => pendingTokens.some((token) => String(line).includes(token)));
-  const settledHit = logs.some((line) => settledTokens.some((token) => String(line).includes(token)));
-  return pendingHit && !status?.running && !settledHit;
-}
-
 function applyTaskButtonState() {
   if (!IS_SUB) {
     return;
@@ -983,6 +876,7 @@ function applyTaskButtonState() {
     setButtonDisabled(stopBtn, true, "状态同步中");
     setButtonDisabled(pauseBtn, true, "状态同步中");
     setButtonDisabled(resumeBtn, true, "状态同步中");
+    setButtonDisabled(collectBtn, true, "状态同步中");
     setButtonDisabled(restartWindowBtn, true, "状态同步中");
     return;
   }
@@ -997,9 +891,11 @@ function applyTaskButtonState() {
   const agentOnline = relevantAgents.some(
     (item) => Number(item.status ?? 1) !== 0 && Boolean(item.online)
   );
-  const taskRunning = Boolean(status.task_running ?? status.running);
-  const taskPending = Boolean(status.task_pending) || inferTaskPending(status);
+  const taskRunning = Boolean(status.task_running);
+  const taskPending = Boolean(status.task_pending);
   const taskPaused = Boolean(status.task_paused);
+  const collectRunning = Boolean(status.collect_running);
+  const collectPending = Boolean(status.collect_pending);
   const startReady = agentOnline && hasBoundDevice && hasConnectionFields;
   let startBlockReason = "";
   if (!hasBoundDevice) {
@@ -1011,8 +907,21 @@ function applyTaskButtonState() {
   }
 
   const isBusy = taskRunning || taskPending || taskPaused;
-  const startReason = startBlockReason || (taskPaused ? "任务暂停中" : taskRunning ? "任务运行中" : taskPending ? "任务排队中" : "");
-  setButtonDisabled(startBtn, !startReady || isBusy, startReason);
+  const collectBusy = collectRunning || collectPending;
+  const startReason =
+    startBlockReason ||
+    (collectRunning
+      ? "采集进行中"
+      : collectPending
+        ? "采集排队中"
+        : taskPaused
+          ? "任务暂停中"
+          : taskRunning
+            ? "任务运行中"
+            : taskPending
+              ? "任务排队中"
+              : "");
+  setButtonDisabled(startBtn, !startReady || isBusy || collectBusy, startReason);
   setButtonDisabled(stopBtn, !isBusy, isBusy ? "" : "当前没有运行中的任务");
   setButtonDisabled(
     pauseBtn,
@@ -1024,9 +933,23 @@ function applyTaskButtonState() {
     !taskPaused,
     taskPaused ? "" : (taskRunning ? "任务未暂停" : "当前没有运行中的任务")
   );
+  const collectReason =
+    startBlockReason ||
+    (taskPaused
+      ? "任务暂停中"
+      : taskRunning
+        ? "任务运行中"
+        : taskPending
+          ? "任务排队中"
+          : collectRunning
+            ? "采集进行中"
+            : collectPending
+              ? "采集排队中"
+              : "");
+  setButtonDisabled(collectBtn, !startReady || isBusy || collectBusy, collectReason);
   const windowToken = String(restartWindowToken?.value || "").trim();
-  const restartReason = !windowToken ? "请输入窗口编号" : (startBlockReason || "");
-  setButtonDisabled(restartWindowBtn, !windowToken || !startReady, restartReason);
+  const restartReason = !windowToken ? "请输入窗口编号" : startReason;
+  setButtonDisabled(restartWindowBtn, !windowToken || !startReady || collectBusy, restartReason);
 }
 
 function renderDeviceInfoTable(configs) {
@@ -1113,6 +1036,14 @@ function renderDeviceTable(agents) {
       const isDisabled = status === 0;
       const statusText = isDisabled ? "禁用" : "启用";
       const toggleLabel = isDisabled ? "启用" : "禁用";
+      const detailButton = `
+            <button
+              class="action-btn"
+              data-action="device-detail"
+              data-machine-id="${escapeHtml(agent.machine_id || "")}"
+              data-owner="${escapeHtml(agent.owner || "")}"
+            >详情</button>
+          `;
       const unbindButton = `
             <button
               class="action-btn danger"
@@ -1130,6 +1061,7 @@ function renderDeviceTable(agents) {
           <td>${escapeHtml(agent.client_version || "-")}</td>
           <td>${statusText}</td>
           <td class="col-actions">
+            ${detailButton}
             <button
               class="action-btn ${isDisabled ? "" : "danger"}"
               data-action="toggle-device"
@@ -1144,7 +1076,7 @@ function renderDeviceTable(agents) {
     .join("");
 }
 
-function renderUserTable(users, defaults) {
+function renderUserTable(users) {
   if (!userTableBody) return;
   const rows = Array.isArray(users) ? users : [];
   if (!rows.length) {
@@ -1268,7 +1200,7 @@ async function toggleUserStatusFromModal() {
     body: { username, disabled: !disabled },
   });
   if (!response.ok) {
-    showAlert(response.data?.error || "操作失败");
+    showAlert(translateErrorMessage(response.data?.error) || "操作失败");
     return;
   }
   userModalStatus = disabled ? 1 : 0;
@@ -1349,9 +1281,14 @@ async function handleDeviceTableClick(event) {
   const button = event.target.closest("button[data-action]");
   if (!button) return;
   const action = button.dataset.action;
-  if (action !== "toggle-device" && action !== "unbind-device") return;
   const machineId = button.dataset.machineId || "";
   if (!machineId) return;
+  if (action === "device-detail") {
+    const owner = button.dataset.owner || "";
+    await loadDeviceDetail(machineId, owner);
+    return;
+  }
+  if (action !== "toggle-device" && action !== "unbind-device") return;
   if (action === "unbind-device") {
     if (!(await showConfirm("确定要解绑该设备吗？解绑后该设备将立即离线并释放配额。"))) {
       return;
@@ -1381,6 +1318,171 @@ async function handleDeviceTableClick(event) {
   await refreshDevices();
 }
 
+function setDeviceDetailEmpty(message = "请先从设备管理进入详情页") {
+  if (deviceDetailMeta) {
+    deviceDetailMeta.textContent = message;
+  }
+  if (deviceDetailTableBody) {
+    deviceDetailTableBody.innerHTML = `
+      <tr class="empty-row">
+        <td colspan="7">${escapeHtml(message)}</td>
+      </tr>
+    `;
+  }
+  setButtonDisabled(deviceDetailSaveBtn, true, message);
+}
+
+function normalizeCollectedGroupName(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  return text
+    .replace(/\s*上次发帖[:：].*$/u, "")
+    .replace(/\s*最近发帖[:：].*$/u, "")
+    .replace(/\s*Last post[:：].*$/iu, "")
+    .trim();
+}
+
+function renderDeviceDetail(detail) {
+  currentDeviceDetail = detail || null;
+  const device = detail?.device || {};
+  const windows = Array.isArray(detail?.windows) ? detail.windows : [];
+  const owner = String(device.owner || detail?.owner || "").trim();
+  const machineId = String(device.machine_id || detail?.machine_id || "").trim();
+  if (deviceDetailMeta) {
+    const parts = [
+      `归属账号：${owner || "-"}`,
+      `设备ID：${machineId || "-"}`,
+      `配置名称：${device.name || "-"}`,
+      `在线状态：${device.online ? "在线" : "离线"}`,
+      `最后心跳：${device.last_seen ? formatTimestamp(device.last_seen) : "-"}`,
+    ];
+    deviceDetailMeta.textContent = parts.join("    ");
+  }
+  if (!deviceDetailTableBody) return;
+  const rows = [];
+  let sequence = 0;
+  windows.forEach((windowItem) => {
+    const windowToken = String(windowItem.window_token || "").trim();
+    const windowName = String(windowItem.window_name || "").trim() || "-";
+    const groups = Array.isArray(windowItem.groups) ? windowItem.groups : [];
+    if (!groups.length) {
+      return;
+    }
+    groups.forEach((group) => {
+      sequence += 1;
+      const groupId = String(group.group_id || "").trim();
+      const groupName = normalizeCollectedGroupName(group.group_name) || "-";
+      const groupUrl = String(group.group_url || "").trim();
+      const collectedAt = group.collected_at || windowItem.last_collect_at || 0;
+      const collectedAtText = collectedAt ? formatTimestamp(collectedAt) : "-";
+      const checked = Number(group.selected || 0) === 1 ? "checked" : "";
+      const linkHtml = groupUrl
+        ? `<a href="${escapeHtml(groupUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(groupUrl)}</a>`
+        : "-";
+      rows.push(`
+        <tr>
+          <td class="col-index">${sequence}</td>
+          <td>${escapeHtml(windowToken || "-")}</td>
+          <td>${escapeHtml(windowName)}</td>
+          <td>${escapeHtml(groupName)}</td>
+          <td>${linkHtml}</td>
+          <td>${escapeHtml(collectedAtText)}</td>
+          <td>
+            <input
+              type="checkbox"
+              data-role="group-select"
+              data-window-token="${escapeHtml(windowToken)}"
+              data-group-id="${escapeHtml(groupId)}"
+              ${checked}
+            />
+          </td>
+        </tr>
+      `);
+    });
+  });
+  if (!rows.length) {
+    setDeviceDetailEmpty("当前设备暂无窗口采集结果");
+    return;
+  }
+  deviceDetailTableBody.innerHTML = rows.join("");
+  setButtonDisabled(deviceDetailSaveBtn, false, "");
+}
+
+async function loadDeviceDetail(machineId, owner = "") {
+  const normalizedMachineId = String(machineId || "").trim();
+  if (!normalizedMachineId) {
+    await showAlert("缺少设备标识");
+    return false;
+  }
+  const query = new URLSearchParams({ machine_id: normalizedMachineId });
+  const normalizedOwner = String(owner || "").trim();
+  if (normalizedOwner) {
+    query.set("owner", normalizedOwner);
+  }
+  const response = await api(`/device-detail?${query.toString()}`);
+  if (!response.ok) {
+    await showAlert(translateErrorMessage(response.data?.error) || "设备详情读取失败");
+    return false;
+  }
+  renderDeviceDetail(response.data || {});
+  setActivePage("device-detail", "设备管理", false);
+  return true;
+}
+
+function collectDeviceDetailSelections() {
+  const windows = Array.isArray(currentDeviceDetail?.windows) ? currentDeviceDetail.windows : [];
+  const selectionMap = new Map();
+  windows.forEach((windowItem) => {
+    const windowToken = String(windowItem.window_token || "").trim();
+    if (!windowToken) return;
+    selectionMap.set(windowToken, []);
+  });
+  if (deviceDetailTableBody) {
+    const checkedNodes = Array.from(
+      deviceDetailTableBody.querySelectorAll('input[data-role="group-select"]:checked')
+    );
+    checkedNodes.forEach((node) => {
+      const windowToken = String(node.dataset.windowToken || "").trim();
+      const groupId = String(node.dataset.groupId || "").trim();
+      if (!windowToken || !groupId) return;
+      if (!selectionMap.has(windowToken)) {
+        selectionMap.set(windowToken, []);
+      }
+      selectionMap.get(windowToken).push(groupId);
+    });
+  }
+  return Array.from(selectionMap.entries()).map(([windowToken, groupIds]) => ({
+    window_token: windowToken,
+    group_ids: groupIds,
+  }));
+}
+
+async function saveDeviceDetailSelections() {
+  const detail = currentDeviceDetail || {};
+  const device = detail.device || {};
+  const owner = String(device.owner || detail.owner || "").trim();
+  const machineId = String(device.machine_id || detail.machine_id || "").trim();
+  if (!machineId) {
+    await showAlert("请先选择设备");
+    return;
+  }
+  const selections = collectDeviceDetailSelections();
+  const response = await api("/device-groups/save", {
+    method: "POST",
+    body: {
+      owner,
+      machine_id: machineId,
+      selections,
+    },
+  });
+  if (!response.ok) {
+    await showAlert(translateErrorMessage(response.data?.error) || "保存失败");
+    return;
+  }
+  await showAlert("群组选择已保存");
+  await loadDeviceDetail(machineId, owner);
+}
+
 function escapeHtml(value) {
   return String(value)
     .replace(/&/g, "&amp;")
@@ -1399,16 +1501,6 @@ function renderCopyCell(value, options = {}) {
       <span class="copyable-text${monoClass}">${safeText}</span>
     </div>
   `;
-}
-
-function maskSensitiveValue(value, options = {}) {
-  const text = value === null || value === undefined || value === "" ? "-" : String(value);
-  if (text === "-" || text.length <= 8) return text;
-  const visibleStart = Number(options.visibleStart ?? 4);
-  const visibleEnd = Number(options.visibleEnd ?? 4);
-  const start = text.slice(0, visibleStart);
-  const end = text.slice(-visibleEnd);
-  return `${start}***${end}`;
 }
 
 window.addEventListener("resize", () => {

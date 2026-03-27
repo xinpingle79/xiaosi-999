@@ -12,8 +12,6 @@ admin_account:
   password: ""
 bit_api: ""
 api_token: ""
-browser:
-  auto_discover_bitbrowser: true
 task_settings:
   max_windows: 0
   max_messages_per_account: 0

@@ -48,7 +48,7 @@ worker 只从服务器拉取统一任务队列，不再读取独立的本地 wor
 `config/client.yaml`
 - `server_url`：服务端地址
 - `machine_id`：本机自动生成的设备标识
-- `agent_token` / `token_expires_at`：激活成功后保存的长期运行凭证
+- `agent_token`：激活成功后保存的长期运行凭证
 - `bit_api` / `api_token`：本地唯一连接配置来源
 - `task_settings.*`：执行参数（本地保存）
   其中 `task_settings.send_interval_seconds` 是发送频率唯一权威来源，默认 `0-0`

@@ -1,8 +1,8 @@
+import errno
 import calendar
 import json
 import mimetypes
 import os
-import re
 import secrets
 import uuid
 import sys
@@ -39,7 +39,6 @@ STATIC_DIR = ROOT_DIR / "webui"
 SETTINGS_PATH = ROOT_DIR / "config" / "server.yaml"
 MESSAGES_PATH = ROOT_DIR / "config" / "messages.server.yaml"
 
-SESSION_COOKIE_NAME = "FB_RPA_SESSION"
 ADMIN_SESSION_COOKIE_NAME = "FB_RPA_ADMIN_SESSION"
 SUB_SESSION_COOKIE_NAME = "FB_RPA_SUB_SESSION"
 SESSION_LOCK = threading.Lock()
@@ -79,6 +78,7 @@ def _build_server_base_url(request_host=""):
 
 def _sanitize_server_settings(data):
     settings = dict(data or {})
+    settings.pop("browser", None)
     settings["task_settings"] = _normalize_runtime_task_settings(settings.get("task_settings"))
     return settings
 
@@ -91,11 +91,13 @@ def _normalize_runtime_task_settings(data):
         "group_list_scroll_times": 0,
         "resume_search_times": 20,
         "idle_scroll_limit": 3,
+        "max_windows": 0,
     }
-    try:
-        normalized["max_windows"] = max(0, int(raw.get("max_windows", 0) or 0))
-    except Exception:
-        normalized["max_windows"] = 0
+    for key, default in tuple(normalized.items()):
+        try:
+            normalized[key] = max(0, int(raw.get(key, default) or default))
+        except Exception:
+            normalized[key] = default
     return normalized
 
 
@@ -407,6 +409,42 @@ class TaskManager:
                 )
         return stale_rows
 
+    def _build_machine_action_payload(
+        self,
+        db,
+        owner_name,
+        cfg,
+        action="",
+        window_token=None,
+    ):
+        owner_name = str(owner_name or "").strip()
+        action = str(action or "").strip()
+        machine_id = str((cfg or {}).get("machine_id") or "").strip()
+        bit_api = str((cfg or {}).get("bit_api") or "").strip()
+        api_token = str((cfg or {}).get("api_token") or "").strip()
+        if not bit_api or not api_token:
+            return None, "设备配置缺少接口参数"
+        payload = {
+            "owner": owner_name,
+            "bit_api": bit_api,
+            "api_token": api_token,
+            "device_config_id": (cfg or {}).get("id"),
+        }
+        if action in {"start", "restart_window"} and machine_id:
+            selected_window_groups = db.list_selected_window_groups(owner_name, machine_id)
+            if action == "restart_window":
+                normalized_window_token = str(window_token or "").strip()
+                if normalized_window_token:
+                    selected_window_groups = {
+                        normalized_window_token: list(
+                            selected_window_groups.get(normalized_window_token, [])
+                        )
+                    }
+                else:
+                    selected_window_groups = {}
+            payload["selected_window_groups"] = selected_window_groups
+        return payload, None
+
     def _enqueue_owner_device_actions(
         self,
         action,
@@ -477,19 +515,18 @@ class TaskManager:
                         )
                         task_ids.append((machine_id, existing_task["id"]))
                         continue
-                    bit_api = str(cfg.get("bit_api") or "").strip()
-                    api_token = str(cfg.get("api_token") or "").strip()
-                    if not bit_api or not api_token:
+                    payload, payload_error = self._build_machine_action_payload(
+                        db,
+                        owner_name,
+                        cfg,
+                        action=action,
+                        window_token=window_token,
+                    )
+                    if payload_error:
                         self._logs.append(
-                            f"=== 跳过设备 {machine_id}：设备配置缺少接口参数 ==="
+                            f"=== 跳过设备 {machine_id}：{payload_error} ==="
                         )
                         continue
-                    payload = {
-                        "owner": owner_name,
-                        "bit_api": bit_api,
-                        "api_token": api_token,
-                        "device_config_id": cfg.get("id"),
-                    }
                     task_id = db.enqueue_agent_task(
                         owner_name,
                         action,
@@ -566,16 +603,15 @@ class TaskManager:
             target_cfg = _select_device_config(configs, machine_id=machine_id)
             if not target_cfg:
                 return False, "未配置设备"
-            bit_api = str(target_cfg.get("bit_api") or "").strip()
-            api_token = str(target_cfg.get("api_token") or "").strip()
-            if not bit_api or not api_token:
-                return False, "设备配置缺少接口参数"
-            payload = {
-                "owner": owner_name,
-                "bit_api": bit_api,
-                "api_token": api_token,
-                "device_config_id": target_cfg.get("id"),
-            }
+            payload, payload_error = self._build_machine_action_payload(
+                db,
+                owner_name,
+                target_cfg,
+                action=action,
+                window_token=window_token,
+            )
+            if payload_error:
+                return False, payload_error
             task_id = db.enqueue_agent_task(
                 owner_name,
                 action,
@@ -642,16 +678,15 @@ class TaskManager:
                     time.sleep(0.5)
                     continue
 
-                bit_api = str(target_cfg.get("bit_api") or "").strip()
-                target_api_token = str(target_cfg.get("api_token") or "").strip()
-                if not bit_api or not target_api_token:
-                    return False, "设备配置缺少接口参数", None
-                payload = {
-                    "owner": owner_name,
-                    "bit_api": bit_api,
-                    "api_token": target_api_token,
-                    "device_config_id": target_cfg.get("id"),
-                }
+                payload, payload_error = self._build_machine_action_payload(
+                    db,
+                    owner_name,
+                    target_cfg,
+                    action=action,
+                    window_token=window_token,
+                )
+                if payload_error:
+                    return False, payload_error, None
                 # Keep duplicate detection and enqueue in one critical section so
                 # concurrent requests cannot observe different queue states.
                 with self._lock:
@@ -699,6 +734,15 @@ class TaskManager:
         if not owner_name:
             return False, "总后台不参与任务操作，请在子后台执行"
         with self._lock:
+            db = Database()
+            try:
+                task_counts = _load_runtime_task_counts(owner=owner_name, db=db)
+            finally:
+                db.close()
+            if int(task_counts.get("collect_running_tasks") or 0) > 0 or int(
+                task_counts.get("collect_pending_tasks") or 0
+            ) > 0:
+                return False, "当前正在采集群组，请等待采集完成后再启动"
             self._logs.clear()
             self._logs.append("=== 任务已下发 ===")
             self._logs.append("=== 正在确认执行端在线状态 ===")
@@ -740,10 +784,51 @@ class TaskManager:
         if not owner_name:
             return False, "总后台不参与任务操作，请在子后台执行"
         with self._lock:
+            db = Database()
+            try:
+                task_counts = _load_runtime_task_counts(owner=owner_name, db=db)
+            finally:
+                db.close()
+            if int(task_counts.get("collect_running_tasks") or 0) > 0 or int(
+                task_counts.get("collect_pending_tasks") or 0
+            ) > 0:
+                return False, "当前正在采集群组，请等待采集完成后再单独启动"
             return self._enqueue_owner_device_actions(
                 "restart_window",
                 owner_name,
                 window_token=str(window_token or "").strip(),
+            )
+
+    def collect(self, owner=None):
+        owner_name = str(owner or "").strip()
+        if not owner_name:
+            return False, "总后台不参与任务操作，请在子后台执行"
+        with self._lock:
+            db = Database()
+            try:
+                task_counts = _load_runtime_task_counts(owner=owner_name, db=db)
+                running_tasks = int(task_counts.get("running_tasks") or 0)
+                pending_tasks = int(task_counts.get("pending_tasks") or 0)
+                collect_running_tasks = int(task_counts.get("collect_running_tasks") or 0)
+                collect_pending_tasks = int(task_counts.get("collect_pending_tasks") or 0)
+                task_paused = bool(
+                    running_tasks > 0
+                    and self._is_task_paused_from_actions(db, owner=owner_name)
+                )
+            finally:
+                db.close()
+            if running_tasks > 0 or pending_tasks > 0 or task_paused:
+                return False, "当前存在正式运行任务，请先停止或等待任务结束后再采集"
+            if collect_running_tasks > 0:
+                return False, "当前正在采集群组，请勿重复下发"
+            if collect_pending_tasks > 0:
+                return False, "采集任务已在排队中，请稍后再试"
+            self._logs.append("=== 采集指令已下发 ===")
+            self._logs.append("=== 正在确认执行端在线状态 ===")
+            return self._enqueue_owner_device_actions(
+                "collect_groups",
+                owner_name,
+                wait_online_seconds=4.0,
             )
 
     def status(self, owner=None):
@@ -753,6 +838,8 @@ class TaskManager:
                 task_counts = _load_runtime_task_counts(owner=owner, db=db)
                 running_tasks = int(task_counts.get("running_tasks") or 0)
                 pending_tasks = int(task_counts.get("pending_tasks") or 0)
+                collect_running_tasks = int(task_counts.get("collect_running_tasks") or 0)
+                collect_pending_tasks = int(task_counts.get("collect_pending_tasks") or 0)
                 running_accounts = int(task_counts.get("running_accounts") or 0)
                 task_paused = bool(
                     running_tasks > 0
@@ -761,13 +848,15 @@ class TaskManager:
             except Exception:
                 running_tasks = 0
                 pending_tasks = 0
+                collect_running_tasks = 0
+                collect_pending_tasks = 0
                 running_accounts = 0
                 task_paused = False
             finally:
                 db.close()
             running = running_tasks > 0
             logs = _filter_runtime_logs(list(self._logs), account_id=owner)
-            task_pending = bool(pending_tasks > 0 or infer_task_pending(logs))
+            task_pending = bool(pending_tasks > 0)
             stats = build_runtime_stats(
                 logs,
                 account_id=owner,
@@ -775,17 +864,12 @@ class TaskManager:
                 running_accounts=running_accounts,
             )
             return {
-                "running": running,
                 "task_running": running,
                 "task_pending": task_pending,
                 "task_paused": task_paused,
-                "state": "paused" if task_paused else ("running" if running else ("queued" if task_pending else "idle")),
-                "state_text": "任务暂停中" if task_paused else ("任务运行中" if running else ("任务排队中" if task_pending else "当前没有运行中的任务")),
-                "pid": None,
-                "exit_code": None,
-                "started_at": None,
+                "collect_running": bool(collect_running_tasks > 0),
+                "collect_pending": bool(collect_pending_tasks > 0),
                 "logs": logs,
-                "single_window_tokens": [],
                 "stats": stats,
             }
 
@@ -866,16 +950,6 @@ def _load_agent_security():
         "allow_rebind": allow_rebind,
     }
 
-
-def _normalize_host(raw_host):
-    if not raw_host:
-        return ""
-    host = raw_host.split(",")[0].strip()
-    if ":" in host:
-        host = host.split(":")[0]
-    return host
-
-
 def write_yaml(path, data):
     with open(path, "w", encoding="utf-8") as f:
         yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False)
@@ -902,25 +976,20 @@ def hash_password(password, iterations=120_000):
 def verify_password(password, stored_hash):
     if not stored_hash:
         return False
-    if stored_hash.startswith("pbkdf2$"):
-        try:
-            _, iter_str, salt, digest = stored_hash.split("$", 3)
-            iterations = int(iter_str)
-        except Exception:
-            return False
-        candidate = hashlib.pbkdf2_hmac(
-            "sha256",
-            password.encode("utf-8"),
-            salt.encode("utf-8"),
-            iterations,
-        ).hex()
-        return hmac.compare_digest(digest, candidate)
-    if "$" not in stored_hash:
-        legacy = hashlib.sha256(password.encode("utf-8")).hexdigest()
-        return hmac.compare_digest(stored_hash, legacy)
-    salt, digest = stored_hash.split("$", 1)
-    legacy = hashlib.sha256(f"{salt}:{password}".encode("utf-8")).hexdigest()
-    return hmac.compare_digest(digest, legacy)
+    if not stored_hash.startswith("pbkdf2$"):
+        return False
+    try:
+        _, iter_str, salt, digest = stored_hash.split("$", 3)
+        iterations = int(iter_str)
+    except Exception:
+        return False
+    candidate = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt.encode("utf-8"),
+        iterations,
+    ).hex()
+    return hmac.compare_digest(digest, candidate)
 
 
 def create_session(username, role):
@@ -1116,7 +1185,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
         if path in ("/sub/login", "/sub/login/"):
             self._serve_static("/sub_login.html")
             return
-        if path in ("/", "/index.html"):
+        if path in ("/", "/index.html", "/admin", "/admin/", "/admin/index.html"):
             if not self._has_role("admin"):
                 self._redirect("/login")
                 return
@@ -1168,6 +1237,16 @@ class WebUIHandler(BaseHTTPRequestHandler):
             if path == "/me":
                 self._send_json({"account": self._current_account_info(prefer_sub=False)})
                 return
+            if path == "/device-detail":
+                owner = ""
+                machine_id = ""
+                if isinstance(getattr(self, "_query", None), dict):
+                    owner = (self._query.get("owner") or [""])[0].strip()
+                    machine_id = (self._query.get("machine_id") or [""])[0].strip()
+                result = handle_device_detail(owner=owner, machine_id=machine_id)
+                status = HTTPStatus.OK if result.get("ok") else HTTPStatus.BAD_REQUEST
+                self._send_json(result, status=status)
+                return
             if path == "/agent/list":
                 owner = ""
                 if isinstance(getattr(self, "_query", None), dict):
@@ -1192,6 +1271,17 @@ class WebUIHandler(BaseHTTPRequestHandler):
         if scope == "sub":
             if path == "/me":
                 self._send_json({"account": self._current_account_info(prefer_sub=True)})
+                return
+            if path == "/device-detail":
+                machine_id = ""
+                if isinstance(getattr(self, "_query", None), dict):
+                    machine_id = (self._query.get("machine_id") or [""])[0].strip()
+                result = handle_device_detail(
+                    owner=self._current_username(prefer_sub=True),
+                    machine_id=machine_id,
+                )
+                status = HTTPStatus.OK if result.get("ok") else HTTPStatus.BAD_REQUEST
+                self._send_json(result, status=status)
                 return
             if path == "/config":
                 username = self._current_username(prefer_sub=True)
@@ -1228,15 +1318,12 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 self._send_json({"ok": True}, cookies=[cookie])
                 return
             if path == "/logout":
-                token = self._get_session_token(ADMIN_SESSION_COOKIE_NAME, allow_legacy=True)
+                token = self._get_session_token(ADMIN_SESSION_COOKIE_NAME)
                 if token:
                     _drop_session(token)
                 self._send_json(
                     {"ok": True},
-                    cookies=[
-                        self._clear_session_cookie(ADMIN_SESSION_COOKIE_NAME, path="/"),
-                        self._clear_session_cookie(SESSION_COOKIE_NAME, path="/"),
-                    ],
+                    cookies=[self._clear_session_cookie(ADMIN_SESSION_COOKIE_NAME, path="/")],
                 )
                 return
             if not self._has_role("admin", prefer_sub=False):
@@ -1287,6 +1374,14 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     actor_role=session.get("role"),
                 )
                 self._send_json({"ok": True})
+                return
+            if path == "/device-groups/save":
+                payload = self._read_json()
+                result = handle_device_group_selection_save(payload)
+                if not result.get("ok"):
+                    self._send_json({"error": result.get("error")}, status=HTTPStatus.BAD_REQUEST)
+                    return
+                self._send_json(result)
                 return
             if path in {"/restart-window", "/start", "/stop", "/pause", "/resume"}:
                 self._send_json(
@@ -1365,6 +1460,15 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 )
                 self._send_json({"ok": True})
                 return
+            if path == "/device-groups/save":
+                payload = self._read_json()
+                payload["owner"] = self._current_username(prefer_sub=True)
+                result = handle_device_group_selection_save(payload)
+                if not result.get("ok"):
+                    self._send_json({"error": result.get("error")}, status=HTTPStatus.BAD_REQUEST)
+                    return
+                self._send_json(result)
+                return
             if path == "/restart-window":
                 payload = self._read_json()
                 ok, error = TASK_MANAGER.restart_window(
@@ -1378,6 +1482,13 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 return
             if path == "/start":
                 ok, error = TASK_MANAGER.start(owner=self._current_username(prefer_sub=True))
+                if not ok:
+                    self._send_json({"error": error}, status=HTTPStatus.CONFLICT)
+                    return
+                self._send_json({"ok": True})
+                return
+            if path == "/collect-groups":
+                ok, error = TASK_MANAGER.collect(owner=self._current_username(prefer_sub=True))
                 if not ok:
                     self._send_json({"error": error}, status=HTTPStatus.CONFLICT)
                     return
@@ -1505,6 +1616,14 @@ class WebUIHandler(BaseHTTPRequestHandler):
         if path == "/api/agent/report":
             payload = self._read_json()
             result = handle_agent_report(payload)
+            if not result.get("ok"):
+                self._send_json(result, status=HTTPStatus.BAD_REQUEST)
+                return
+            self._send_json(result)
+            return
+        if path == "/api/agent/collect-report":
+            payload = self._read_json()
+            result = handle_agent_collect_report(payload)
             if not result.get("ok"):
                 self._send_json(result, status=HTTPStatus.BAD_REQUEST)
                 return
@@ -1643,20 +1762,16 @@ class WebUIHandler(BaseHTTPRequestHandler):
             parsed[key] = value
         return parsed
 
-    def _get_session_token(self, cookie_name, allow_legacy=False):
+    def _get_session_token(self, cookie_name):
         cookies = self._parse_cookies()
         token = cookies.get(cookie_name)
-        if token:
-            return token
-        if allow_legacy:
-            return cookies.get(SESSION_COOKIE_NAME)
-        return None
+        return token if token else None
 
     def _current_session(self, prefer_sub=False):
         if prefer_sub:
             token = self._get_session_token(SUB_SESSION_COOKIE_NAME)
         else:
-            token = self._get_session_token(ADMIN_SESSION_COOKIE_NAME, allow_legacy=True)
+            token = self._get_session_token(ADMIN_SESSION_COOKIE_NAME)
         return get_session_from_token(token)
 
     def _current_username(self, prefer_sub=False):
@@ -1670,7 +1785,6 @@ class WebUIHandler(BaseHTTPRequestHandler):
         role_label = "管理员" if role == "admin" else "子账户"
         return {
             "username": username,
-            "role": role,
             "role_label": role_label,
         }
 
@@ -1695,9 +1809,10 @@ class WebUIHandler(BaseHTTPRequestHandler):
         )
 
 def load_full_config(username=None):
-    settings = _sanitize_server_settings(read_yaml(SETTINGS_PATH))
     messages = read_yaml(MESSAGES_PATH)
-    account_info = {}
+    result = {
+        "messages": messages,
+    }
 
     if username:
         db = Database()
@@ -1715,7 +1830,7 @@ def load_full_config(username=None):
                 if expire_at_val:
                     remaining = expire_at_val - time.time()
                     days_left = int((remaining + 86399) // 86400)
-                account_info = {
+                result["account"] = {
                     "expire_at": expire_at_val,
                     "days_left": days_left,
                 }
@@ -1725,11 +1840,7 @@ def load_full_config(username=None):
         finally:
             db.close()
 
-    return {
-        "settings": settings,
-        "messages": messages,
-        "account": account_info,
-    }
+    return result
 
 
 def ui_log(message):
@@ -1756,17 +1867,12 @@ def show_ui_alert(title, message):
     print(f"{title}: {message}")
 
 
-def start_server(host, port, max_attempts=10):
-    last_error = None
-    for offset in range(max_attempts):
-        current_port = port + offset
-        try:
-            server = ThreadingHTTPServer((host, current_port), WebUIHandler)
-            return server, current_port, None
-        except OSError as exc:
-            last_error = exc
-            continue
-    return None, port, last_error
+def start_server(host, port):
+    try:
+        server = ThreadingHTTPServer((host, port), WebUIHandler)
+        return server, None
+    except OSError as exc:
+        return None, exc
 
 
 def _filter_runtime_logs(logs, account_id=None, machine_id=None):
@@ -1839,28 +1945,6 @@ def build_runtime_stats(logs, account_id=None, machine_id=None, running_tasks=0,
     }
 
 
-def infer_task_pending(logs):
-    lines = [str(line or "").strip() for line in (logs or []) if str(line or "").strip()][-20:]
-    pending_tokens = (
-        "=== 已下发 start 指令到执行端",
-        "=== 已下发 resume 指令到执行端",
-        "=== 已下发 restart_window 指令到执行端",
-        "任务排队中",
-    )
-    settled_tokens = (
-        "当前窗口处理结束",
-        "单独窗口任务结束",
-        "未绑定执行端",
-        "执行端离线",
-        "设备配置缺少接口参数",
-        "账号不存在",
-        "=== 已下发 stop 指令到执行端",
-    )
-    pending_hit = any(any(token in line for token in pending_tokens) for line in lines)
-    settled_hit = any(any(token in line for token in settled_tokens) for line in lines)
-    return bool(pending_hit and not settled_hit)
-
-
 def _translate_client_start_block_reason(reason):
     mapping = {
         "config_not_synced": "设备配置尚未同步完成",
@@ -1904,21 +1988,6 @@ def _client_action_message(action, result, existing_status=""):
         "restart_window": "单独启动指令已下发，正在等待执行端响应",
     }
     return accepted.get(action, "操作已完成")
-
-
-def _extract_detected_window_count(logs):
-    if not logs:
-        return 0
-    pattern = re.compile(r"已自动识别\s+(\d+)\s+个比特浏览器窗口")
-    for line in reversed(logs):
-        match = pattern.search(line)
-        if match:
-            try:
-                return max(0, int(match.group(1)))
-            except Exception:
-                return 0
-    return 0
-
 
 def _load_owner_device_summary(owner, db=None):
     owner = str(owner or "").strip()
@@ -2066,10 +2135,24 @@ def _load_runtime_task_counts(owner=None, db=None):
             statuses=("pending",),
             actions=("start",),
         )
+        collect_running_tasks = _count_agent_tasks_by_scope(
+            db,
+            owner=owner,
+            statuses=("running",),
+            actions=("collect_groups",),
+        )
+        collect_pending_tasks = _count_agent_tasks_by_scope(
+            db,
+            owner=owner,
+            statuses=("pending",),
+            actions=("collect_groups",),
+        )
         running_accounts = _count_distinct_running_start_accounts(db, owner=owner)
         return {
             "running_tasks": int(running_tasks or 0),
             "pending_tasks": int(pending_tasks or 0),
+            "collect_running_tasks": int(collect_running_tasks or 0),
+            "collect_pending_tasks": int(collect_pending_tasks or 0),
             "running_accounts": int(running_accounts or 0),
         }
     finally:
@@ -2283,7 +2366,6 @@ def _load_user_list():
                     "username": row.get("username") or "",
                     "created_at": row.get("created_at") or "",
                     "status": row.get("status", 1),
-                    "role": row.get("role") or "user",
                     "max_devices": row.get("max_devices"),
                     "expire_at": expire_at_val,
                     "days_left": days_left,
@@ -2292,13 +2374,11 @@ def _load_user_list():
             )
         return {
             "users": users,
-            "defaults": {},
         }
     except Exception as exc:
         log.error(f"读取用户列表失败: {exc}")
         return {
             "users": [],
-            "defaults": {},
         }
     finally:
         db.close()
@@ -2330,11 +2410,6 @@ def handle_login(payload, role="user"):
         stored_hash = account.get("password_hash") or ""
         if not verify_password(password, stored_hash):
             return {"ok": False, "error": "密码错误"}
-        if stored_hash and not stored_hash.startswith("pbkdf2$"):
-            try:
-                db.set_user_password_hash(username, hash_password(password))
-            except Exception as exc:
-                log.error(f"升级密码哈希失败: {exc}")
         token = create_session(username, account_role)
         return {"ok": True, "token": token}
     finally:
@@ -2422,7 +2497,7 @@ def _cleanup_device_config_duplicates(db, owner, keep_id, machine_id="", api_tok
     return removed_ids
 
 
-def _build_client_activation_response(owner, expire_at, max_devices, agent_token, request_host="", client_version=""):
+def _build_client_activation_response(owner, expire_at, max_devices, agent_token, request_host=""):
     return {
         "ok": True,
         "data": {
@@ -2431,8 +2506,6 @@ def _build_client_activation_response(owner, expire_at, max_devices, agent_token
             "expire_at": expire_at,
             "max_devices": max_devices,
             "agent_token": agent_token,
-            "token_expires_at": None,
-            "client_version": client_version or "",
         },
     }
 
@@ -2462,7 +2535,6 @@ def _issue_agent_token_for_machine(db, owner, machine_id, client_version=""):
         owner=owner,
         status=existing_status,
         token=agent_token,
-        token_expires_at=None,
         client_version=client_version or None,
     )
     return agent_token
@@ -2533,7 +2605,6 @@ def _try_recover_client_activation(db, payload, request_host=""):
         max_devices=max_devices,
         agent_token=agent_token,
         request_host=request_host,
-        client_version=client_version,
     )
 
 def handle_client_activate(payload, request_host=""):
@@ -2604,7 +2675,6 @@ def handle_client_activate(payload, request_host=""):
             max_devices=max_devices,
             agent_token=agent_token,
             request_host=request_host,
-            client_version=client_version,
         )
     finally:
         db.close()
@@ -2743,14 +2813,11 @@ def handle_client_sync_config(payload):
         },
     }
 
-def handle_client_status(payload):
-    verified = _verify_client_identity(payload)
-    if not verified.get("ok"):
-        return verified
 
+def _build_client_runtime_snapshot(verified, api_token=""):
     machine_id = verified.get("machine_id") or ""
     owner = verified.get("owner") or ""
-    api_token = str(payload.get("api_token") or "").strip()
+    api_token = str(api_token or "").strip()
     settings = _load_agent_settings()
     server_settings = _sanitize_server_settings(read_yaml(SETTINGS_PATH))
     runtime_task_settings = dict(server_settings.get("task_settings") or {})
@@ -2762,14 +2829,12 @@ def handle_client_status(payload):
     try:
         agent = db.get_agent(machine_id)
         agent_online = False
-        client_version = ""
         if agent:
             last_seen = agent.get("last_seen")
             try:
                 agent_online = bool(last_seen) and (now - float(last_seen) <= heartbeat_ttl)
             except Exception:
                 agent_online = False
-            client_version = str(agent.get("client_version") or "").strip()
 
         configs = db.list_device_configs(owner)
         target_cfg = _select_device_config(
@@ -2782,7 +2847,7 @@ def handle_client_status(payload):
             "templates": owner_templates.get("templates") or [],
         }
 
-        stale_rows = TASK_MANAGER._cleanup_stale_machine_action_tasks(
+        TASK_MANAGER._cleanup_stale_machine_action_tasks(
             db,
             owner,
             machine_id,
@@ -2800,6 +2865,18 @@ def handle_client_status(payload):
             machine_id=machine_id,
             statuses=("pending",),
             actions=("start",),
+        )
+        collect_running_count = _count_agent_tasks_by_scope(
+            db,
+            machine_id=machine_id,
+            statuses=("running",),
+            actions=("collect_groups",),
+        )
+        collect_pending_count = _count_agent_tasks_by_scope(
+            db,
+            machine_id=machine_id,
+            statuses=("pending",),
+            actions=("collect_groups",),
         )
         control_task = _load_latest_agent_task_by_scope(
             db,
@@ -2853,48 +2930,58 @@ def handle_client_status(payload):
         start_block_reason = "agent_offline"
     else:
         start_block_reason = ""
-    state = "offline"
-    state_text = "执行端离线"
-    if task_paused:
-        state = "paused"
-        state_text = "任务暂停中"
-    elif running_count > 0:
-        state = "running"
-        state_text = "任务运行中"
-    elif pending_count > 0:
-        state = "queued"
-        state_text = "任务排队中"
-    elif control_action_pending:
-        state = "processing"
-        state_text = _translate_control_action_state(control_action_name)
-    elif agent_online:
-        state = "idle"
-        state_text = "执行端在线，等待任务"
+
+    return {
+        "owner": owner,
+        "config_synced": config_synced,
+        "device_bound": device_bound,
+        "start_ready": start_ready,
+        "start_block_reason": start_block_reason,
+        "agent_online": agent_online,
+        "task_running": running_count > 0,
+        "task_pending": pending_count > 0,
+        "task_paused": task_paused,
+        "collect_running": collect_running_count > 0,
+        "collect_pending": collect_pending_count > 0,
+        "control_action_pending": control_action_pending,
+        "control_action_name": control_action_name,
+        "messages": runtime_messages,
+        "task_settings": runtime_task_settings,
+        "bit_api": str((target_cfg or {}).get("bit_api") or "").strip(),
+        "api_token": str((target_cfg or {}).get("api_token") or "").strip(),
+        "stats": stats,
+    }
+
+
+def handle_client_status(payload):
+    verified = _verify_client_identity(payload)
+    if not verified.get("ok"):
+        return verified
+
+    runtime_snapshot = _build_client_runtime_snapshot(
+        verified,
+        api_token=str(payload.get("api_token") or "").strip(),
+    )
 
     return {
         "ok": True,
         "data": {
-            "owner": owner,
-            "machine_id": machine_id,
-            "config_synced": config_synced,
-            "device_bound": device_bound,
-            "start_ready": start_ready,
-            "start_block_reason": start_block_reason,
-            "agent_online": agent_online,
-            "task_running": running_count > 0,
-            "task_pending": pending_count > 0,
-            "task_paused": task_paused,
-            "control_action_pending": control_action_pending,
-            "control_action_name": control_action_name,
-            "state": state,
-            "state_text": state_text,
-            "client_version": client_version,
-            "messages": runtime_messages,
-            "task_settings": runtime_task_settings,
-            "bit_api": str((target_cfg or {}).get("bit_api") or "").strip(),
-            "api_token": str((target_cfg or {}).get("api_token") or "").strip(),
-            "stale_cleanup_ids": [row["id"] for row in stale_rows],
-            "stats": stats,
+            "owner": runtime_snapshot.get("owner"),
+            "config_synced": runtime_snapshot.get("config_synced"),
+            "device_bound": runtime_snapshot.get("device_bound"),
+            "start_ready": runtime_snapshot.get("start_ready"),
+            "start_block_reason": runtime_snapshot.get("start_block_reason"),
+            "agent_online": runtime_snapshot.get("agent_online"),
+            "task_running": runtime_snapshot.get("task_running"),
+            "task_pending": runtime_snapshot.get("task_pending"),
+            "task_paused": runtime_snapshot.get("task_paused"),
+            "collect_running": runtime_snapshot.get("collect_running"),
+            "collect_pending": runtime_snapshot.get("collect_pending"),
+            "messages": runtime_snapshot.get("messages"),
+            "task_settings": runtime_snapshot.get("task_settings"),
+            "bit_api": runtime_snapshot.get("bit_api"),
+            "api_token": runtime_snapshot.get("api_token"),
+            "stats": runtime_snapshot.get("stats"),
         },
     }
 
@@ -2921,19 +3008,15 @@ def handle_client_action(payload, action):
     if action == "restart_window" and not window_token:
         return {"ok": False, "error": "请输入窗口号"}
 
-    status_result = handle_client_status(
-        {
-            "agent_token": payload.get("agent_token"),
-            "machine_id": verified.get("machine_id"),
-            "api_token": api_token,
-        }
+    status_info = _build_client_runtime_snapshot(
+        verified,
+        api_token=api_token,
     )
-    if not status_result.get("ok"):
-        return status_result
-    status_info = status_result.get("data") or {}
     task_running = bool(status_info.get("task_running"))
     task_pending = bool(status_info.get("task_pending"))
     task_paused = bool(status_info.get("task_paused"))
+    collect_running = bool(status_info.get("collect_running"))
+    collect_pending = bool(status_info.get("collect_pending"))
     control_action_pending = bool(status_info.get("control_action_pending"))
     control_action_name = str(status_info.get("control_action_name") or "").strip()
     if control_action_pending:
@@ -2955,6 +3038,8 @@ def handle_client_action(payload, action):
             return {"ok": True, "result": "duplicate", "message": "启动任务已在排队，请勿重复启动"}
         if task_paused:
             return {"ok": True, "result": "blocked", "message": "当前任务处于暂停中，请先点击继续或停止"}
+        if collect_running or collect_pending:
+            return {"ok": True, "result": "blocked", "message": "当前正在采集群组，请等待采集完成后再启动"}
         if not status_info.get("start_ready"):
             return {
                 "ok": True,
@@ -2972,12 +3057,15 @@ def handle_client_action(payload, action):
     elif action == "resume":
         if not task_paused:
             return {"ok": True, "result": "blocked", "message": "当前没有可继续的暂停任务"}
-    elif action == "restart_window" and not status_info.get("start_ready"):
-        return {
-            "ok": True,
-            "result": "blocked",
-            "message": f"当前状态不允许单独启动：{_translate_client_start_block_reason(status_info.get('start_block_reason'))}",
-        }
+    elif action == "restart_window":
+        if collect_running or collect_pending:
+            return {"ok": True, "result": "blocked", "message": "当前正在采集群组，请等待采集完成后再单独启动"}
+        if not status_info.get("start_ready"):
+            return {
+                "ok": True,
+                "result": "blocked",
+                "message": f"当前状态不允许单独启动：{_translate_client_start_block_reason(status_info.get('start_block_reason'))}",
+            }
 
     ok, error, detail = TASK_MANAGER.enqueue_machine_action(
         action,
@@ -3048,7 +3136,6 @@ def handle_agent_list(owner=""):
             agents.append(
                 {
                     "machine_id": row.get("machine_id") or "",
-                    "label": row.get("label") or "",
                     "last_seen": last_seen,
                     "online": online,
                     "owner": row.get("owner") or "",
@@ -3080,17 +3167,14 @@ def handle_device_info_list(owner=""):
             agent = agent_map.get(machine_id) if machine_id else None
             last_seen = 0.0
             online = False
-            client_version = ""
             if agent:
                 try:
                     last_seen = float(agent.get("last_seen") or 0)
                 except Exception:
                     last_seen = 0.0
                 online = bool(last_seen) and (now - last_seen <= ttl)
-                client_version = str(agent.get("client_version") or "").strip()
             rows.append(
                 {
-                    "id": cfg.get("id"),
                     "owner": cfg.get("owner") or "",
                     "name": cfg.get("name") or "",
                     "machine_id": machine_id,
@@ -3099,10 +3183,99 @@ def handle_device_info_list(owner=""):
                     "status": int(1 if cfg.get("status", None) is None else cfg.get("status")),
                     "online": online,
                     "last_seen": last_seen,
-                    "client_version": client_version,
                 }
             )
         return {"ok": True, "configs": rows}
+    finally:
+        db.close()
+
+
+def _resolve_device_detail_owner(db, machine_id, owner=""):
+    machine_id = str(machine_id or "").strip()
+    owner = str(owner or "").strip()
+    if not machine_id:
+        return "", None
+    configs = db.list_all_device_configs()
+    matched_cfg = None
+    for cfg in configs:
+        if str(cfg.get("machine_id") or "").strip() != machine_id:
+            continue
+        cfg_owner = str(cfg.get("owner") or "").strip()
+        if owner and cfg_owner != owner:
+            continue
+        matched_cfg = cfg
+        owner = cfg_owner
+        break
+    if matched_cfg:
+        return owner, matched_cfg
+    agent = db.get_agent(machine_id)
+    agent_owner = str((agent or {}).get("owner") or "").strip()
+    if owner and agent_owner and agent_owner != owner:
+        return "", None
+    owner = owner or agent_owner
+    if not owner:
+        return "", None
+    configs = db.list_device_configs(owner)
+    return owner, _select_device_config(configs, machine_id=machine_id)
+
+
+def handle_device_detail(owner="", machine_id=""):
+    owner = str(owner or "").strip()
+    machine_id = str(machine_id or "").strip()
+    if not machine_id:
+        return {"ok": False, "error": "missing_machine_id"}
+    settings = _load_agent_settings()
+    ttl = float(settings.get("heartbeat_ttl", 180) or 180)
+    now = time.time()
+    db = Database()
+    try:
+        resolved_owner, cfg = _resolve_device_detail_owner(db, machine_id, owner=owner)
+        if not resolved_owner:
+            return {"ok": False, "error": "device_not_found"}
+        agent = db.get_agent(machine_id)
+        last_seen = 0.0
+        online = False
+        if agent:
+            try:
+                last_seen = float(agent.get("last_seen") or 0)
+            except Exception:
+                last_seen = 0.0
+            online = bool(last_seen) and (now - last_seen <= ttl)
+        detail = db.get_device_window_group_detail(resolved_owner, machine_id)
+        device_info = {
+            "owner": resolved_owner,
+            "name": str((cfg or {}).get("name") or "").strip(),
+            "machine_id": machine_id,
+            "bit_api": str((cfg or {}).get("bit_api") or "").strip(),
+            "api_token": str((cfg or {}).get("api_token") or "").strip(),
+            "status": int(1 if (cfg or {}).get("status", None) is None else (cfg or {}).get("status")),
+            "online": online,
+            "last_seen": last_seen,
+        }
+        return {
+            "ok": True,
+            "device": device_info,
+            "windows": detail.get("windows") or [],
+        }
+    finally:
+        db.close()
+
+
+def handle_device_group_selection_save(payload):
+    owner = str(payload.get("owner") or "").strip()
+    machine_id = str(payload.get("machine_id") or "").strip()
+    selections = payload.get("selections") or []
+    if not machine_id:
+        return {"ok": False, "error": "missing_machine_id"}
+    if not isinstance(selections, list):
+        return {"ok": False, "error": "invalid_selections"}
+    db = Database()
+    try:
+        resolved_owner, _cfg = _resolve_device_detail_owner(db, machine_id, owner=owner)
+        if not resolved_owner:
+            return {"ok": False, "error": "device_not_found"}
+        db.save_window_group_selections(resolved_owner, machine_id, selections)
+        return {"ok": True}
     finally:
         db.close()
 
@@ -3220,23 +3393,64 @@ def handle_agent_report(payload):
     return {"ok": True}
 
 
-def _parse_expire_at(raw_value):
-    if raw_value in (None, ""):
-        return None, None
-    if isinstance(raw_value, (int, float)):
-        return float(raw_value), None
-    text = str(raw_value).strip()
-    if not text:
-        return None, None
-    if text.isdigit():
-        return float(text), None
+def handle_agent_collect_report(payload):
+    ok, error, agent = _verify_agent_request(payload)
+    if not ok:
+        return {"ok": False, "error": error}
+    machine_id = str(payload.get("machine_id") or "").strip()
+    owner = str((agent or {}).get("owner") or "").strip()
+    payload_owner = str(payload.get("owner") or "").strip()
+    if payload_owner and owner and payload_owner != owner:
+        return {"ok": False, "error": "owner_mismatch"}
+    windows = payload.get("windows")
+    if windows is None:
+        windows = []
+    if not isinstance(windows, list):
+        return {"ok": False, "error": "invalid_windows"}
+    collected_at = time.time()
+    summaries = []
+    db = Database()
     try:
-        normalized = text.replace(" ", "T") if " " in text and "T" not in text else text
-        dt = datetime.fromisoformat(normalized)
-        return dt.timestamp(), None
-    except Exception:
-        return None, "到期时间格式不正确"
+        for item in windows:
+            if not isinstance(item, dict):
+                continue
+            window_token = str(item.get("window_token") or item.get("window_id") or "").strip()
+            if not window_token:
+                continue
+            window_name = str(item.get("window_name") or "").strip()
+            groups = item.get("groups")
+            if groups is None:
+                groups = []
+            if not isinstance(groups, list):
+                groups = []
+            result = db.replace_window_group_collections(
+                owner=owner,
+                machine_id=machine_id,
+                window_token=window_token,
+                groups=groups,
+                collected_at=collected_at,
+                window_name=window_name,
+            )
+            summaries.append(result)
+    finally:
+        db.close()
 
+    prefix = f"[{owner}@{machine_id}] " if owner and machine_id else ""
+    for row in summaries:
+        TASK_MANAGER._append_runtime_log(
+            f"{prefix}窗口 {row.get('window_token') or '-'} 采集完成，共采集 {int(row.get('saved') or 0)} 个群"
+        )
+    TASK_MANAGER._append_runtime_log(
+        f"{prefix}群组采集上报完成，共处理 {len(summaries)} 个窗口"
+    )
+    return {
+        "ok": True,
+        "data": {
+            "owner": owner,
+            "machine_id": machine_id,
+            "windows": summaries,
+        },
+    }
 
 PLAN_MONTH_OPTIONS = (1, 3, 6, 12)
 
@@ -3402,10 +3616,7 @@ def handle_user_delete(payload):
 
 
 def save_full_config(payload, actor_username=None, actor_role=None):
-    current_settings = _sanitize_server_settings(read_yaml(SETTINGS_PATH))
-    settings_payload = payload.get("settings") or {}
     messages_payload = payload.get("messages") or {}
-    current_messages = read_yaml(MESSAGES_PATH) or {}
 
     if actor_role != "admin":
         if actor_username:
@@ -3423,13 +3634,7 @@ def save_full_config(payload, actor_username=None, actor_role=None):
                 db.close()
         return
 
-    settings = dict(current_settings or {})
-    settings.update(settings_payload)
-    settings["browser"] = {"auto_discover_bitbrowser": True}
-
-    task_settings = settings.setdefault("task_settings", {})
-    task_settings.update(settings_payload.get("task_settings") or {})
-    settings = _sanitize_server_settings(settings)
+    current_messages = read_yaml(MESSAGES_PATH) or {}
     messages = dict(current_messages)
     messages.update(messages_payload)
     messages["templates"] = (
@@ -3437,23 +3642,7 @@ def save_full_config(payload, actor_username=None, actor_role=None):
         or current_messages.get("templates")
         or []
     )
-    write_yaml(SETTINGS_PATH, settings)
-    if actor_role == "admin":
-        write_yaml(MESSAGES_PATH, messages)
-
-    if actor_username:
-        db = Database()
-        try:
-            account = db.get_user_account(actor_username)
-            if account:
-                db.update_user_account(
-                    actor_username,
-                    actor_username,
-                    None,
-                    role=account.get("role"),
-                )
-        finally:
-            db.close()
+    write_yaml(MESSAGES_PATH, messages)
 
 
 def ensure_web_ui_defaults():
@@ -3526,20 +3715,17 @@ def main():
     cfg = web_ui_config()
     host = cfg.get("host", "127.0.0.1")
     port = int(cfg.get("port", DEFAULT_WEB_PORT))
-    server, bound_port, error = start_server(host, port, max_attempts=1)
+    server, error = start_server(host, port)
     if not server:
         ui_log(f"启动失败，端口 {port} 无法监听: {error}")
-        show_ui_alert("启动失败", f"端口 {port} 已被占用，请关闭占用进程后重试。")
+        if getattr(error, "errno", None) == errno.EADDRINUSE:
+            message = f"端口 {port} 已被占用，请关闭占用进程后重试。"
+        else:
+            message = f"端口 {port} 无法监听：{error or '未知错误'}"
+        show_ui_alert("启动失败", message)
         return
 
-    if bound_port != port:
-        settings = read_yaml(SETTINGS_PATH)
-        settings.setdefault("web_ui", {})["port"] = bound_port
-        write_yaml(SETTINGS_PATH, settings)
-        ui_log(f"端口 {port} 被占用，已切换到 {bound_port}")
-        show_ui_alert("端口已切换", f"端口 {port} 被占用，已切换到 {bound_port}")
-
-    url = f"http://{host}:{bound_port}"
+    url = f"http://{host}:{port}"
     print(f"本地管理后台已启动：{url}")
     ui_log(f"管理后台已启动：{url}")
     try:

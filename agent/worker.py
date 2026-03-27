@@ -9,7 +9,6 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from urllib.parse import urlparse
 
 import requests
 import yaml
@@ -34,6 +33,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 ENV_RUNTIME_DIR = "FB_RPA_RUNTIME_DIR"
+ENV_SELECTED_WINDOW_GROUPS_FILE = "FB_RPA_SELECTED_WINDOW_GROUPS_FILE"
 _RUNTIME_DIR = ""
 DEFAULT_BIT_API = ""
 DEFAULT_POLL_INTERVAL = 2.0
@@ -53,14 +53,6 @@ def _client_config_path() -> Path:
 
 
 CLIENT_CONFIG_PATH = _client_config_path()
-
-
-def _normalize_server_url(server_url):
-    return str(server_url or "").strip().rstrip("/")
-
-
-def _should_migrate_server_url(server_url):
-    return False
 
 
 def _set_runtime_dir(value: str) -> None:
@@ -106,6 +98,17 @@ def _pause_flag_path(owner):
     if owner:
         base = f"pause_{_sanitize_owner(owner)}.flag"
     return _runtime_path("data", base)
+
+
+def _selected_window_groups_path(owner, task_id=None, window_token=""):
+    owner_part = _sanitize_owner(owner) or "default"
+    token_part = _sanitize_owner(window_token) or "all"
+    task_part = _sanitize_owner(task_id) if task_id not in (None, "") else ""
+    suffix = f"_{task_part}" if task_part else ""
+    return _runtime_path(
+        "data",
+        f"selected_window_groups_{owner_part}_{token_part}{suffix}.json",
+    )
 
 
 def _load_json(path):
@@ -164,9 +167,6 @@ def _load_client_config(config_path=None):
     if not config:
         return {}
     changed = False
-    if _should_migrate_server_url(config.get("server_url") or ""):
-        config["server_url"] = DEFAULT_SERVER_URL
-        changed = True
     for key in ("activation_code", "register_token", "owner", "expire_at", "max_devices"):
         if key in config:
             config.pop(key, None)
@@ -444,7 +444,6 @@ def _persist_client_auth(config_path=None, agent_token=""):
     if not config:
         config = {}
     config["agent_token"] = str(agent_token or "").strip()
-    config.pop("token_expires_at", None)
     for key in ("activation_code", "register_token", "owner", "expire_at", "max_devices"):
         config.pop(key, None)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -496,7 +495,6 @@ def _attempt_runtime_token_recovery(cfg, config_path=None):
 
 def _clear_runtime_auth(cfg, config_path=None):
     cfg["agent_token"] = ""
-    cfg.pop("token_expires_at", None)
     _persist_client_auth(config_path=config_path, agent_token="")
 
 
@@ -675,7 +673,55 @@ class Worker:
             env["FB_RPA_BIT_API"] = bit_api
         if api_token:
             env["FB_RPA_API_TOKEN"] = api_token
+        selected_window_groups_file = str(payload.get("selected_window_groups_file") or "").strip()
+        if selected_window_groups_file:
+            env[ENV_SELECTED_WINDOW_GROUPS_FILE] = selected_window_groups_file
         return env
+
+    def _normalize_selected_window_groups(self, selected_window_groups, window_token=""):
+        normalized = {}
+        if not isinstance(selected_window_groups, dict):
+            return normalized
+        target_window_token = str(window_token or "").strip()
+        for raw_window_token, raw_groups in selected_window_groups.items():
+            normalized_window_token = str(raw_window_token or "").strip()
+            if not normalized_window_token:
+                continue
+            if target_window_token and normalized_window_token != target_window_token:
+                continue
+            if not isinstance(raw_groups, list):
+                continue
+            normalized_groups = []
+            seen_group_ids = set()
+            for item in raw_groups:
+                if not isinstance(item, dict):
+                    continue
+                group_id = str(item.get("group_id") or "").strip()
+                if not group_id or group_id in seen_group_ids:
+                    continue
+                seen_group_ids.add(group_id)
+                normalized_groups.append(
+                    {
+                        "group_id": group_id,
+                        "group_name": str(item.get("group_name") or "").strip(),
+                        "group_url": str(item.get("group_url") or "").strip(),
+                    }
+                )
+            normalized[normalized_window_token] = normalized_groups
+        if target_window_token and target_window_token not in normalized:
+            normalized[target_window_token] = []
+        return normalized
+
+    def _prepare_selected_window_groups_runtime(self, owner, task_id, payload, window_token=""):
+        if "selected_window_groups" not in payload:
+            return ""
+        normalized = self._normalize_selected_window_groups(
+            payload.get("selected_window_groups"),
+            window_token=window_token,
+        )
+        path = _selected_window_groups_path(owner, task_id=task_id, window_token=window_token)
+        _save_json(path, normalized)
+        return str(path)
 
     def _launch_process(self, owner, window_token, payload, task_id):
         try:
@@ -699,7 +745,19 @@ class Worker:
             command = [sys.executable, str(ROOT_DIR / "main.py")]
         if window_token:
             command.append(f"--window-token={window_token}")
-        env = self._build_env(owner, payload)
+        launch_payload = dict(payload or {})
+        try:
+            selected_window_groups_file = self._prepare_selected_window_groups_runtime(
+                owner,
+                task_id,
+                launch_payload,
+                window_token=window_token,
+            )
+            if selected_window_groups_file:
+                launch_payload["selected_window_groups_file"] = selected_window_groups_file
+        except Exception as exc:
+            self._send_log(owner, f"[worker] 写入窗口白名单运行投影失败：{exc}")
+        env = self._build_env(owner, launch_payload)
         if owner:
             stop_flag = _stop_flag_path(owner)
             if stop_flag.exists():
@@ -796,6 +854,123 @@ class Worker:
             if stop_flag.exists():
                 stop_flag.unlink()
 
+    def _has_active_runtime_processes_locked(self):
+        self._cleanup_finished_processes_locked()
+        if self.main_process and self.main_process.poll() is None:
+            return True
+        for process in self.single_processes.values():
+            if process.poll() is None:
+                return True
+        return False
+
+    def _build_collect_browser_settings(self, payload):
+        from main import build_browser_settings
+
+        runtime_config = _load_client_config(self.cfg.get("config_path"))
+        if not isinstance(runtime_config, dict):
+            runtime_config = {}
+        runtime_config = dict(runtime_config)
+
+        bit_api = str(payload.get("bit_api") or self.cfg.get("bit_api") or runtime_config.get("bit_api") or "").strip()
+        api_token = str(
+            payload.get("api_token") or self.cfg.get("api_token") or runtime_config.get("api_token") or ""
+        ).strip()
+        if bit_api:
+            runtime_config["bit_api"] = bit_api
+        if api_token:
+            runtime_config["api_token"] = api_token
+        return build_browser_settings(runtime_config)
+
+    def _handle_collect_groups(self, owner, payload, task_id):
+        from core.group_collector import collect_groups_for_machine
+
+        owner = str(owner or self.cfg.get("owner") or "").strip()
+        if not owner:
+            _post_agent_json(
+                self.cfg,
+                f"{self.cfg['server_url']}/api/agent/report",
+                {"task_id": task_id, "status": "failed", "error": "missing_owner"},
+            )
+            return
+
+        with self.lock:
+            if self._has_active_runtime_processes_locked():
+                _post_agent_json(
+                    self.cfg,
+                    f"{self.cfg['server_url']}/api/agent/report",
+                    {"task_id": task_id, "status": "failed", "error": "busy_running_task"},
+                )
+                return
+
+        browser_settings = self._build_collect_browser_settings(payload)
+        bit_api = str(browser_settings.get("bit_api") or "").strip()
+        api_token = str(browser_settings.get("api_token") or "").strip()
+        if not (bit_api and api_token):
+            _post_agent_json(
+                self.cfg,
+                f"{self.cfg['server_url']}/api/agent/report",
+                {"task_id": task_id, "status": "failed", "error": "missing_bitbrowser_credentials"},
+            )
+            return
+
+        runtime_config = _load_client_config(self.cfg.get("config_path"))
+        task_settings = dict((runtime_config or {}).get("task_settings") or {})
+        max_scrolls = payload.get("max_scrolls")
+        if max_scrolls in (None, ""):
+            max_scrolls = task_settings.get("group_list_scroll_times", 8)
+        try:
+            max_scrolls = int(max_scrolls or 0)
+        except Exception:
+            max_scrolls = 8
+
+        self._send_log(owner, "[采集] 已收到群组采集任务，开始准备窗口采集。")
+        result = collect_groups_for_machine(
+            browser_settings=browser_settings,
+            max_scrolls=max_scrolls,
+            log_callback=lambda line: self._send_log(owner, line),
+        )
+        windows = list(result.get("windows") or [])
+        if int(result.get("profile_count") or 0) <= 0:
+            _post_agent_json(
+                self.cfg,
+                f"{self.cfg['server_url']}/api/agent/report",
+                {"task_id": task_id, "status": "failed", "error": "no_profiles"},
+            )
+            return
+
+        status_code, collect_result = _post_agent_json(
+            self.cfg,
+            f"{self.cfg['server_url']}/api/agent/collect-report",
+            {
+                "owner": owner,
+                "machine_id": self.cfg.get("machine_id") or "",
+                "windows": windows,
+            },
+            timeout=60,
+        )
+        if status_code != 200 or not isinstance(collect_result, dict) or not collect_result.get("ok"):
+            self._send_log(owner, "[采集] 采集结果上报失败。")
+            _post_agent_json(
+                self.cfg,
+                f"{self.cfg['server_url']}/api/agent/report",
+                {"task_id": task_id, "status": "failed", "error": "collect_report_failed"},
+            )
+            return
+
+        self._send_log(
+            owner,
+            (
+                f"[采集] 采集完成：成功窗口 {int(result.get('collected_window_count') or 0)} 个，"
+                f"失败窗口 {int(result.get('failed_window_count') or 0)} 个，"
+                f"累计群组 {int(result.get('total_groups') or 0)} 个。"
+            ),
+        )
+        _post_agent_json(
+            self.cfg,
+            f"{self.cfg['server_url']}/api/agent/report",
+            {"task_id": task_id, "status": "done"},
+        )
+
     def handle_task(self, task):
         task_id = task.get("id")
         action = task.get("action")
@@ -874,6 +1049,10 @@ class Worker:
                 f"{self.cfg['server_url']}/api/agent/report",
                 {"task_id": task_id, "status": "done"},
             )
+            return
+
+        if action == "collect_groups":
+            self._handle_collect_groups(owner, payload, task_id)
             return
 
         _post_agent_json(

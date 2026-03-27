@@ -127,7 +127,7 @@ class Database:
     LEGACY_GROUP_SCOPE = "__legacy_global__"
 
     def __init__(self, db_path=None):
-        if not db_path or db_path == "data/processed_users.db":
+        if not db_path:
             db_path = str(_runtime_path("data", "server.db"))
         elif not os.path.isabs(db_path):
             db_path = str(_runtime_path(db_path))
@@ -147,6 +147,8 @@ class Database:
         self._migrate_user_accounts()
         self._migrate_agent_registry()
         self._migrate_device_configs()
+        self._migrate_device_windows()
+        self._migrate_window_group_collections()
         self._migrate_agent_tasks()
         self._migrate_sessions()
         self.conn.commit()
@@ -255,7 +257,7 @@ class Database:
     def _dedupe_sent_history(self, rows):
         normalized_rows = {}
         for row in rows:
-            group_id = self.normalize_group_id(row["group_id"], allow_legacy=True)
+            group_id = self.normalize_migration_group_id(row["group_id"])
             if not group_id:
                 continue
             profile_url = self.normalize_profile_url(row["profile_url"])
@@ -321,7 +323,7 @@ class Database:
             self.conn.execute("DROP TABLE send_claims")
         self._create_send_claims_table("send_claims")
         for row in rows:
-            normalized_group_id = self.normalize_group_id(row["group_id"], allow_legacy=True)
+            normalized_group_id = self.normalize_migration_group_id(row["group_id"])
             normalized_profile_url = self.normalize_profile_url(row["profile_url"])
             if not normalized_group_id or not normalized_profile_url:
                 continue
@@ -427,6 +429,150 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_device_configs_owner ON device_configs(owner)"
         )
 
+    def _migrate_device_windows(self):
+        columns = self._fetch_table_columns("device_windows")
+        if not columns:
+            self._create_device_windows_table("device_windows")
+            self._ensure_device_windows_indexes()
+            return
+
+        expected = {
+            "id",
+            "owner",
+            "machine_id",
+            "window_token",
+            "window_name",
+            "last_seen",
+            "last_collect_at",
+            "last_collect_status",
+            "last_collect_message",
+        }
+        missing = expected.difference(columns)
+        for column in missing:
+            if column == "window_name":
+                self.conn.execute("ALTER TABLE device_windows ADD COLUMN window_name TEXT")
+            elif column == "last_seen":
+                self.conn.execute("ALTER TABLE device_windows ADD COLUMN last_seen REAL")
+            elif column == "last_collect_at":
+                self.conn.execute("ALTER TABLE device_windows ADD COLUMN last_collect_at REAL")
+            elif column == "last_collect_status":
+                self.conn.execute("ALTER TABLE device_windows ADD COLUMN last_collect_status TEXT")
+            elif column == "last_collect_message":
+                self.conn.execute("ALTER TABLE device_windows ADD COLUMN last_collect_message TEXT")
+        self._ensure_device_windows_indexes()
+
+    def _create_device_windows_table(self, table_name):
+        self.conn.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {table_name} (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                owner TEXT NOT NULL,
+                machine_id TEXT NOT NULL,
+                window_token TEXT NOT NULL,
+                window_name TEXT,
+                last_seen REAL,
+                last_collect_at REAL,
+                last_collect_status TEXT,
+                last_collect_message TEXT
+            )
+            """
+        )
+
+    def _ensure_device_windows_indexes(self):
+        self.conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_device_windows_owner_machine_window
+            ON device_windows(owner, machine_id, window_token)
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_device_windows_owner_machine
+            ON device_windows(owner, machine_id)
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_device_windows_machine
+            ON device_windows(machine_id)
+            """
+        )
+
+    def _migrate_window_group_collections(self):
+        columns = self._fetch_table_columns("window_group_collections")
+        if not columns:
+            self._create_window_group_collections_table("window_group_collections")
+            self._ensure_window_group_collection_indexes()
+            return
+
+        expected = {
+            "id",
+            "owner",
+            "machine_id",
+            "window_token",
+            "group_id",
+            "group_name",
+            "group_url",
+            "collected_at",
+            "selected",
+        }
+        missing = expected.difference(columns)
+        for column in missing:
+            if column == "group_name":
+                self.conn.execute(
+                    "ALTER TABLE window_group_collections ADD COLUMN group_name TEXT"
+                )
+            elif column == "group_url":
+                self.conn.execute(
+                    "ALTER TABLE window_group_collections ADD COLUMN group_url TEXT"
+                )
+            elif column == "collected_at":
+                self.conn.execute(
+                    "ALTER TABLE window_group_collections ADD COLUMN collected_at REAL"
+                )
+            elif column == "selected":
+                self.conn.execute(
+                    "ALTER TABLE window_group_collections ADD COLUMN selected INTEGER DEFAULT 0"
+                )
+        self._ensure_window_group_collection_indexes()
+
+    def _create_window_group_collections_table(self, table_name):
+        self.conn.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {table_name} (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                owner TEXT NOT NULL,
+                machine_id TEXT NOT NULL,
+                window_token TEXT NOT NULL,
+                group_id TEXT NOT NULL,
+                group_name TEXT,
+                group_url TEXT,
+                collected_at REAL,
+                selected INTEGER DEFAULT 0
+            )
+            """
+        )
+
+    def _ensure_window_group_collection_indexes(self):
+        self.conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_window_groups_owner_machine_window_group
+            ON window_group_collections(owner, machine_id, window_token, group_id)
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_window_groups_owner_machine_window
+            ON window_group_collections(owner, machine_id, window_token)
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_window_groups_selected
+            ON window_group_collections(owner, machine_id, window_token, selected)
+            """
+        )
+
     def _migrate_run_cursor(self):
         info_rows = self.conn.execute("PRAGMA table_info(run_cursor)").fetchall()
         if not info_rows:
@@ -505,9 +651,6 @@ class Database:
             "id",
             "username",
             "password_hash",
-            "bit_api",
-            "api_token",
-            "bridge_url",
             "role",
             "status",
             "created_at",
@@ -531,12 +674,6 @@ class Database:
                 self.conn.execute(
                     "ALTER TABLE user_accounts ADD COLUMN password_hash TEXT"
                 )
-            elif column == "bit_api":
-                self.conn.execute("ALTER TABLE user_accounts ADD COLUMN bit_api TEXT")
-            elif column == "api_token":
-                self.conn.execute("ALTER TABLE user_accounts ADD COLUMN api_token TEXT")
-            elif column == "bridge_url":
-                self.conn.execute("ALTER TABLE user_accounts ADD COLUMN bridge_url TEXT")
             elif column == "role":
                 self.conn.execute(
                     "ALTER TABLE user_accounts ADD COLUMN role TEXT DEFAULT 'user'"
@@ -571,10 +708,7 @@ class Database:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 username TEXT NOT NULL UNIQUE,
                 password_hash TEXT,
-                bit_api TEXT,
-                api_token TEXT,
                 activation_code TEXT,
-                bridge_url TEXT,
                 send_interval_min INTEGER,
                 send_interval_max INTEGER,
                 max_devices INTEGER,
@@ -613,24 +747,17 @@ class Database:
         expected = {
             "machine_id",
             "label",
-            "bridge_port",
-            "bridge_url",
             "last_seen",
             "created_at",
             "owner",
             "status",
             "token",
-            "token_expires_at",
             "client_version",
         }
         missing = expected.difference(columns)
         for column in missing:
             if column == "label":
                 self.conn.execute("ALTER TABLE agent_registry ADD COLUMN label TEXT")
-            elif column == "bridge_port":
-                self.conn.execute("ALTER TABLE agent_registry ADD COLUMN bridge_port INTEGER")
-            elif column == "bridge_url":
-                self.conn.execute("ALTER TABLE agent_registry ADD COLUMN bridge_url TEXT")
             elif column == "last_seen":
                 self.conn.execute("ALTER TABLE agent_registry ADD COLUMN last_seen REAL")
             elif column == "created_at":
@@ -641,8 +768,6 @@ class Database:
                 self.conn.execute("ALTER TABLE agent_registry ADD COLUMN status INTEGER DEFAULT 1")
             elif column == "token":
                 self.conn.execute("ALTER TABLE agent_registry ADD COLUMN token TEXT")
-            elif column == "token_expires_at":
-                self.conn.execute("ALTER TABLE agent_registry ADD COLUMN token_expires_at REAL")
             elif column == "client_version":
                 self.conn.execute("ALTER TABLE agent_registry ADD COLUMN client_version TEXT")
 
@@ -652,14 +777,11 @@ class Database:
             CREATE TABLE IF NOT EXISTS agent_registry (
                 machine_id TEXT NOT NULL PRIMARY KEY,
                 label TEXT,
-                bridge_port INTEGER,
-                bridge_url TEXT,
                 last_seen REAL,
                 created_at REAL,
                 owner TEXT,
                 status INTEGER DEFAULT 1,
                 token TEXT,
-                token_expires_at REAL,
                 client_version TEXT
             )
             """
@@ -1062,8 +1184,6 @@ class Database:
         if activation_code is not None:
             activation_code = (activation_code or "").strip() or None
         fields = ["username = ?"]
-        # bridge_url is a legacy column kept only for schema compatibility and is
-        # intentionally excluded from the active update path.
         params = [username]
         if password_hash is not None:
             fields.append("password_hash = ?")
@@ -1160,6 +1280,358 @@ class Database:
         self.conn.commit()
         return self.conn.total_changes > 0
 
+    def upsert_device_window(
+        self,
+        owner,
+        machine_id,
+        window_token,
+        window_name="",
+        last_seen=None,
+        last_collect_at=None,
+        last_collect_status=None,
+        last_collect_message=None,
+    ):
+        owner = self.normalize_account_scope(owner)
+        machine_id = str(machine_id or "").strip()
+        window_token = str(window_token or "").strip()
+        if not owner or not machine_id or not window_token:
+            return False
+        row = self.conn.execute(
+            """
+            SELECT id, last_seen, last_collect_at, last_collect_status, last_collect_message
+            FROM device_windows
+            WHERE owner = ? AND machine_id = ? AND window_token = ?
+            """,
+            (owner, machine_id, window_token),
+        ).fetchone()
+        now_value = float(time.time())
+        if last_seen is None:
+            last_seen = now_value
+        if last_collect_at is None:
+            last_collect_at = now_value
+        clean_name = str(window_name or "").strip() or None
+        clean_status = (
+            str(last_collect_status or "").strip() or None
+            if last_collect_status is not None
+            else (str(row["last_collect_status"] or "").strip() or None if row else None)
+        )
+        clean_message = (
+            str(last_collect_message or "").strip() or None
+            if last_collect_message is not None
+            else (str(row["last_collect_message"] or "").strip() or None if row else None)
+        )
+        if row:
+            self.conn.execute(
+                """
+                UPDATE device_windows
+                SET window_name = ?,
+                    last_seen = ?,
+                    last_collect_at = ?,
+                    last_collect_status = ?,
+                    last_collect_message = ?
+                WHERE owner = ? AND machine_id = ? AND window_token = ?
+                """,
+                (
+                    clean_name,
+                    float(last_seen),
+                    float(last_collect_at),
+                    clean_status,
+                    clean_message,
+                    owner,
+                    machine_id,
+                    window_token,
+                ),
+            )
+        else:
+            self.conn.execute(
+                """
+                INSERT INTO device_windows
+                (
+                    owner,
+                    machine_id,
+                    window_token,
+                    window_name,
+                    last_seen,
+                    last_collect_at,
+                    last_collect_status,
+                    last_collect_message
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    owner,
+                    machine_id,
+                    window_token,
+                    clean_name,
+                    float(last_seen),
+                    float(last_collect_at),
+                    clean_status,
+                    clean_message,
+                ),
+            )
+        self.conn.commit()
+        return True
+
+    def list_device_windows(self, owner="", machine_id=""):
+        conditions = []
+        params = []
+        owner = self.normalize_account_scope(owner)
+        machine_id = str(machine_id or "").strip()
+        if owner:
+            conditions.append("owner = ?")
+            params.append(owner)
+        if machine_id:
+            conditions.append("machine_id = ?")
+            params.append(machine_id)
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        rows = self.conn.execute(
+            f"""
+            SELECT
+                id,
+                owner,
+                machine_id,
+                window_token,
+                window_name,
+                last_seen,
+                last_collect_at,
+                last_collect_status,
+                last_collect_message
+            FROM device_windows
+            {where}
+            ORDER BY owner ASC, machine_id ASC, window_token ASC
+            """,
+            tuple(params),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def replace_window_group_collections(
+        self,
+        owner,
+        machine_id,
+        window_token,
+        groups,
+        collected_at=None,
+        window_name="",
+        last_collect_status=None,
+        last_collect_message=None,
+    ):
+        owner = self.normalize_account_scope(owner)
+        machine_id = str(machine_id or "").strip()
+        window_token = str(window_token or "").strip()
+        if not owner or not machine_id or not window_token:
+            return {"window_token": window_token, "total": 0, "saved": 0}
+        collected_at = float(collected_at or time.time())
+        self.upsert_device_window(
+            owner=owner,
+            machine_id=machine_id,
+            window_token=window_token,
+            window_name=window_name,
+            last_seen=collected_at,
+            last_collect_at=collected_at,
+            last_collect_status=last_collect_status,
+            last_collect_message=last_collect_message,
+        )
+        existing_rows = self.conn.execute(
+            """
+            SELECT group_id, selected
+            FROM window_group_collections
+            WHERE owner = ? AND machine_id = ? AND window_token = ?
+            """,
+            (owner, machine_id, window_token),
+        ).fetchall()
+        selected_map = {
+            str(row["group_id"] or "").strip(): int(row["selected"] or 0)
+            for row in existing_rows
+            if str(row["group_id"] or "").strip()
+        }
+
+        deduped_groups = {}
+        for item in groups or []:
+            if not isinstance(item, dict):
+                continue
+            group_url = str(item.get("group_url") or "").strip()
+            group_id = self.extract_group_id(group_url)
+            if not group_id:
+                continue
+            current = deduped_groups.get(group_id)
+            candidate = {
+                "group_id": group_id,
+                "group_name": str(item.get("group_name") or "").strip() or None,
+                "group_url": group_url or None,
+                "selected": selected_map.get(group_id, 0),
+            }
+            if not current:
+                deduped_groups[group_id] = candidate
+                continue
+            if not current.get("group_name") and candidate.get("group_name"):
+                current["group_name"] = candidate["group_name"]
+            if not current.get("group_url") and candidate.get("group_url"):
+                current["group_url"] = candidate["group_url"]
+
+        self.conn.execute(
+            """
+            DELETE FROM window_group_collections
+            WHERE owner = ? AND machine_id = ? AND window_token = ?
+            """,
+            (owner, machine_id, window_token),
+        )
+        for group in deduped_groups.values():
+            self.conn.execute(
+                """
+                INSERT INTO window_group_collections
+                (owner, machine_id, window_token, group_id, group_name, group_url, collected_at, selected)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    owner,
+                    machine_id,
+                    window_token,
+                    group["group_id"],
+                    group["group_name"],
+                    group["group_url"],
+                    collected_at,
+                    int(group["selected"]),
+                ),
+            )
+        self.conn.commit()
+        return {
+            "window_token": window_token,
+            "total": len(groups or []),
+            "saved": len(deduped_groups),
+        }
+
+    def list_window_group_collections(self, owner="", machine_id="", window_token=""):
+        conditions = []
+        params = []
+        owner = self.normalize_account_scope(owner)
+        machine_id = str(machine_id or "").strip()
+        window_token = str(window_token or "").strip()
+        if owner:
+            conditions.append("owner = ?")
+            params.append(owner)
+        if machine_id:
+            conditions.append("machine_id = ?")
+            params.append(machine_id)
+        if window_token:
+            conditions.append("window_token = ?")
+            params.append(window_token)
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        rows = self.conn.execute(
+            f"""
+            SELECT id, owner, machine_id, window_token, group_id, group_name, group_url, collected_at, selected
+            FROM window_group_collections
+            {where}
+            ORDER BY owner ASC, machine_id ASC, window_token ASC, group_name COLLATE NOCASE ASC, group_id ASC
+            """,
+            tuple(params),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_device_window_group_detail(self, owner, machine_id):
+        owner = self.normalize_account_scope(owner)
+        machine_id = str(machine_id or "").strip()
+        if not owner or not machine_id:
+            return {"owner": owner, "machine_id": machine_id, "windows": []}
+        windows = self.list_device_windows(owner=owner, machine_id=machine_id)
+        groups = self.list_window_group_collections(owner=owner, machine_id=machine_id)
+        group_map = {}
+        for row in groups:
+            token = str(row.get("window_token") or "").strip()
+            if not token:
+                continue
+            group_map.setdefault(token, []).append(
+                {
+                    "group_id": row.get("group_id"),
+                    "group_name": row.get("group_name"),
+                    "group_url": row.get("group_url"),
+                    "collected_at": row.get("collected_at"),
+                    "selected": int(row.get("selected") or 0),
+                }
+            )
+        detail_windows = []
+        for window in windows:
+            token = str(window.get("window_token") or "").strip()
+            detail_windows.append(
+                {
+                    "window_token": token,
+                    "window_name": window.get("window_name"),
+                    "last_seen": window.get("last_seen"),
+                    "last_collect_at": window.get("last_collect_at"),
+                    "last_collect_status": window.get("last_collect_status"),
+                    "last_collect_message": window.get("last_collect_message"),
+                    "groups": group_map.get(token, []),
+                }
+            )
+        return {
+            "owner": owner,
+            "machine_id": machine_id,
+            "windows": detail_windows,
+        }
+
+    def save_window_group_selections(self, owner, machine_id, selections):
+        owner = self.normalize_account_scope(owner)
+        machine_id = str(machine_id or "").strip()
+        if not owner or not machine_id:
+            return False
+        selections = selections or []
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            for item in selections:
+                if not isinstance(item, dict):
+                    continue
+                window_token = str(item.get("window_token") or "").strip()
+                if not window_token:
+                    continue
+                raw_group_ids = item.get("group_ids") or []
+                group_ids = []
+                for group_id in raw_group_ids:
+                    normalized_group_id = self.normalize_group_id(group_id)
+                    if normalized_group_id:
+                        group_ids.append(normalized_group_id)
+                deduped_group_ids = list(dict.fromkeys(group_ids))
+                self.conn.execute(
+                    """
+                    UPDATE window_group_collections
+                    SET selected = 0
+                    WHERE owner = ? AND machine_id = ? AND window_token = ?
+                    """,
+                    (owner, machine_id, window_token),
+                )
+                if deduped_group_ids:
+                    placeholders = ",".join("?" for _ in deduped_group_ids)
+                    self.conn.execute(
+                        f"""
+                        UPDATE window_group_collections
+                        SET selected = 1
+                        WHERE owner = ? AND machine_id = ? AND window_token = ?
+                          AND group_id IN ({placeholders})
+                        """,
+                        (owner, machine_id, window_token, *deduped_group_ids),
+                    )
+            self.conn.commit()
+            return True
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def list_selected_window_groups(self, owner, machine_id):
+        rows = self.list_window_group_collections(owner=owner, machine_id=machine_id)
+        grouped = {}
+        for row in rows:
+            if int(row.get("selected") or 0) != 1:
+                continue
+            token = str(row.get("window_token") or "").strip()
+            if not token:
+                continue
+            grouped.setdefault(token, []).append(
+                {
+                    "group_id": row.get("group_id"),
+                    "group_name": row.get("group_name"),
+                    "group_url": row.get("group_url"),
+                }
+            )
+        return grouped
+
     def set_user_activation_code(self, username, activation_code):
         username = (username or "").strip()
         if not username:
@@ -1179,7 +1651,6 @@ class Database:
         owner=None,
         status=1,
         token=None,
-        token_expires_at=None,
         client_version=None,
     ):
         machine_id = (machine_id or "").strip()
@@ -1194,8 +1665,6 @@ class Database:
                 status = existing.get("status", 1)
             if token is None:
                 token = existing.get("token")
-            if token_expires_at is None:
-                token_expires_at = existing.get("token_expires_at")
             if client_version is None:
                 client_version = existing.get("client_version")
         if status is None:
@@ -1209,7 +1678,6 @@ class Database:
                     owner = ?,
                     status = ?,
                     token = ?,
-                    token_expires_at = ?,
                     client_version = ?
                 WHERE machine_id = ?
                 """,
@@ -1219,7 +1687,6 @@ class Database:
                     owner,
                     int(status),
                     token,
-                    float(token_expires_at) if token_expires_at is not None else None,
                     client_version,
                     machine_id,
                 ),
@@ -1228,8 +1695,8 @@ class Database:
             self.conn.execute(
                 """
                 INSERT INTO agent_registry
-                (machine_id, label, last_seen, created_at, owner, status, token, token_expires_at, client_version)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (machine_id, label, last_seen, created_at, owner, status, token, client_version)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     machine_id,
@@ -1239,7 +1706,6 @@ class Database:
                     owner,
                     int(status),
                     token,
-                    float(token_expires_at) if token_expires_at is not None else None,
                     client_version,
                 ),
             )
@@ -1252,7 +1718,7 @@ class Database:
         row = self.conn.execute(
             """
             SELECT machine_id, label, last_seen, created_at,
-                   owner, status, token, token_expires_at, client_version
+                   owner, status, token, client_version
             FROM agent_registry
             WHERE machine_id = ?
             """,
@@ -1267,7 +1733,7 @@ class Database:
         row = self.conn.execute(
             """
             SELECT machine_id, label, last_seen, created_at,
-                   owner, status, token, token_expires_at, client_version
+                   owner, status, token, client_version
             FROM agent_registry
             WHERE token = ?
             """,
@@ -1279,7 +1745,7 @@ class Database:
         rows = self.conn.execute(
             """
             SELECT machine_id, label, last_seen, created_at,
-                   owner, status, token_expires_at, client_version
+                   owner, status, client_version
             FROM agent_registry
             ORDER BY created_at DESC
             """
@@ -1292,7 +1758,7 @@ class Database:
             return None
         sql = """
             SELECT machine_id, label, last_seen, created_at,
-                   owner, status, token, token_expires_at, client_version
+                   owner, status, token, client_version
             FROM agent_registry
             WHERE owner = ?
         """
@@ -1311,7 +1777,7 @@ class Database:
         row = self.conn.execute(
             """
             SELECT machine_id, label, last_seen, created_at,
-                   owner, status, token, token_expires_at, client_version
+                   owner, status, token, client_version
             FROM agent_registry
             WHERE owner = ?
               AND status = 1
@@ -1338,20 +1804,6 @@ class Database:
                 (owner,),
             ).fetchone()
         return int(row["total"] or 0) if row else 0
-
-    def update_agent_token(self, machine_id, token, token_expires_at):
-        machine_id = (machine_id or "").strip()
-        if not machine_id:
-            return
-        self.conn.execute(
-            """
-            UPDATE agent_registry
-            SET token = ?, token_expires_at = ?
-            WHERE machine_id = ?
-            """,
-            (token, float(token_expires_at) if token_expires_at is not None else None, machine_id),
-        )
-        self.conn.commit()
 
     def set_agent_status(self, machine_id, status):
         machine_id = (machine_id or "").strip()
@@ -1563,7 +2015,7 @@ class Database:
             """
         )
         for row in rows:
-            normalized_group_id = self.normalize_group_id(row["group_id"], allow_legacy=True)
+            normalized_group_id = self.normalize_migration_group_id(row["group_id"])
             if not normalized_group_id:
                 continue
             normalized_account_id = self.normalize_account_scope(row["account_id"])
@@ -1629,11 +2081,15 @@ class Database:
             return False
         return True
 
-    def normalize_group_id(self, group_id, allow_legacy=False):
+    def normalize_migration_group_id(self, group_id):
         raw = str(group_id or "").strip()
         if raw:
             return raw
-        return self.LEGACY_GROUP_SCOPE if allow_legacy else None
+        return self.LEGACY_GROUP_SCOPE
+
+    def normalize_group_id(self, group_id):
+        raw = str(group_id or "").strip()
+        return raw or None
 
     def normalize_account_scope(self, account_id):
         return str(account_id or "").strip()
@@ -1688,6 +2144,19 @@ class Database:
         segments = [segment for segment in parsed.path.split("/") if segment]
         if len(segments) == 2 and segments[0] == "user":
             return segments[1]
+        return None
+
+    def extract_group_id(self, group_url):
+        raw = str(group_url or "").strip()
+        if not raw:
+            return None
+        full_url = urljoin("https://www.facebook.com", raw)
+        parsed = urlparse(full_url)
+        if "facebook.com" not in parsed.netloc:
+            return None
+        segments = [segment for segment in parsed.path.split("/") if segment]
+        if len(segments) >= 2 and segments[0] == "groups":
+            return segments[1].strip() or None
         return None
 
     def is_sent(self, group_id, account_id=None, profile_url=None, user_id=None, scope_id=None):
