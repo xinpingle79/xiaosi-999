@@ -317,6 +317,47 @@ class Scraper:
         "กลุ่มของคุณ",
         "กลุ่มที่คุณเข้าร่วม",
     )
+    GROUP_OPEN_ACTION_LABELS = (
+        "进入小组",
+        "进入群组",
+        "查看小组",
+        "打开小组",
+        "前往小组",
+        "进入社团",
+        "进入團體",
+        "View group",
+        "Open group",
+        "Go to group",
+        "See group",
+        "Ver grupo",
+        "Abrir grupo",
+        "Ir al grupo",
+        "Voir le groupe",
+        "Ouvrir le groupe",
+        "Aller au groupe",
+        "Gruppe ansehen",
+        "Gruppe öffnen",
+        "Zur Gruppe",
+        "Visualizza gruppo",
+        "Apri gruppo",
+        "Vai al gruppo",
+        "Xem nhóm",
+        "Mở nhóm",
+        "Đi tới nhóm",
+        "Lihat grup",
+        "Buka grup",
+        "Pergi ke grup",
+        "ดูกลุ่ม",
+        "เข้าดูกลุ่ม",
+        "เปิดกลุ่ม",
+        "ไปที่กลุ่ม",
+        "グループを見る",
+        "グループを開く",
+        "그룹 보기",
+        "그룹 열기",
+        "عرض المجموعة",
+        "فتح المجموعة",
+    )
     JOINED_GROUP_SKIP_LABELS = set(
         SEE_ALL_LABELS
         + (
@@ -1187,22 +1228,22 @@ class Scraper:
         if self._is_checkpoint_surface(self.page.url):
             log.warning(f"{self._prefix()}接管页面后命中 Facebook checkpoint，停止进入小组流程，交由上层统一处理。")
             return False
-        if self._has_groups_surface_ready():
-            return True
-
-        entered_groups_surface = False
         if self._open_home_surface_for_groups_entry():
             click_info = self._click_groups_entry()
-            if click_info:
-                entered_groups_surface = self._wait_for_groups_surface(timeout=5.0, step_name="小组首页")
-        if not entered_groups_surface:
+            if click_info and self._wait_for_groups_surface(timeout=12.0, step_name="小组首页"):
+                return True
+        try:
+            log.warning(f"{self._prefix()}首页 -> 小组入口链未成功完成，尝试进入小组页兜底恢复。")
+        except Exception:
+            pass
+        if not self._has_groups_surface_ready():
             if not self._open_groups_surface_by_direct_navigation():
                 log.warning(f"{self._prefix()}未能回到 Facebook 首页，无法按手动路径进入小组。")
                 return False
         return self._has_groups_surface_ready()
 
     def _stabilize_joined_groups_listing(self, timeout=2.5, step_name="已加入小组列表"):
-        if not (self._is_joined_groups_surface(self.page.url) or self._has_groups_list_ready()):
+        if not self._is_joined_groups_listing_ready():
             return False
         self.scroll_to_top()
         self._scroll_joined_groups_container(to_top=True)
@@ -1226,7 +1267,7 @@ class Scraper:
         while unlimited or round_idx < int(max_scrolls):
             batch = self._joined_groups_snapshot()
             if not batch.get("ready"):
-                self._wait_for_groups_list_ready(timeout=3.0, step_name="已加入小组列表")
+                self._wait_for_groups_list_ready(timeout=5.0, step_name="已加入小组列表")
                 batch = self._joined_groups_snapshot()
             items = list(batch.get("items") or [])
             added = 0
@@ -1785,9 +1826,9 @@ class Scraper:
 
     def _open_joined_groups_listing(self):
         try:
-            if self._has_groups_list_ready():
+            if self._is_joined_groups_listing_ready():
                 return True
-            if self._stabilize_joined_groups_listing(timeout=3.0, step_name="已加入小组列表"):
+            if self._stabilize_joined_groups_listing(timeout=5.0, step_name="已加入小组列表"):
                 return True
 
             clicked_any = False
@@ -1862,13 +1903,13 @@ class Scraper:
                     entered = self._wait_for_condition(
                         "已加入小组列表",
                         "等待进入“你的小组”页面",
-                        lambda: self._is_joined_groups_surface(self.page.url) or self._has_groups_list_ready(),
-                        timeout=4.0,
+                        self._is_joined_groups_listing_ready,
+                        timeout=7.0,
                         interval=0.3,
                     )
-                    if entered and self._stabilize_joined_groups_listing(timeout=3.0, step_name="已加入小组列表"):
+                    if entered and self._stabilize_joined_groups_listing(timeout=5.0, step_name="已加入小组列表"):
                         return True
-                if self._stabilize_joined_groups_listing(timeout=2.2, step_name="已加入小组列表"):
+                if self._stabilize_joined_groups_listing(timeout=3.5, step_name="已加入小组列表"):
                     return True
                 self._pause_aware_sleep(0.35)
 
@@ -1877,14 +1918,20 @@ class Scraper:
                 try:
                     log.info(f"{self._prefix()}已加入小组列表尚未稳定，尝试直接进入 joins 页面恢复列表。")
                     self._goto_pause_aware("https://www.facebook.com/groups/joins/", timeout_ms=30000, settle_timeout_ms=3000)
-                    if self._wait_for_groups_surface(timeout=2.5, step_name="已加入小组列表"):
-                        if self._stabilize_joined_groups_listing(timeout=3.0, step_name="已加入小组列表"):
+                    if self._wait_for_condition(
+                        "已加入小组列表",
+                        "等待进入“你的小组”页面",
+                        self._is_joined_groups_listing_ready,
+                        timeout=7.0,
+                        interval=0.3,
+                    ):
+                        if self._stabilize_joined_groups_listing(timeout=5.0, step_name="已加入小组列表"):
                             return True
                 except Exception:
                     pass
         except Exception:
             return False
-        return self._has_groups_list_ready()
+        return self._is_joined_groups_listing_ready()
 
     def _ensure_facebook_home_surface(self):
         self._adopt_existing_facebook_page()
@@ -2023,8 +2070,6 @@ class Scraper:
             return False
 
     def _open_home_surface_for_groups_entry(self):
-        if self._has_groups_sidebar_entry():
-            return True
         if self._is_home_surface(self.page.url):
             self._wait_for_condition(
                 "Facebook首页",
@@ -2036,7 +2081,11 @@ class Scraper:
             return self._has_groups_sidebar_entry()
         clicked = self._click_home_entry()
         if not clicked:
-            return False
+            log.info(f"{self._prefix()}未能通过首页入口返回 Facebook 首页，尝试直接回到首页恢复主链。")
+            try:
+                self._goto_pause_aware("https://www.facebook.com/", timeout_ms=30000, settle_timeout_ms=3000)
+            except Exception:
+                return False
         self._wait_for_condition(
             "Facebook首页",
             "等待“小组”入口出现",
@@ -2263,7 +2312,13 @@ class Scraper:
             for _ in range(10):
                 before_url = self.page.url
                 clicked = self.page.evaluate(
-                    """(targetGroupRoot) => {
+                    """(payload) => {
+                    const targetGroupRoot = String(payload?.targetGroupRoot || '').trim().replace(/\\/+$/, '');
+                    const openActionLabels = new Set(
+                        Array.isArray(payload?.openActionLabels)
+                            ? payload.openActionLabels.map((label) => (label || '').trim().toLowerCase()).filter(Boolean)
+                            : []
+                    );
                     const normalize = (value) => (value || '').trim().replace(/\\s+/g, ' ');
                     const visible = (el) => {
                         if (!el) return false;
@@ -2292,6 +2347,17 @@ class Scraper:
                         }
                         return parts.join(' > ');
                     };
+                    const main = document.querySelector('main, [role="main"]');
+                    const mainRect = main ? main.getBoundingClientRect() : null;
+                    const inMainContent = (rect) => {
+                        if (!rect || !mainRect) return false;
+                        return (
+                            rect.left >= mainRect.left + 24 &&
+                            rect.right <= mainRect.right + 12 &&
+                            rect.top >= mainRect.top - 8 &&
+                            rect.bottom <= mainRect.bottom + 12
+                        );
+                    };
                     const classifyGroupHref = (href) => {
                         try {
                             const url = new URL(href, location.origin);
@@ -2318,6 +2384,113 @@ class Scraper:
                         } catch (e) {}
                         return { type: 'non_group', root: '' };
                     };
+                    const isButtonLike = (el) => {
+                        if (!el) return false;
+                        const tag = (el.tagName || '').toLowerCase();
+                        return tag === 'button' || el.getAttribute('role') === 'button';
+                    };
+                    const scoreJoinedListingControl = (candidate) => {
+                        let score = 0;
+                        if (candidate.inMain) score += 400;
+                        if (candidate.buttonLike) score += 180;
+                        if (candidate.matchesActionText) score += 220;
+                        if (candidate.linksDirectly) score += 180;
+                        if (candidate.rect.width >= 120) score += 40;
+                        if (candidate.rect.height >= 28) score += 20;
+                        if (candidate.rect.top >= 140 && candidate.rect.top <= 520) score += 60;
+                        if (candidate.rect.left >= (mainRect ? mainRect.left + 40 : 320)) score += 40;
+                        return score;
+                    };
+                    const onJoinedSurface = /^\\/groups\\/joins(\\/|\\?|$)/i.test(location.pathname || '');
+                    if (onJoinedSurface && main) {
+                        const rootAnchors = Array.from(main.querySelectorAll('a[href]')).filter((el) => {
+                            if (!visible(el)) return false;
+                            const href = el.getAttribute('href') || '';
+                            const classified = classifyGroupHref(href);
+                            return classified.root === targetGroupRoot && classified.type === 'group_root';
+                        });
+                        const seenCards = new Set();
+                        const cardCandidates = [];
+                        for (const anchor of rootAnchors) {
+                            let node = anchor;
+                            for (let depth = 0; depth < 7 && node; depth += 1) {
+                                if (!(node instanceof Element)) break;
+                                const rect = node.getBoundingClientRect();
+                                if (
+                                    rect.width >= 260 &&
+                                    rect.height >= 120 &&
+                                    inMainContent(rect)
+                                ) {
+                                    const key = cssPath(node);
+                                    if (!seenCards.has(key)) {
+                                        seenCards.add(key);
+                                        cardCandidates.push({ node, rect });
+                                    }
+                                }
+                                node = node.parentElement;
+                            }
+                        }
+                        cardCandidates.sort((a, b) => a.rect.top - b.rect.top || a.rect.left - b.rect.left);
+                        for (const card of cardCandidates) {
+                            const controls = [];
+                            for (const el of Array.from(card.node.querySelectorAll('a[href], button, [role="button"]'))) {
+                                if (!visible(el)) continue;
+                                const rect = el.getBoundingClientRect();
+                                if (!inMainContent(rect)) continue;
+                                const text = normalize(el.innerText || el.getAttribute('aria-label') || el.getAttribute('title') || '');
+                                const lowerText = text.toLowerCase();
+                                const href = el.getAttribute('href') || '';
+                                const classified = classifyGroupHref(href);
+                                const matchesActionText = Array.from(openActionLabels).some((token) => lowerText === token || lowerText.includes(token));
+                                const linksDirectly = classified.root === targetGroupRoot && classified.type === 'group_root';
+                                if (!matchesActionText && !linksDirectly) continue;
+                                controls.push({
+                                    el,
+                                    rect,
+                                    text,
+                                    lowerText,
+                                    href,
+                                    inMain: true,
+                                    buttonLike: isButtonLike(el),
+                                    matchesActionText,
+                                    linksDirectly,
+                                    clickedSelector: cssPath(el),
+                                });
+                            }
+                            controls.sort((a, b) => scoreJoinedListingControl(b) - scoreJoinedListingControl(a) || a.rect.top - b.rect.top || a.rect.left - b.rect.left);
+                            if (controls.length) {
+                                const bestControl = controls[0];
+                                bestControl.el.click();
+                                return {
+                                    candidateCount: controls.length,
+                                    clickedUrl: bestControl.href ? new URL(bestControl.href, location.origin).href : targetGroupRoot,
+                                    clickedType: bestControl.linksDirectly ? 'group_root' : 'group_open_action',
+                                    clickedText: bestControl.text,
+                                    clickedSelector: bestControl.clickedSelector,
+                                };
+                            }
+                            const primaryAnchor = rootAnchors
+                                .map((el) => ({
+                                    el,
+                                    rect: el.getBoundingClientRect(),
+                                    text: normalize(el.innerText || el.getAttribute('aria-label') || el.getAttribute('title') || ''),
+                                    href: el.getAttribute('href') || '',
+                                    selector: cssPath(el),
+                                }))
+                                .filter((item) => card.node.contains(item.el) && inMainContent(item.rect))
+                                .sort((a, b) => a.rect.top - b.rect.top || a.rect.left - b.rect.left)[0];
+                            if (primaryAnchor) {
+                                primaryAnchor.el.click();
+                                return {
+                                    candidateCount: 1,
+                                    clickedUrl: new URL(primaryAnchor.href, location.origin).href,
+                                    clickedType: 'group_root',
+                                    clickedText: primaryAnchor.text,
+                                    clickedSelector: primaryAnchor.selector,
+                                };
+                            }
+                        }
+                    }
                     const matches = [];
                     const rejected = [];
                     for (const el of Array.from(document.querySelectorAll('a[href]'))) {
@@ -2357,7 +2530,10 @@ class Scraper:
                         clickedSelector: best.clickedSelector,
                     };
                 }""",
-                    group_root,
+                    {
+                        "targetGroupRoot": group_root,
+                        "openActionLabels": list(self.GROUP_OPEN_ACTION_LABELS),
+                    },
                 )
                 if clicked:
                     log.info(
@@ -2566,6 +2742,9 @@ class Scraper:
         path = parsed.path or ""
         return path.startswith("/groups/joins")
 
+    def _is_joined_groups_listing_ready(self):
+        return self._is_joined_groups_surface(self.page.url) and self._has_groups_list_ready()
+
     def _has_groups_surface_ready(self):
         if self._has_groups_list_ready():
             return True
@@ -2687,14 +2866,14 @@ class Scraper:
 
     def _open_groups_surface_by_direct_navigation(self):
         direct_urls = (
-            "https://www.facebook.com/groups/joins/",
             "https://www.facebook.com/groups/feed/",
+            "https://www.facebook.com/groups/",
         )
         for direct_url in direct_urls:
             try:
                 log.warning(f"{self._prefix()}“小组”入口识别失败，尝试直接进入: {direct_url}")
                 self._goto_pause_aware(direct_url, timeout_ms=30000, settle_timeout_ms=3000)
-                self._wait_for_groups_surface(timeout=5.0, step_name="小组首页")
+                self._wait_for_groups_surface(timeout=12.0, step_name="小组首页")
                 if self._has_groups_surface_ready():
                     return True
             except Exception:

@@ -351,6 +351,82 @@ def build_browser_settings(config):
     }
 
 
+def _format_window_summary_stats(summary):
+    finished_groups = int(summary.get("finished_groups") or 0)
+    skipped_groups = int(summary.get("skipped_groups") or 0)
+    messages_sent = int(summary.get("messages_sent") or 0)
+    skipped_summary = f"，跳过 {skipped_groups} 个小组" if skipped_groups else ""
+    return f"完成 {finished_groups} 个小组{skipped_summary}，成功发送 {messages_sent} 条消息。"
+
+
+def _build_window_summary(account_id, reason, messages_sent=0, finished_groups=0, skipped_groups=0):
+    return {
+        "account_id": account_id,
+        "messages_sent": int(messages_sent or 0),
+        "finished_groups": int(finished_groups or 0),
+        "skipped_groups": int(skipped_groups or 0),
+        "reason": str(reason or "").strip(),
+    }
+
+
+def _build_group_collection_result(group_urls=None, reason=""):
+    return {
+        "group_urls": list(group_urls or []),
+        "reason": str(reason or "").strip(),
+    }
+
+
+def _is_permanent_skip_reason(reason):
+    return str(reason or "").strip() in {
+        "messenger_login_required",
+    }
+
+
+def _log_window_finish_reason(summary, label, continue_other_windows=False):
+    reason = str(summary.get("reason") or "").strip()
+    skipped_groups = int(summary.get("skipped_groups") or 0)
+    continue_suffix = "，其它正常窗口继续运行。" if continue_other_windows else "。"
+
+    if reason == "stopped":
+        log.warning(f"[{label}] 当前窗口收到停止信号，已结束当前任务。")
+    elif reason == "account_restricted":
+        log.warning(f"[{label}] 当前窗口因账号异常或风控已停止{continue_suffix}")
+    elif reason == "session_open_failed":
+        log.error(f"[{label}] 当前窗口连接浏览器失败，未能启动发送任务。")
+    elif reason == "window_scope_unresolved":
+        log.error(f"[{label}] 当前窗口未能生成窗口级运行标识，已跳过本窗口。")
+    elif reason == "missing_templates":
+        log.error(f"[{label}] 当前窗口正式发送文案为空，未能启动发送任务。")
+    elif reason == "no_groups":
+        log.error(f"[{label}] 当前窗口未能收集到任何已加入小组，流程已结束。")
+    elif reason == "window_selection_empty":
+        log.info(f"[{label}] 当前窗口未配置任何已选群，已跳过正式运行。")
+    elif reason == "window_whitelist_miss":
+        log.info(f"[{label}] 当前运行未命中窗口白名单，已跳过正式运行。")
+    elif reason == "window_selection_filtered_empty":
+        log.warning(f"[{label}] 当前窗口白名单中的群未出现在已加入小组列表中，未启动正式运行。")
+    elif reason == "stranger_message_limit_reached":
+        log.warning(f"[{label}] 当前窗口因陌生消息额度上限已停止{continue_suffix}")
+    elif reason == "message_request_limit_reached":
+        log.warning(f"[{label}] 当前窗口因消息请求发送上限已停止{continue_suffix}")
+    elif reason == "send_restricted_ui":
+        log.warning(f"[{label}] 当前窗口因当前无法发送已停止{continue_suffix}")
+    elif reason == "chat_shell_unrecognized":
+        log.warning(f"[{label}] 当前窗口因聊天窗口状态异常已停止{continue_suffix}")
+    elif reason == "message_limit":
+        log.info(f"[{label}] 当前窗口已达到发送额度上限，停止继续处理后续成员{continue_suffix}")
+    elif reason == "account_disabled":
+        log.warning(f"[{label}] 当前窗口账号已禁用，已停止运行{continue_suffix}")
+    elif reason == "completed":
+        if skipped_groups:
+            log.info(
+                f"[{label}] 当前窗口任务已结束，完成 {summary.get('finished_groups', 0)} 个小组，"
+                f"另外跳过 {skipped_groups} 个小组。"
+            )
+        else:
+            log.info(f"[{label}] 当前窗口任务已正常完成。")
+
+
 def run_bitbrowser_batch(config, msgs, browser_settings):
     bm = BrowserManager(browser_settings)
     profiles = sort_bitbrowser_profiles(bm.list_bitbrowser_profiles())
@@ -367,6 +443,8 @@ def run_bitbrowser_batch(config, msgs, browser_settings):
     )
     total_sent = 0
     finished_groups = 0
+    total_skipped_groups = 0
+    submitted_window_runs = 0
     profile_index = build_profile_index(profiles)
 
     with ThreadPoolExecutor(
@@ -376,6 +454,7 @@ def run_bitbrowser_batch(config, msgs, browser_settings):
         future_map = {}
 
         def submit_profile(profile, startup_ready_event=None):
+            nonlocal submitted_window_runs
             future = executor.submit(
                 run_single_session,
                 config,
@@ -385,6 +464,7 @@ def run_bitbrowser_batch(config, msgs, browser_settings):
                 None,
                 startup_ready_event,
             )
+            submitted_window_runs += 1
             future_map[future] = profile
 
         previous_startup_ready_event = None
@@ -420,13 +500,9 @@ def run_bitbrowser_batch(config, msgs, browser_settings):
 
                 total_sent += summary.get("messages_sent", 0)
                 finished_groups += summary.get("finished_groups", 0)
-                reason = summary.get("reason")
-                if reason == "account_restricted":
-                    log.warning(f"[{label}] 当前窗口因风控/无法发送已停止，其它正常窗口继续运行。")
-                elif reason == "stranger_message_limit_reached":
-                    log.warning(f"[{label}] 当前窗口因陌生消息额度上限已停止，其它正常窗口继续运行。")
-                elif reason == "account_disabled":
-                    log.warning(f"[{label}] 当前窗口账号已禁用，已停止运行。")
+                skipped_groups = int(summary.get("skipped_groups") or 0)
+                total_skipped_groups += skipped_groups
+                _log_window_finish_reason(summary, label, continue_other_windows=True)
 
             for request in consume_restart_requests(config):
                 resolved_profile = resolve_restart_profile(request, profile_index, bm)
@@ -446,9 +522,12 @@ def run_bitbrowser_batch(config, msgs, browser_settings):
                 log.info(f"[{format_account_label(resolved_profile)}] 收到单独重启请求，开始重新接入。")
                 submit_profile(resolved_profile)
 
+    total_skipped_summary = f"，跳过 {total_skipped_groups} 个小组" if total_skipped_groups else ""
+    restarted_window_runs = max(0, submitted_window_runs - len(profiles))
+    restart_summary = f"，额外重启 {restarted_window_runs} 次窗口任务" if restarted_window_runs else ""
     log.info(
         f"本轮全部窗口处理结束，共处理 {len(profiles)} 个窗口，"
-        f"完成 {finished_groups} 个小组，成功发送 {total_sent} 条消息。"
+        f"完成 {finished_groups} 个小组{total_skipped_summary}{restart_summary}，成功发送 {total_sent} 条消息。"
     )
 
 
@@ -469,10 +548,8 @@ def run_single_bitbrowser_window(config, msgs, browser_settings, window_token):
         profile,
         window_token=window_token,
     )
-    log.info(
-        f"[{summary['account_id']}] 单独窗口任务结束，"
-        f"完成 {summary['finished_groups']} 个小组，成功发送 {summary['messages_sent']} 条消息。"
-    )
+    _log_window_finish_reason(summary, summary["account_id"])
+    log.info(f"[{summary['account_id']}] 单独窗口任务结束，{_format_window_summary_stats(summary)}")
 
 
 def run_single_session(
@@ -512,12 +589,7 @@ def run_single_session(
                 if not session:
                     release_startup_gate()
                     log.error(f"[{label or '默认窗口'}] 连接浏览器失败，跳过当前窗口。")
-                    return {
-                        "account_id": label or "unknown",
-                        "messages_sent": 0,
-                        "finished_groups": 0,
-                        "reason": "session_open_failed",
-                    }
+                    return _build_window_summary(label or "unknown", "session_open_failed")
 
                 page = session["page"]
                 profile_account_id = session["account_id"]
@@ -528,18 +600,11 @@ def run_single_session(
                     profile=profile,
                     browser_id=browser_id,
                     window_token=window_token_label,
-                    account_id=profile_account_id,
-                    machine_id=machine_id,
                 )
                 if not scope_id:
                     release_startup_gate()
                     log.error(f"[{alert_account_id}] 未能生成窗口级 scope_id，跳过当前窗口。")
-                    return {
-                        "account_id": alert_account_id,
-                        "messages_sent": 0,
-                        "finished_groups": 0,
-                        "reason": "window_scope_unresolved",
-                    }
+                    return _build_window_summary(alert_account_id, "window_scope_unresolved")
                 scraper = Scraper(page, window_label=alert_account_id)
                 sender = Messager(page, task_cfg, window_label=alert_account_id)
                 max_messages = normalize_message_limit(task_cfg.get("max_messages_per_account", 0))
@@ -552,12 +617,7 @@ def run_single_session(
                 if checkpoint_url:
                     release_startup_gate()
                     show_account_restricted_alert(alert_account_id)
-                    return {
-                        "account_id": alert_account_id,
-                        "messages_sent": 0,
-                        "finished_groups": 0,
-                        "reason": "account_restricted",
-                    }
+                    return _build_window_summary(alert_account_id, "account_restricted")
                 if template_source == "local_messages_yaml":
                     log.info(f"[{alert_account_id}] 使用本地文案文件 ({len(formal_templates)} 条)")
                 elif template_source == "db_owner_templates":
@@ -575,33 +635,24 @@ def run_single_session(
                 if owner_username and db.is_account_disabled(owner_username):
                     release_startup_gate()
                     log.warning(f"[{alert_account_id}] 当前账号已禁用，停止任务。")
-                    return {
-                        "account_id": alert_account_id,
-                        "messages_sent": 0,
-                        "finished_groups": 0,
-                        "reason": "account_disabled",
-                    }
+                    return _build_window_summary(alert_account_id, "account_disabled")
 
                 if not formal_templates:
                     release_startup_gate()
                     log.error(f"[{alert_account_id}] 正式发送文案为空，当前窗口无法启动。")
-                    return {
-                        "account_id": alert_account_id,
-                        "messages_sent": 0,
-                        "finished_groups": 0,
-                        "reason": "missing_templates",
-                    }
+                    return _build_window_summary(alert_account_id, "missing_templates")
 
                 log.info(
                     f"[{alert_account_id}] 已成功接入 BitBrowser 会话，开始按小组顺序执行成员私聊..."
                 )
 
-                group_urls = collect_target_groups(
+                group_collection = collect_target_groups(
                     scraper,
                     task_cfg,
                     window_token=window_token_label,
                     account_label=alert_account_id,
                 )
+                group_urls = list(group_collection.get("group_urls") or [])
                 page = resolve_active_runtime_page(page, scraper=scraper, sender=sender)
                 checkpoint_url = detect_checkpoint_account_issue(
                     page,
@@ -611,24 +662,27 @@ def run_single_session(
                 if checkpoint_url:
                     release_startup_gate()
                     show_account_restricted_alert(alert_account_id)
-                    return {
-                        "account_id": alert_account_id,
-                        "messages_sent": 0,
-                        "finished_groups": 0,
-                        "reason": "account_restricted",
-                    }
+                    return _build_window_summary(alert_account_id, "account_restricted")
                 if not group_urls:
                     release_startup_gate()
-                    log.error(f"[{alert_account_id}] 未能收集到任何已加入小组，流程结束。")
-                    return {
-                        "account_id": alert_account_id,
-                        "messages_sent": 0,
-                        "finished_groups": 0,
-                        "reason": "no_groups",
-                    }
+                    collection_reason = str(group_collection.get("reason") or "").strip() or "no_groups"
+                    if collection_reason == "no_groups":
+                        log.error(f"[{alert_account_id}] 未能收集到任何已加入小组，流程结束。")
+                    elif collection_reason == "window_selection_empty":
+                        log.info(f"[{alert_account_id}] 当前窗口未配置任何已选群，本轮不启动正式运行。")
+                    elif collection_reason == "window_whitelist_miss":
+                        log.info(f"[{alert_account_id}] 当前运行未命中窗口白名单，本轮不启动正式运行。")
+                    elif collection_reason == "window_selection_filtered_empty":
+                        log.warning(
+                            f"[{alert_account_id}] 当前窗口白名单中的群未出现在已加入小组列表中，本轮不启动正式运行。"
+                        )
+                    else:
+                        log.error(f"[{alert_account_id}] 当前窗口目标小组为空，流程结束。")
+                    return _build_window_summary(alert_account_id, collection_reason)
 
                 total_sent = 0
                 finished_groups = 0
+                skipped_groups = 0
                 final_reason = "completed"
                 delivery_runtime_state = ensure_delivery_runtime_state()
                 for idx, group_url in enumerate(group_urls, start=1):
@@ -677,11 +731,13 @@ def run_single_session(
                             final_reason = "account_restricted"
                             break
                         log.warning(f"[{alert_account_id}] 进入小组成员页失败，跳过当前小组。")
+                        skipped_groups += 1
                         continue
                     release_startup_gate()
                     group_id = scraper.get_current_group_id()
                     if group_id and db.is_group_done(group_id, account_id=account_id, scope_id=scope_id):
                         log.info(f"[{alert_account_id}] 当前小组已标记完成，跳过: {group_url}")
+                        skipped_groups += 1
                         continue
                     log.info(f"[{alert_account_id}] 开始处理第 {idx}/{len(group_urls)} 个小组: {group_url}")
                     group_message_budget = None
@@ -705,13 +761,6 @@ def run_single_session(
                         delivery_runtime_state=delivery_runtime_state,
                     )
                     total_sent += result["messages_sent"]
-                    if result["reason"] not in {
-                        "group_id_not_found",
-                        "newcomers_section_not_found",
-                        "newcomers_scope_unconfirmed",
-                        "cursor_not_found_required",
-                    }:
-                        finished_groups += 1
 
                     if result["reason"] == "stopped":
                         log.warning(f"[{alert_account_id}] 收到停止信号，结束当前窗口。")
@@ -733,6 +782,7 @@ def run_single_session(
                     if result["reason"] in {
                         "message_request_limit_reached",
                         "send_restricted_ui",
+                        "chat_shell_unrecognized",
                     }:
                         show_window_limit_alert(
                             window_token_label,
@@ -749,28 +799,43 @@ def run_single_session(
                         log.error(
                             f"[{alert_account_id}] 当前小组断点未找到且配置要求必须命中断点，保留原断点并继续下一个小组。"
                         )
+                        skipped_groups += 1
+                        continue
+                    if result["reason"] == "group_id_not_found":
+                        log.error(f"[{alert_account_id}] 当前小组未能识别小组 ID，跳过当前小组。")
+                        skipped_groups += 1
+                        continue
+                    if result["reason"] == "newcomers_section_not_found":
+                        log.error(f"[{alert_account_id}] 当前小组未能定位到“小组新人”区块，跳过当前小组。")
+                        skipped_groups += 1
                         continue
                     if result["reason"] == "newcomers_scope_unconfirmed":
                         log.error(f"[{alert_account_id}] 当前小组新人区目标来源无法确认，跳过当前小组。")
+                        skipped_groups += 1
                         continue
                     if result["reason"] == "account_disabled":
                         log.warning(f"[{alert_account_id}] 当前账号已禁用，停止任务。")
                         final_reason = "account_disabled"
                         break
                     if result["reason"] == "group_exhausted":
+                        finished_groups += 1
                         log.info(f"[{alert_account_id}] 当前小组已扫描到底部且没有新用户，继续下一个小组。")
                         db.mark_group_done(group_id, account_id=account_id, scope_id=scope_id)
+                        continue
+                    if result["reason"] == "round_limit":
+                        log.info(f"[{alert_account_id}] 当前小组达到本轮滚动上限，继续下一个小组。")
+                        skipped_groups += 1
+                        continue
 
-                log.info(
-                    f"[{alert_account_id}] 当前窗口处理结束，共完成 {finished_groups} 个小组，"
-                    f"成功发送 {total_sent} 条消息。"
+                summary = _build_window_summary(
+                    alert_account_id,
+                    final_reason,
+                    messages_sent=total_sent,
+                    finished_groups=finished_groups,
+                    skipped_groups=skipped_groups,
                 )
-                return {
-                    "account_id": alert_account_id,
-                    "messages_sent": total_sent,
-                    "finished_groups": finished_groups,
-                    "reason": final_reason,
-                }
+                log.info(f"[{alert_account_id}] 当前窗口处理结束，{_format_window_summary_stats(summary)}")
+                return summary
             finally:
                 release_startup_gate()
                 if session:
@@ -872,7 +937,7 @@ def resolve_window_token(profile, provided=None):
     return ""
 
 
-def resolve_window_scope_id(profile=None, browser_id=None, window_token=None, account_id=None, machine_id=None):
+def resolve_window_scope_id(profile=None, browser_id=None, window_token=None):
     candidates = [
         str(browser_id or "").strip(),
         str((profile or {}).get("id") or "").strip(),
@@ -910,15 +975,19 @@ def collect_target_groups(scraper, task_cfg, window_token="", account_label=""):
     normalized_window_token = str(window_token or "").strip()
     account_prefix = f"[{account_label}] " if str(account_label or "").strip() else ""
     if selected_window_groups is None:
-        return ordered
+        return _build_group_collection_result(
+            ordered,
+            reason="" if ordered else "no_groups",
+        )
 
     current_window_selected = list(selected_window_groups.get(normalized_window_token, []))
     if not current_window_selected:
         if normalized_window_token:
             log.info(f"{account_prefix}当前窗口未配置任何已选群，跳过正式运行。")
+            return _build_group_collection_result([], "window_selection_empty")
         else:
             log.info(f"{account_prefix}当前运行未命中窗口白名单，跳过正式运行。")
-        return []
+            return _build_group_collection_result([], "window_whitelist_miss")
 
     allowed_group_ids = {
         str(item.get("group_id") or "").strip()
@@ -957,7 +1026,11 @@ def collect_target_groups(scraper, task_cfg, window_token="", account_label=""):
             f"{account_prefix}白名单中的以下群未出现在当前窗口已加入小组列表中："
             f"{_format_group_log_items(missing_selected)}"
         )
-    return filtered
+    if filtered:
+        return _build_group_collection_result(filtered)
+    if ordered:
+        return _build_group_collection_result([], "window_selection_filtered_empty")
+    return _build_group_collection_result([], "no_groups")
 
 
 def describe_cursor_target(cursor):
@@ -973,12 +1046,22 @@ def describe_cursor_target(cursor):
 
 
 def build_cursor_search_result(reason, found_cursor, messages_sent, cursor, **extra):
+    return _build_group_result(
+        reason,
+        messages_sent=messages_sent,
+        found_cursor=found_cursor,
+        cursor_target=describe_cursor_target(cursor),
+        **extra,
+    )
+
+
+def _build_group_result(reason, messages_sent=0, found_cursor=None, **extra):
     result = {
-        "found_cursor": found_cursor,
-        "messages_sent": messages_sent,
-        "reason": reason,
-        "cursor_target": describe_cursor_target(cursor),
+        "messages_sent": int(messages_sent or 0),
+        "reason": str(reason or "").strip(),
     }
+    if found_cursor is not None:
+        result["found_cursor"] = bool(found_cursor)
     result.update(extra)
     return result
 
@@ -1203,12 +1286,12 @@ def process_current_group(
         stage="进入当前小组前",
     )
     if checkpoint_url:
-        return {"messages_sent": 0, "reason": "account_restricted"}
+        return _build_group_result("account_restricted")
 
     group_id = scraper.get_current_group_id()
     if not group_id:
         log.error("未能识别当前小组 ID，跳过该小组。")
-        return {"messages_sent": 0, "reason": "group_id_not_found"}
+        return _build_group_result("group_id_not_found")
 
     newcomers_search_rounds = task_cfg.get("newcomers_search_rounds", 40)
     newcomers_found = scraper.focus_newcomers_section(
@@ -1222,8 +1305,8 @@ def process_current_group(
             stage="定位小组新人区块",
         )
         if checkpoint_url:
-            return {"messages_sent": 0, "reason": "account_restricted"}
-        return {"messages_sent": 0, "reason": "newcomers_section_not_found"}
+            return _build_group_result("account_restricted")
+        return _build_group_result("newcomers_section_not_found")
     cursor = db.get_cursor(group_id, account_id=account_id, scope_id=scope_id)
     max_scroll_rounds = task_cfg.get("scroll_times", 60)
     idle_scroll_limit = task_cfg.get("idle_scroll_limit", 3)
@@ -1348,11 +1431,11 @@ def process_member_targets(
         )
         if not checkpoint_url:
             return False
-        checkpoint_abort_result = {
-            "found_cursor": found_cursor,
-            "messages_sent": messages_sent,
-            "reason": "account_restricted",
-        }
+        checkpoint_abort_result = _build_group_result(
+            "account_restricted",
+            messages_sent=messages_sent,
+            found_cursor=found_cursor,
+        )
         return True
 
     def reset_group_progress_state(restart_cursor_search=False):
@@ -1457,17 +1540,17 @@ def process_member_targets(
             stage="成员列表扫描",
         )
         if checkpoint_url:
-            return {
-                "found_cursor": found_cursor,
-                "messages_sent": messages_sent,
-                "reason": "account_restricted",
-            }
+            return _build_group_result(
+                "account_restricted",
+                messages_sent=messages_sent,
+                found_cursor=found_cursor,
+            )
         if should_stop():
-            return {
-                "found_cursor": found_cursor,
-                "messages_sent": messages_sent,
-                "reason": "stopped",
-            }
+            return _build_group_result(
+                "stopped",
+                messages_sent=messages_sent,
+                found_cursor=found_cursor,
+            )
         cont, _ = wait_if_paused(
             db=db,
             group_id=group_id,
@@ -1476,17 +1559,17 @@ def process_member_targets(
             anchor=last_anchor,
         )
         if not cont:
-            return {
-                "found_cursor": found_cursor,
-                "messages_sent": messages_sent,
-                "reason": "stopped",
-            }
+            return _build_group_result(
+                "stopped",
+                messages_sent=messages_sent,
+                found_cursor=found_cursor,
+            )
         if owner_username and db.is_account_disabled(owner_username):
-            return {
-                "found_cursor": found_cursor,
-                "messages_sent": messages_sent,
-                "reason": "account_disabled",
-            }
+            return _build_group_result(
+                "account_disabled",
+                messages_sent=messages_sent,
+                found_cursor=found_cursor,
+            )
 
         anchor_required = last_anchor is not None
         capture = scraper.collect_visible_new_member_targets(
@@ -1504,11 +1587,11 @@ def process_member_targets(
             log.error(
                 f"⛔ 当前视图无法确认目标仍来自 {label} 区块，停止当前小组发送: {reason}"
             )
-            return {
-                "found_cursor": found_cursor,
-                "messages_sent": messages_sent,
-                "reason": "newcomers_scope_unconfirmed",
-            }
+            return _build_group_result(
+                "newcomers_scope_unconfirmed",
+                messages_sent=messages_sent,
+                found_cursor=found_cursor,
+            )
 
         if anchor_required and not anchor_found and fallback_targets and allow_anchor_reseed:
             log.info("尾部锚点已离开当前视图，直接从当前新视图顶部继续顺序采集。")
@@ -1595,11 +1678,11 @@ def process_member_targets(
                     continue
                 if checkpoint_abort_result:
                     return checkpoint_abort_result
-                return {
-                    "found_cursor": found_cursor,
-                    "messages_sent": messages_sent,
-                    "reason": "group_exhausted",
-                }
+                return _build_group_result(
+                    "group_exhausted",
+                    messages_sent=messages_sent,
+                    found_cursor=found_cursor,
+                )
 
             should_confirm_exhausted = (
                 idle_rounds >= max(idle_scroll_limit, 4)
@@ -1641,11 +1724,11 @@ def process_member_targets(
                     continue
                 if checkpoint_abort_result:
                     return checkpoint_abort_result
-                return {
-                    "found_cursor": found_cursor,
-                    "messages_sent": messages_sent,
-                    "reason": "group_exhausted",
-                }
+                return _build_group_result(
+                    "group_exhausted",
+                    messages_sent=messages_sent,
+                    found_cursor=found_cursor,
+                )
             round_idx += 1
             if skip_until_cursor and not found_cursor:
                 cursor_rounds += 1
@@ -1678,11 +1761,11 @@ def process_member_targets(
         profile_url = target["profile_url"]
         if target.get("source_scope") != "newcomers":
             log.error(f"⛔ 目标来源不属于小组新人区块，拒绝发送: {target.get('name')}")
-            return {
-                "found_cursor": found_cursor,
-                "messages_sent": messages_sent,
-                "reason": "newcomers_scope_unconfirmed",
-            }
+            return _build_group_result(
+                "newcomers_scope_unconfirmed",
+                messages_sent=messages_sent,
+                found_cursor=found_cursor,
+            )
         seen_profiles.add(profile_url)
         last_anchor = target
         last_anchor_was_tail = bool(target.get("is_tail"))
@@ -1695,11 +1778,11 @@ def process_member_targets(
             anchor=last_anchor,
         )
         if not cont:
-            return {
-                "found_cursor": found_cursor,
-                "messages_sent": messages_sent,
-                "reason": "stopped",
-            }
+            return _build_group_result(
+                "stopped",
+                messages_sent=messages_sent,
+                found_cursor=found_cursor,
+            )
 
         if skip_until_cursor and not found_cursor:
             cursor_skip_count += 1
@@ -1801,11 +1884,11 @@ def process_member_targets(
             stage=f"成员 {target.get('name') or 'unknown'} 发送后",
         )
         if checkpoint_url:
-            return {
-                "found_cursor": found_cursor,
-                "messages_sent": messages_sent,
-                "reason": "account_restricted",
-            }
+            return _build_group_result(
+                "account_restricted",
+                messages_sent=messages_sent,
+                found_cursor=found_cursor,
+            )
 
         if result["status"] == "sent":
             _record_delivery_result(
@@ -1822,11 +1905,11 @@ def process_member_targets(
             delivery_runtime_state["delivery_not_confirmed_streak"] = 0
             db.save_cursor(group_id, target, account_id=account_id, scope_id=scope_id)
             if reached_message_limit(message_budget, messages_sent):
-                return {
-                    "found_cursor": found_cursor,
-                    "messages_sent": messages_sent,
-                    "reason": "message_limit",
-                }
+                return _build_group_result(
+                    "message_limit",
+                    messages_sent=messages_sent,
+                    found_cursor=found_cursor,
+                )
             min_wait, max_wait, interval_meta = get_send_interval_detail()
             wait_seconds = random.randint(min_wait, max_wait)
             log.info(
@@ -1835,11 +1918,11 @@ def process_member_targets(
             )
             log.info(f"任务间歇休息 {wait_seconds} 秒后继续下一位...")
             if not interruptible_sleep(wait_seconds):
-                return {
-                    "found_cursor": found_cursor,
-                    "messages_sent": messages_sent,
-                    "reason": "stopped",
-                }
+                return _build_group_result(
+                    "stopped",
+                    messages_sent=messages_sent,
+                    found_cursor=found_cursor,
+                )
         elif result["status"] == "skip":
             if result.get("reason") == "delivery_probe_sent":
                 delivery_runtime_state["delivery_not_confirmed_streak"] = 0
@@ -1849,12 +1932,15 @@ def process_member_targets(
                 ui_settle_sleep()
                 continue
             delivery_runtime_state["delivery_not_confirmed_streak"] = 0
-            log.info(f"跳过成员 {target['name']}: {result['reason']}")
-            if should_advance_cursor_for_skip(result.get("reason")):
+            skip_reason = str(result.get("reason") or "").strip()
+            log.info(f"跳过成员 {target['name']}: {skip_reason}")
+            if _is_permanent_skip_reason(skip_reason):
                 db.save_cursor(group_id, target, account_id=account_id, scope_id=scope_id)
-                log.info(f"断点推进：成员 {target['name']} 属于永久跳过，已更新 cursor。")
+                log.info(
+                    f"断点推进：成员 {target['name']} 命中永久跳过原因 {skip_reason}，已更新 cursor。"
+                )
             else:
-                log.warning(f"断点保留：成员 {target['name']} 属于暂时性失败，当前不推进 cursor。")
+                log.info(f"断点保留：成员 {target['name']} 当前轮次已跳过，暂不推进 cursor。")
             ui_settle_sleep()
         elif result["status"] == "blocked":
             _record_delivery_result(
@@ -1872,26 +1958,27 @@ def process_member_targets(
             window_block_reasons = {
                 "message_request_limit_reached",
                 "send_restricted_ui",
+                "chat_shell_unrecognized",
             }
             if reason in window_block_reasons:
                 log.warning(
                     f"检测到窗口级发送限制，停止当前窗口: {target['name']} ({reason})"
                 )
-                return {
-                    "found_cursor": found_cursor,
-                    "messages_sent": messages_sent,
-                    "reason": reason,
-                    "alert_text": result.get("alert_text"),
-                }
+                return _build_group_result(
+                    reason,
+                    messages_sent=messages_sent,
+                    found_cursor=found_cursor,
+                    alert_text=result.get("alert_text"),
+                )
 
             log.warning(
-                f"检测到消息被拒绝，按单次明确失败立即停号: {target['name']}"
+                f"检测到账号异常或风控限制，立即停止当前账号: {target['name']}"
             )
-            return {
-                "found_cursor": found_cursor,
-                "messages_sent": messages_sent,
-                "reason": "account_restricted",
-            }
+            return _build_group_result(
+                "account_restricted",
+                messages_sent=messages_sent,
+                found_cursor=found_cursor,
+            )
         elif result["status"] == "limit":
             _record_delivery_result(
                 db=db,
@@ -1904,12 +1991,12 @@ def process_member_targets(
                 reason=result.get("reason") or "stranger_message_limit_reached",
                 scope_id=scope_id,
             )
-            return {
-                "found_cursor": found_cursor,
-                "messages_sent": messages_sent,
-                "reason": "stranger_message_limit_reached",
-                "alert_text": result.get("alert_text"),
-            }
+            return _build_group_result(
+                "stranger_message_limit_reached",
+                messages_sent=messages_sent,
+                found_cursor=found_cursor,
+                alert_text=result.get("alert_text"),
+            )
         else:
             if result["reason"] != "delivery_not_confirmed":
                 delivery_runtime_state["delivery_not_confirmed_streak"] = 0
@@ -2014,11 +2101,11 @@ def process_member_targets(
         if checkpoint_abort_result:
             return checkpoint_abort_result
 
-    return {
-        "found_cursor": found_cursor,
-        "messages_sent": messages_sent,
-        "reason": "group_exhausted" if confirm_exhausted or (last_anchor_was_tail and no_scroll_rounds >= 1) else "round_limit",
-    }
+    return _build_group_result(
+        "group_exhausted" if confirm_exhausted or (last_anchor_was_tail and no_scroll_rounds >= 1) else "round_limit",
+        messages_sent=messages_sent,
+        found_cursor=found_cursor,
+    )
 
 
 def target_matches_cursor(target, cursor):
@@ -2114,18 +2201,6 @@ def _template_log_preview(template, limit=60):
     if len(text) <= limit:
         return text
     return text[:limit] + "..."
-
-
-def should_advance_cursor_for_skip(reason):
-    permanent_reasons = {
-        "add_friend_required",
-        "follow_only",
-        "friend_required",
-        "invite_only",
-        "account_cannot_message",
-        "messenger_login_required",
-    }
-    return str(reason or "").strip() in permanent_reasons
 
 
 def should_stop():
