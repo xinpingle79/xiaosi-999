@@ -376,6 +376,15 @@ def _build_group_collection_result(group_urls=None, reason=""):
     }
 
 
+def _limit_target_groups_for_single_run(group_urls=None, account_prefix=""):
+    normalized = list(group_urls or [])
+    if len(normalized) > 1:
+        log.info(
+            f"{account_prefix}自动换群功能已停用，本轮仅保留首个目标小组：{normalized[0]}"
+        )
+    return normalized[:1]
+
+
 def _is_permanent_skip_reason(reason):
     return str(reason or "").strip() in {
         "messenger_login_required",
@@ -730,15 +739,17 @@ def run_single_session(
                             show_account_restricted_alert(alert_account_id)
                             final_reason = "account_restricted"
                             break
-                        log.warning(f"[{alert_account_id}] 进入小组成员页失败，跳过当前小组。")
+                        log.warning(f"[{alert_account_id}] 进入小组成员页失败，结束当前窗口本轮小组处理。")
                         skipped_groups += 1
-                        continue
+                        final_reason = "completed"
+                        break
                     release_startup_gate()
                     group_id = scraper.get_current_group_id()
                     if group_id and db.is_group_done(group_id, account_id=account_id, scope_id=scope_id):
-                        log.info(f"[{alert_account_id}] 当前小组已标记完成，跳过: {group_url}")
+                        log.info(f"[{alert_account_id}] 当前小组已标记完成，结束当前窗口本轮小组处理: {group_url}")
                         skipped_groups += 1
-                        continue
+                        final_reason = "completed"
+                        break
                     log.info(f"[{alert_account_id}] 开始处理第 {idx}/{len(group_urls)} 个小组: {group_url}")
                     group_message_budget = None
                     if max_messages is not None:
@@ -797,35 +808,41 @@ def run_single_session(
                         break
                     if result["reason"] == "cursor_not_found_required":
                         log.error(
-                            f"[{alert_account_id}] 当前小组断点未找到且配置要求必须命中断点，保留原断点并继续下一个小组。"
+                            f"[{alert_account_id}] 当前小组断点未找到且配置要求必须命中断点，保留原断点并结束当前窗口本轮小组处理。"
                         )
                         skipped_groups += 1
-                        continue
+                        final_reason = "completed"
+                        break
                     if result["reason"] == "group_id_not_found":
-                        log.error(f"[{alert_account_id}] 当前小组未能识别小组 ID，跳过当前小组。")
+                        log.error(f"[{alert_account_id}] 当前小组未能识别小组 ID，结束当前窗口本轮小组处理。")
                         skipped_groups += 1
-                        continue
+                        final_reason = "completed"
+                        break
                     if result["reason"] == "newcomers_section_not_found":
-                        log.error(f"[{alert_account_id}] 当前小组未能定位到“小组新人”区块，跳过当前小组。")
+                        log.error(f"[{alert_account_id}] 当前小组未能定位到“小组新人”区块，结束当前窗口本轮小组处理。")
                         skipped_groups += 1
-                        continue
+                        final_reason = "completed"
+                        break
                     if result["reason"] == "newcomers_scope_unconfirmed":
-                        log.error(f"[{alert_account_id}] 当前小组新人区目标来源无法确认，跳过当前小组。")
+                        log.error(f"[{alert_account_id}] 当前小组新人区目标来源无法确认，结束当前窗口本轮小组处理。")
                         skipped_groups += 1
-                        continue
+                        final_reason = "completed"
+                        break
                     if result["reason"] == "account_disabled":
                         log.warning(f"[{alert_account_id}] 当前账号已禁用，停止任务。")
                         final_reason = "account_disabled"
                         break
                     if result["reason"] == "group_exhausted":
                         finished_groups += 1
-                        log.info(f"[{alert_account_id}] 当前小组已扫描到底部且没有新用户，继续下一个小组。")
+                        log.info(f"[{alert_account_id}] 当前小组已扫描到底部且没有新用户，结束当前窗口本轮小组处理。")
                         db.mark_group_done(group_id, account_id=account_id, scope_id=scope_id)
-                        continue
+                        final_reason = "completed"
+                        break
                     if result["reason"] == "round_limit":
-                        log.info(f"[{alert_account_id}] 当前小组达到本轮滚动上限，继续下一个小组。")
+                        log.info(f"[{alert_account_id}] 当前小组达到本轮滚动上限，结束当前窗口本轮小组处理。")
                         skipped_groups += 1
-                        continue
+                        final_reason = "completed"
+                        break
 
                 summary = _build_window_summary(
                     alert_account_id,
@@ -975,9 +992,10 @@ def collect_target_groups(scraper, task_cfg, window_token="", account_label=""):
     normalized_window_token = str(window_token or "").strip()
     account_prefix = f"[{account_label}] " if str(account_label or "").strip() else ""
     if selected_window_groups is None:
+        limited_ordered = _limit_target_groups_for_single_run(ordered, account_prefix)
         return _build_group_collection_result(
-            ordered,
-            reason="" if ordered else "no_groups",
+            limited_ordered,
+            reason="" if limited_ordered else "no_groups",
         )
 
     current_window_selected = list(selected_window_groups.get(normalized_window_token, []))
@@ -1027,7 +1045,9 @@ def collect_target_groups(scraper, task_cfg, window_token="", account_label=""):
             f"{_format_group_log_items(missing_selected)}"
         )
     if filtered:
-        return _build_group_collection_result(filtered)
+        return _build_group_collection_result(
+            _limit_target_groups_for_single_run(filtered, account_prefix)
+        )
     if ordered:
         return _build_group_collection_result([], "window_selection_filtered_empty")
     return _build_group_collection_result([], "no_groups")
@@ -1415,28 +1435,6 @@ def process_member_targets(
     unlimited_scroll = not max_scroll_rounds or int(max_scroll_rounds) <= 0
     last_anchor = None
     anchor_attempts = 0
-    max_group_exhausted_recovery_cycles = 3
-    max_cursor_recovery_cycles = 2
-    checkpoint_abort_result = None
-
-    def capture_checkpoint_abort(stage):
-        nonlocal checkpoint_abort_result
-        if checkpoint_abort_result:
-            return True
-        current_page = resolve_active_runtime_page(scraper.page, scraper=scraper, sender=sender)
-        checkpoint_url = detect_checkpoint_account_issue(
-            current_page,
-            getattr(scraper, "window_label", ""),
-            stage=stage,
-        )
-        if not checkpoint_url:
-            return False
-        checkpoint_abort_result = _build_group_result(
-            "account_restricted",
-            messages_sent=messages_sent,
-            found_cursor=found_cursor,
-        )
-        return True
 
     def reset_group_progress_state(restart_cursor_search=False):
         nonlocal idle_rounds, cursor_rounds, cursor_skip_count, no_scroll_rounds
@@ -1455,82 +1453,6 @@ def process_member_targets(
         if restart_cursor_search:
             cursor_skip_count = 0
             seen_profiles.clear()
-
-    def get_switch_recovery_policy(trigger_reason):
-        base_rounds = int(task_cfg.get("newcomers_search_rounds", 40) or 40)
-        if trigger_reason == "group_exhausted":
-            return {
-                "max_cycles": max_group_exhausted_recovery_cycles,
-                "refocus_rounds": min(max(12, base_rounds // 2), 20),
-                "steps": (
-                    "current_top_refocus",
-                    "reopen_members",
-                    "reopen_members",
-                    "reopen_members",
-                ),
-            }
-        return {
-            "max_cycles": max_cursor_recovery_cycles,
-            "refocus_rounds": min(max(6, base_rounds // 4), 12),
-            "steps": (
-                "current_top_refocus",
-                "reopen_members",
-                "reopen_members",
-            ),
-        }
-
-    def attempt_leave_group_recovery(trigger_reason):
-        nonlocal switch_recovery_cycles
-        if capture_checkpoint_abort(f"换群前复查开始:{trigger_reason}"):
-            return False
-        policy = get_switch_recovery_policy(trigger_reason)
-        max_cycles = int(policy.get("max_cycles") or 0)
-        if max_cycles <= 0 or switch_recovery_cycles >= max_cycles:
-            return False
-        group_root = resolve_group_root_for_recovery(scraper, group_id)
-        if not group_root:
-            return False
-        refocus_rounds = int(policy.get("refocus_rounds") or 12)
-        recovery_steps = tuple(policy.get("steps") or ())
-        if not recovery_steps:
-            return False
-        cycle_no = switch_recovery_cycles + 1
-        log.warning(
-            f"当前小组即将因 {trigger_reason} 结束，开始第 {cycle_no}/{max_cycles} 次换群前复查。"
-        )
-        for confirm_idx, step in enumerate(recovery_steps, start=1):
-            if step == "current_top_refocus":
-                log.info(
-                    f"换群前复查：第 {confirm_idx}/{len(recovery_steps)} 次先回到当前 members 视图顶部，并重新定位“小组新人”。"
-                )
-                scraper.scroll_to_top()
-                if capture_checkpoint_abort("换群前复查回到 members 顶部"):
-                    return False
-            else:
-                log.info(
-                    f"换群前复查：第 {confirm_idx}/{len(recovery_steps)} 次重走当前小组 members 链路，确认是否仍有可加载成员。"
-                )
-                if not scraper.open_group_members_page(group_root):
-                    if capture_checkpoint_abort("换群前复查重走 members 链路"):
-                        return False
-                    continue
-                if capture_checkpoint_abort("换群前复查重走 members 链路"):
-                    return False
-                scraper.scroll_to_top()
-                if capture_checkpoint_abort("换群前复查重走后回到顶部"):
-                    return False
-            if scraper.focus_newcomers_section(max_scroll_rounds=refocus_rounds):
-                if capture_checkpoint_abort("换群前复查定位小组新人"):
-                    return False
-                switch_recovery_cycles += 1
-                log.info("换群前复查恢复成功，继续留在当前小组。")
-                reset_group_progress_state(
-                    restart_cursor_search=bool(skip_until_cursor and not found_cursor)
-                )
-                return True
-            if capture_checkpoint_abort("换群前复查定位小组新人"):
-                return False
-        return False
 
     while unlimited_scroll or round_idx <= int(max_scroll_rounds):
         current_page = resolve_active_runtime_page(scraper.page, scraper=scraper, sender=sender)
@@ -1660,10 +1582,6 @@ def process_member_targets(
             )
             if immediate_exhausted:
                 if skip_until_cursor and not found_cursor:
-                    if attempt_leave_group_recovery("cursor_not_found_required"):
-                        continue
-                    if checkpoint_abort_result:
-                        return checkpoint_abort_result
                     cursor_target = describe_cursor_target(cursor)
                     log.error(
                         f"⛔ 断点搜索结束，未找到断点用户 {cursor_target}，当前规则要求必须命中断点。"
@@ -1674,10 +1592,6 @@ def process_member_targets(
                         messages_sent,
                         cursor,
                     )
-                if attempt_leave_group_recovery("group_exhausted"):
-                    continue
-                if checkpoint_abort_result:
-                    return checkpoint_abort_result
                 return _build_group_result(
                     "group_exhausted",
                     messages_sent=messages_sent,
@@ -1706,10 +1620,6 @@ def process_member_targets(
 
             if should_confirm_exhausted and confirm_exhausted:
                 if skip_until_cursor and not found_cursor:
-                    if attempt_leave_group_recovery("cursor_not_found_required"):
-                        continue
-                    if checkpoint_abort_result:
-                        return checkpoint_abort_result
                     cursor_target = describe_cursor_target(cursor)
                     log.error(
                         f"⛔ 断点搜索结束，未找到断点用户 {cursor_target}，当前规则要求必须命中断点。"
@@ -1720,10 +1630,6 @@ def process_member_targets(
                         messages_sent,
                         cursor,
                     )
-                if attempt_leave_group_recovery("group_exhausted"):
-                    continue
-                if checkpoint_abort_result:
-                    return checkpoint_abort_result
                 return _build_group_result(
                     "group_exhausted",
                     messages_sent=messages_sent,
@@ -1733,10 +1639,6 @@ def process_member_targets(
             if skip_until_cursor and not found_cursor:
                 cursor_rounds += 1
                 if cursor_rounds >= cursor_search_rounds and cursor_rounds % cursor_search_rounds == 0:
-                    if attempt_leave_group_recovery("cursor_not_found_required"):
-                        continue
-                    if checkpoint_abort_result:
-                        return checkpoint_abort_result
                     cursor_target = describe_cursor_target(cursor)
                     log.error(
                         f"⛔ 未找到断点用户 {cursor_target}，已连续滚动 {cursor_rounds} 轮，当前规则要求必须命中断点。"
@@ -2035,32 +1937,6 @@ def process_member_targets(
                     )
 
     if skip_until_cursor and not found_cursor:
-        if attempt_leave_group_recovery("cursor_not_found_required"):
-            return process_member_targets(
-                scraper=scraper,
-                sender=sender,
-                db=db,
-                config=config,
-                local_messages=local_messages,
-                account_id=account_id,
-                scope_id=scope_id,
-                machine_id=machine_id,
-                group_id=group_id,
-                owner_username=owner_username,
-                templates=templates,
-                task_cfg=task_cfg,
-                max_scroll_rounds=max_scroll_rounds,
-                idle_scroll_limit=idle_scroll_limit,
-                cursor_search_rounds=cursor_search_rounds,
-                message_budget=message_budget,
-                cursor=cursor,
-                skip_until_cursor=skip_until_cursor,
-                template_source=template_source,
-                switch_recovery_cycles=switch_recovery_cycles,
-                delivery_runtime_state=delivery_runtime_state,
-            )
-        if checkpoint_abort_result:
-            return checkpoint_abort_result
         cursor_target = describe_cursor_target(cursor)
         log.error(
             f"⛔ 扫描达到滚动上限后仍未找到断点用户 {cursor_target}，当前规则要求必须命中断点。"
@@ -2072,34 +1948,6 @@ def process_member_targets(
             cursor,
             searched_rounds=round_idx,
         )
-
-    if confirm_exhausted or (last_anchor_was_tail and no_scroll_rounds >= 1):
-        if attempt_leave_group_recovery("group_exhausted"):
-            return process_member_targets(
-                scraper=scraper,
-                sender=sender,
-                db=db,
-                config=config,
-                local_messages=local_messages,
-                account_id=account_id,
-                scope_id=scope_id,
-                machine_id=machine_id,
-                group_id=group_id,
-                owner_username=owner_username,
-                templates=templates,
-                task_cfg=task_cfg,
-                max_scroll_rounds=max_scroll_rounds,
-                idle_scroll_limit=idle_scroll_limit,
-                cursor_search_rounds=cursor_search_rounds,
-                message_budget=message_budget,
-                cursor=cursor,
-                skip_until_cursor=skip_until_cursor,
-                template_source=template_source,
-                switch_recovery_cycles=switch_recovery_cycles,
-                delivery_runtime_state=delivery_runtime_state,
-            )
-        if checkpoint_abort_result:
-            return checkpoint_abort_result
 
     return _build_group_result(
         "group_exhausted" if confirm_exhausted or (last_anchor_was_tail and no_scroll_rounds >= 1) else "round_limit",
