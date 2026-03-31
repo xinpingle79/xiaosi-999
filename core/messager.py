@@ -627,6 +627,30 @@ class Messager:
             scaled = int(value)
         return max(min_ms, scaled)
 
+    def _chat_open_timeout_ms(self, phase="default"):
+        total_timeout_ms = self._scale_ms(self.chat_session_wait_timeout_ms, min_ms=1600)
+        phase_ratio_map = {
+            "initial": 0.50,
+            "retry": 0.35,
+            "reopen": 0.35,
+            "probe": 0.35,
+            "postsend_retry": 0.35,
+            "default": 1.0,
+        }
+        ratio = phase_ratio_map.get(str(phase or "default").strip(), 1.0)
+        return max(1600, int(total_timeout_ms * ratio))
+
+    def _editor_ready_timeout_ms(self, phase="default"):
+        total_timeout_ms = self._scale_ms(self.editor_ready_wait_timeout_ms, min_ms=1500)
+        phase_ratio_map = {
+            "initial": 0.40,
+            "probe": 0.35,
+            "postsend_retry": 0.35,
+            "default": 1.0,
+        }
+        ratio = phase_ratio_map.get(str(phase or "default").strip(), 1.0)
+        return max(1500, int(total_timeout_ms * ratio))
+
     def _sleep(self, seconds, min_seconds=0.03):
         try:
             scaled = float(seconds) * self.speed_factor
@@ -894,7 +918,7 @@ class Messager:
 
             chat_open_result = self._wait_for_chat_open_result(
                 expected_name=name,
-                timeout_ms=min(self.chat_session_wait_timeout_ms, 3600),
+                timeout_ms=self._chat_open_timeout_ms("initial"),
                 stage="聊天窗口首次复核",
             )
             chat_session, restriction, chat_shell_seen = self._extract_chat_open_result(chat_open_result)
@@ -910,7 +934,7 @@ class Messager:
                 if closed_popups or chat_shell_seen:
                     chat_open_result = self._wait_for_chat_open_result(
                         expected_name=name,
-                        timeout_ms=min(self.chat_session_wait_timeout_ms, 1800),
+                        timeout_ms=self._chat_open_timeout_ms("retry"),
                         stage="聊天窗口二次复核",
                     )
                     chat_session, restriction, retry_shell_seen = self._extract_chat_open_result(chat_open_result)
@@ -1004,7 +1028,7 @@ class Messager:
                         if retry_button is not None:
                             retry_open_result = self._wait_for_chat_open_result(
                                 expected_name=name,
-                                timeout_ms=min(self.chat_session_wait_timeout_ms, 1800),
+                                timeout_ms=self._chat_open_timeout_ms("reopen"),
                                 stage="聊天窗口重试复核",
                             )
                             chat_session, retry_restriction, retry_shell_seen = self._extract_chat_open_result(
@@ -1038,7 +1062,7 @@ class Messager:
             try:
                 if not self._wait_for_editor_ready(
                     chat_session["editor"],
-                    timeout_ms=min(self.editor_ready_wait_timeout_ms, 2200),
+                    timeout_ms=self._editor_ready_timeout_ms("initial"),
                 ):
                     log.warning(f"{self._prefix()}输入框未准备就绪，当前保留成员待下次重试: {name}")
                     return self._build_dm_result("error", "chat_editor_not_ready")
@@ -1219,7 +1243,7 @@ class Messager:
         if not probe_session:
             probe_open_result = self._wait_for_chat_open_result(
                 expected_name=expected_name,
-                timeout_ms=min(self.chat_session_wait_timeout_ms, 2200),
+                timeout_ms=self._chat_open_timeout_ms("probe"),
                 stage="点赞探针前复核",
             )
             probe_session, probe_restriction = self._extract_postsend_open_result(probe_open_result)
@@ -1234,7 +1258,7 @@ class Messager:
 
         if not self._wait_for_editor_ready(
             probe_editor,
-            timeout_ms=min(self.editor_ready_wait_timeout_ms, 1800),
+            timeout_ms=self._editor_ready_timeout_ms("probe"),
         ):
             return self._resolve_postsend_timeout_result(
                 expected_name=expected_name,
@@ -1437,7 +1461,7 @@ class Messager:
         if not rebound_session:
             rebound_open_result = self._wait_for_chat_open_result(
                 expected_name=expected_name,
-                timeout_ms=min(self.chat_session_wait_timeout_ms, 2200),
+                timeout_ms=self._chat_open_timeout_ms("postsend_retry"),
                 stage="发送后二次确认复核",
             )
             rebound_session, rebound_restriction = self._extract_postsend_open_result(rebound_open_result)
@@ -1452,7 +1476,7 @@ class Messager:
 
         if not self._wait_for_editor_ready(
             rebound_editor,
-            timeout_ms=min(self.editor_ready_wait_timeout_ms, 1800),
+            timeout_ms=self._editor_ready_timeout_ms("postsend_retry"),
         ):
             return self._resolve_postsend_timeout_result(
                 expected_name=expected_name,
@@ -3137,7 +3161,7 @@ class Messager:
                 timed_out=False,
             )
 
-        button_wait_ms = max(240, min(1200, int(hover_wait_total_ms * 0.2)))
+        button_wait_ms = max(240, int(hover_wait_total_ms * 0.2))
         button = self._wait_for_condition(
             "成员资料卡",
             "等待发消息按钮渲染完成",
