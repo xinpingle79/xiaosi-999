@@ -1060,12 +1060,15 @@ class Messager:
             closed_chat = 0
             closed_card = 0
             try:
-                if not self._wait_for_editor_ready(
-                    chat_session["editor"],
+                ready_session = self._wait_for_ready_chat_session(
+                    chat_session,
+                    expected_name=name,
                     timeout_ms=self._editor_ready_timeout_ms("initial"),
-                ):
+                )
+                if not ready_session:
                     log.warning(f"{self._prefix()}输入框未准备就绪，当前保留成员待下次重试: {name}")
                     return self._build_dm_result("error", "chat_editor_not_ready")
+                chat_session = ready_session
 
                 if self._check_stranger_limit_global():
                     result = self._build_stranger_limit_result(
@@ -1256,14 +1259,18 @@ class Messager:
         if not probe_editor:
             return "timeout", probe_session
 
-        if not self._wait_for_editor_ready(
-            probe_editor,
+        ready_probe_session = self._wait_for_ready_chat_session(
+            probe_session,
+            expected_name=expected_name,
             timeout_ms=self._editor_ready_timeout_ms("probe"),
-        ):
+        )
+        if not ready_probe_session:
             return self._resolve_postsend_timeout_result(
                 expected_name=expected_name,
                 session=probe_session,
             )
+        probe_session = ready_probe_session
+        probe_editor, _ = self._extract_chat_session(probe_session)
 
         probe_state, rebound_session = self._paste_and_send(
             probe_editor,
@@ -1487,14 +1494,18 @@ class Messager:
         if not rebound_editor:
             return "timeout", rebound_session
 
-        if not self._wait_for_editor_ready(
-            rebound_editor,
+        ready_rebound_session = self._wait_for_ready_chat_session(
+            rebound_session,
+            expected_name=expected_name,
             timeout_ms=self._editor_ready_timeout_ms("postsend_retry"),
-        ):
+        )
+        if not ready_rebound_session:
             return self._resolve_postsend_timeout_result(
                 expected_name=expected_name,
                 session=rebound_session,
             )
+        rebound_session = ready_rebound_session
+        rebound_editor, _ = self._extract_chat_session(rebound_session)
 
         second_pass_state = self._wait_for_delivery(
             rebound_editor,
@@ -3541,16 +3552,41 @@ class Messager:
             return candidates[0][3]
         return None
 
-    def _wait_for_editor_ready(self, editor, timeout_ms=None):
+    def _wait_for_ready_chat_session(self, chat_session, expected_name=None, timeout_ms=None):
         timeout_ms = self._scale_ms(timeout_ms or self.editor_ready_wait_timeout_ms, min_ms=1500)
-        result = self._wait_for_condition(
-            "聊天输入框",
-            "等待输入框可见且可写",
-            lambda: self._editor_ready(editor),
-            timeout_ms=timeout_ms,
-            interval=0.12,
-        )
-        return bool(result)
+        start = time.time()
+        deadline = start + timeout_ms / 1000
+        current_session = chat_session
+        log.info(f"{self._prefix()}聊天输入框，等待输入框可见且可写...")
+        while time.time() < deadline:
+            paused_seconds = self._wait_if_paused()
+            if paused_seconds:
+                start += paused_seconds
+                deadline += paused_seconds
+
+            editor, close_button = self._extract_chat_session(current_session)
+            if editor and self._editor_ready(editor):
+                waited = time.time() - start
+                log.info(f"{self._prefix()}聊天输入框等待成功，耗时 {waited:.1f} 秒。")
+                return self._build_chat_session(editor, close_button=close_button)
+
+            refreshed_session = self._locate_chat_session(expected_name=expected_name) or self._locate_chat_session()
+            if refreshed_session:
+                refreshed_editor, refreshed_close_button = self._extract_chat_session(refreshed_session)
+                merged_close_button = refreshed_close_button or close_button
+                current_session = self._build_chat_session(
+                    refreshed_editor,
+                    close_button=merged_close_button,
+                )
+                if refreshed_editor and self._editor_ready(refreshed_editor):
+                    waited = time.time() - start
+                    log.info(f"{self._prefix()}聊天输入框等待成功，耗时 {waited:.1f} 秒。")
+                    return current_session
+
+            self._sleep(0.12, min_seconds=0.02)
+        waited = time.time() - start
+        log.warning(f"{self._prefix()}聊天输入框等待超时，已等待 {waited:.1f} 秒，等待输入框可见且可写失败")
+        return None
 
     def _editor_ready(self, editor):
         try:
