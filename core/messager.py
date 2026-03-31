@@ -1099,7 +1099,7 @@ class Messager:
                     else None
                 )
                 delivery_state, rebound_session = self._paste_and_send(
-                    chat_session["editor"],
+                    chat_session,
                     primary_text,
                     expected_name=name,
                     total_timeout_ms=primary_delivery_timeout_ms,
@@ -1270,19 +1270,54 @@ class Messager:
                 session=probe_session,
             )
         probe_session = ready_probe_session
-        probe_editor, _ = self._extract_chat_session(probe_session)
 
         probe_state, rebound_session = self._paste_and_send(
-            probe_editor,
+            probe_session,
             normalized_probe,
             expected_name=expected_name,
         )
         return probe_state, rebound_session or probe_session
 
-    def _paste_text_into_editor(self, editor, text):
+    def _wait_for_chat_session_text(self, chat_session, text, expected_name=None, timeout_ms=None):
         normalized_text = self._normalize_text(text)
         if not normalized_text:
-            return False
+            return None
+        timeout_ms = self._scale_ms(timeout_ms or max(1200, len(normalized_text) * 18), min_ms=900)
+        start = time.time()
+        deadline = start + timeout_ms / 1000
+        current_session = chat_session
+        while time.time() < deadline:
+            paused_seconds = self._wait_if_paused()
+            if paused_seconds:
+                start += paused_seconds
+                deadline += paused_seconds
+
+            editor, close_button = self._extract_chat_session(current_session)
+            if editor and self._editor_contains_text(editor, text):
+                return self._build_chat_session(editor, close_button=close_button)
+
+            refreshed_session = self._locate_chat_session(expected_name=expected_name) or self._locate_chat_session()
+            if refreshed_session:
+                refreshed_editor, refreshed_close_button = self._extract_chat_session(refreshed_session)
+                merged_close_button = refreshed_close_button or close_button
+                current_session = self._build_chat_session(
+                    refreshed_editor,
+                    close_button=merged_close_button,
+                )
+                if refreshed_editor and self._editor_contains_text(refreshed_editor, text):
+                    return current_session
+
+            self._sleep(0.08, min_seconds=0.02)
+        return None
+
+    def _paste_text_into_chat_session(self, chat_session, text, expected_name=None):
+        normalized_text = self._normalize_text(text)
+        if not normalized_text:
+            return None
+        current_session = chat_session
+        editor, close_button = self._extract_chat_session(current_session)
+        if not editor:
+            return None
         is_macos = (
             os.name != "nt"
             and getattr(os, "uname", None) is not None
@@ -1296,7 +1331,7 @@ class Messager:
                 timeout_ms=self._scale_ms(1200, min_ms=600),
             )
         except Exception:
-            return False
+            return None
         self._sleep(0.04, min_seconds=0.01)
         try:
             self._run_pause_aware_action(
@@ -1328,7 +1363,17 @@ class Messager:
                 pass
             self._sleep(0.04, min_seconds=0.01)
         if not self._editor_empty(editor):
-            return False
+            refreshed_session = self._locate_chat_session(expected_name=expected_name) or self._locate_chat_session()
+            if refreshed_session:
+                refreshed_editor, refreshed_close_button = self._extract_chat_session(refreshed_session)
+                merged_close_button = refreshed_close_button or close_button
+                current_session = self._build_chat_session(
+                    refreshed_editor,
+                    close_button=merged_close_button,
+                )
+                editor, close_button = self._extract_chat_session(current_session)
+        if not self._editor_empty(editor):
+            return None
         try:
             if self._write_text_to_clipboard(text):
                 paste_timeout_ms = self._scale_ms(1200, min_ms=720)
@@ -1338,11 +1383,29 @@ class Messager:
                     slice_ms=paste_timeout_ms,
                 )
                 self._sleep(0.08, min_seconds=0.02)
-                if self._editor_contains_text(editor, text):
-                    return True
+                pasted_session = self._wait_for_chat_session_text(
+                    current_session,
+                    text,
+                    expected_name=expected_name,
+                    timeout_ms=self._scale_ms(max(1200, len(normalized_text) * 20), min_ms=900),
+                )
+                if pasted_session:
+                    return pasted_session
         except Exception:
             pass
         try:
+            if not editor or self._chat_editor_gone(editor):
+                refreshed_session = self._locate_chat_session(expected_name=expected_name) or self._locate_chat_session()
+                if refreshed_session:
+                    refreshed_editor, refreshed_close_button = self._extract_chat_session(refreshed_session)
+                    merged_close_button = refreshed_close_button or close_button
+                    current_session = self._build_chat_session(
+                        refreshed_editor,
+                        close_button=merged_close_button,
+                    )
+                    editor, close_button = self._extract_chat_session(current_session)
+            if not editor:
+                return None
             fill_timeout_ms = self._scale_ms(max(1200, len(normalized_text) * 24), min_ms=900)
             self._run_pause_aware_action(
                 lambda step_timeout: editor.fill(text, timeout=step_timeout),
@@ -1350,9 +1413,14 @@ class Messager:
                 slice_ms=fill_timeout_ms,
             )
             self._sleep(0.05, min_seconds=0.02)
-            return self._editor_contains_text(editor, text)
+            return self._wait_for_chat_session_text(
+                current_session,
+                text,
+                expected_name=expected_name,
+                timeout_ms=fill_timeout_ms,
+            )
         except Exception:
-            return False
+            return None
 
     def _write_text_to_clipboard(self, text):
         normalized_text = self._normalize_text(text)
@@ -1521,12 +1589,30 @@ class Messager:
             )
         return second_pass_state, rebound_session
 
-    def _paste_and_send(self, editor, text, expected_name=None, total_timeout_ms=None):
+    def _paste_and_send(self, chat_session, text, expected_name=None, total_timeout_ms=None):
+        normalized_text = self._normalize_text(text)
+        editor, _ = self._extract_chat_session(chat_session)
+        if not editor:
+            return "paste_failed", chat_session
         before_state = self._normalize_delivery_state(self._get_delivery_state(editor, text))
-        if not self._paste_text_into_editor(editor, text):
-            return "paste_failed", None
-        if not self._editor_contains_text(editor, text):
-            return "paste_failed", None
+        active_session = self._paste_text_into_chat_session(
+            chat_session,
+            text,
+            expected_name=expected_name,
+        )
+        if not active_session:
+            return "paste_failed", chat_session
+        presend_session = self._wait_for_chat_session_text(
+            active_session,
+            text,
+            expected_name=expected_name,
+            timeout_ms=self._scale_ms(max(900, len(normalized_text) * 12), min_ms=720),
+        )
+        if presend_session:
+            active_session = presend_session
+        editor, _ = self._extract_chat_session(active_session)
+        if not editor:
+            return "paste_failed", active_session
         self._sleep(0.04, min_seconds=0.01)
         try:
             enter_timeout_ms = self._scale_ms(900, min_ms=360)
@@ -1536,7 +1622,7 @@ class Messager:
                 slice_ms=enter_timeout_ms,
             )
         except Exception:
-            return "paste_failed", None
+            return "paste_failed", active_session
         first_timeout_ms = self.delivery_confirm_timeout_ms
         retry_timeout_ms = None
         if total_timeout_ms is not None:
@@ -1555,16 +1641,17 @@ class Messager:
             timeout_ms=first_timeout_ms,
         )
         if delivery_state != "timeout":
-            return delivery_state, None
+            return delivery_state, active_session
         if retry_timeout_ms is not None and retry_timeout_ms <= 0:
-            return "timeout", None
-        return self._retry_delivery_confirmation(
+            return "timeout", active_session
+        retry_state, rebound_session = self._retry_delivery_confirmation(
             editor,
             text,
             before_state,
             expected_name=expected_name,
             timeout_ms=retry_timeout_ms,
         )
+        return retry_state, rebound_session or active_session
 
     def _wait_for_delivery(self, editor, text, before_state, expected_name=None, timeout_ms=None):
         timeout_ms = timeout_ms or self.delivery_confirm_timeout_ms
