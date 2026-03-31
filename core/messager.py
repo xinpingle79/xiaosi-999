@@ -1421,6 +1421,14 @@ class Messager:
         chat_session, restriction, _ = self._extract_chat_open_result(open_result)
         return chat_session, self._map_postsend_restriction_to_delivery_state(restriction)
 
+    def _infer_postsend_success_from_session(self, session):
+        editor, _ = self._extract_chat_session(session)
+        if not editor:
+            return False
+        if self._chat_editor_gone(editor):
+            return False
+        return self._editor_empty(editor)
+
     def _resolve_postsend_delivery_state(self, expected_name=None, default_state="sent"):
         postsend_restriction = self._check_postsend_delivery_restriction(
             expected_name=expected_name,
@@ -1428,6 +1436,11 @@ class Messager:
         return postsend_restriction or default_state
 
     def _resolve_postsend_timeout_result(self, expected_name=None, session=None):
+        if self._infer_postsend_success_from_session(session):
+            return self._resolve_postsend_delivery_state(
+                expected_name=expected_name,
+                default_state="sent",
+            ), session
         return self._resolve_postsend_delivery_state(
             expected_name=expected_name,
             default_state="timeout",
@@ -1549,6 +1562,7 @@ class Messager:
         before_fingerprint = before_state["window_fingerprint"]
         fast_settle_ms = min(self.delivery_settle_ms, 350)
         commit_settle_ms = min(self.delivery_settle_ms, 220)
+        weak_commit_settle_ms = max(self.delivery_settle_ms, 650)
         deadline = time.time() + timeout_ms / 1000
         success_seen_at = None
         success_mode = None
@@ -1609,6 +1623,16 @@ class Messager:
                     success_seen_at = time.time()
                     success_mode = current_mode
                 elif (time.time() - success_seen_at) * 1000 >= commit_settle_ms:
+                    return self._resolve_postsend_delivery_state(
+                        expected_name=expected_name,
+                        default_state="sent",
+                    )
+            elif editor_empty:
+                current_mode = "weak_editor_commit"
+                if success_seen_at is None or success_mode != current_mode:
+                    success_seen_at = time.time()
+                    success_mode = current_mode
+                elif (time.time() - success_seen_at) * 1000 >= weak_commit_settle_ms:
                     return self._resolve_postsend_delivery_state(
                         expected_name=expected_name,
                         default_state="sent",
