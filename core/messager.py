@@ -3370,12 +3370,19 @@ class Messager:
     def _wait_for_chat_open_result(self, expected_name=None, timeout_ms=10000, stage=""):
         timeout_ms = self._scale_ms(timeout_ms, min_ms=1600)
         start = time.time()
+        deadline = start + timeout_ms / 1000
         shell_seen = False
+        shell_seen_at = None
+        shell_grace_applied = False
+        shell_grace_ms = max(900, min(2600, int(timeout_ms * 0.35)))
         log.info(f"{self._prefix()}聊天窗口，等待聊天输入框或限制提示出现...")
-        while (time.time() - start) * 1000 < timeout_ms:
+        while time.time() < deadline:
             paused_seconds = self._wait_if_paused()
             if paused_seconds:
                 start += paused_seconds
+                deadline += paused_seconds
+                if shell_seen_at is not None:
+                    shell_seen_at += paused_seconds
             chat_session = self._locate_chat_session(expected_name=expected_name)
             if chat_session:
                 waited = time.time() - start
@@ -3397,7 +3404,16 @@ class Messager:
                 )
             shell = self._locate_chat_shell(expected_name=expected_name) or self._locate_chat_shell()
             if shell:
-                shell_seen = True
+                if not shell_seen:
+                    shell_seen = True
+                    shell_seen_at = time.time()
+                if (
+                    shell_seen_at is not None
+                    and not shell_grace_applied
+                    and deadline - time.time() <= shell_grace_ms / 1000
+                ):
+                    deadline = max(deadline, shell_seen_at + shell_grace_ms / 1000)
+                    shell_grace_applied = True
             self._sleep(0.12, min_seconds=0.02)
         waited = time.time() - start
         detail = "等待聊天输入框或限制提示出现失败"
