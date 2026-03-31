@@ -789,33 +789,18 @@ class Messager:
                 )
             self._wait_if_paused()
             log.info(f"💬 正在处理成员卡片: {name} ({user_id})")
-            cleanup_state = self._inspect_surface_cleanup_state()
-            preclear_chat = (
-                self._close_visible_chat_windows()
-                if cleanup_state.get("has_chat_close") or cleanup_state.get("has_chat_editor")
-                else 0
+            entry_cleanup = self._run_surface_cleanup(
+                context=f"成员 {name} 入口前置清场",
+                close_chat=True,
+                dismiss_popup=True,
+                dismiss_card=True,
+                timeout_ms=self._scale_ms(2200, min_ms=900),
             )
-            preclear_popup = (
-                self._dismiss_interfering_popups(context=f"成员 {name} 入口前置清场")
-                if cleanup_state.get("has_popup_closer")
-                else 0
-            )
-            preclear_card = (
-                self._dismiss_member_hover_card()
-                if cleanup_state.get("has_member_card")
-                else 0
-            )
-            preclear_overlay = self._detect_blocking_overlay() if cleanup_state.get("has_popup_closer") else None
-            preclear_chat_left = (
-                bool(self._locate_chat_session())
-                if cleanup_state.get("has_chat_close") or cleanup_state.get("has_chat_editor")
-                else False
-            )
-            if preclear_overlay and (preclear_chat > 0 or preclear_popup > 0 or preclear_card > 0):
-                preclear_popup += self._dismiss_interfering_popups(context=f"成员 {name} 二次前置清场")
-                preclear_card += self._dismiss_member_hover_card()
-                preclear_overlay = self._detect_blocking_overlay()
-                preclear_chat_left = bool(self._locate_chat_session())
+            preclear_chat = entry_cleanup.get("closed_chat", 0)
+            preclear_popup = entry_cleanup.get("closed_popup", 0)
+            preclear_card = entry_cleanup.get("closed_card", 0)
+            preclear_overlay = entry_cleanup.get("overlay_blocking")
+            preclear_chat_left = bool(entry_cleanup.get("residual_chat"))
             log.info(
                 f"{self._prefix()}入口前置全量清场完成：关闭聊天={preclear_chat}，关闭弹层={preclear_popup}，"
                 f"关闭资料卡={preclear_card}。"
@@ -886,9 +871,13 @@ class Messager:
 
             # 只有在确定要点击发消息按钮时才关闭聊天窗口，避免无按钮时浪费时间
             self._wait_if_paused()
-            ready_cleanup_state = self._inspect_surface_cleanup_state()
-            if ready_cleanup_state.get("has_chat_close") or ready_cleanup_state.get("has_chat_editor"):
-                self._close_visible_chat_windows()
+            self._run_surface_cleanup(
+                context=f"成员 {name} 发消息前清场",
+                close_chat=True,
+                dismiss_popup=True,
+                dismiss_card=False,
+                timeout_ms=self._scale_ms(1200, min_ms=480),
+            )
 
             try:
                 self._run_pause_aware_action(
@@ -2923,6 +2912,71 @@ class Messager:
     def _extract_chat_session(self, session):
         payload = session or {}
         return payload.get("editor"), payload.get("close_button")
+
+    def _run_surface_cleanup(
+        self,
+        context="",
+        close_chat=True,
+        dismiss_popup=True,
+        dismiss_card=True,
+        timeout_ms=None,
+    ):
+        try:
+            timeout_ms = int(timeout_ms or 0)
+        except Exception:
+            timeout_ms = 0
+        timeout_ms = self._scale_ms(timeout_ms or 1200, min_ms=480)
+        deadline = time.time() + timeout_ms / 1000
+        closed_chat = 0
+        closed_popup = 0
+        closed_card = 0
+        overlay_blocking = False
+        residual_chat = False
+
+        while True:
+            cleanup_state = self._inspect_surface_cleanup_state()
+            overlay_blocking = bool(self._detect_blocking_overlay()) if dismiss_popup else False
+            residual_chat = bool(self._locate_chat_session()) if close_chat else False
+            has_member_card = bool(cleanup_state.get("has_member_card"))
+
+            need_close_chat = close_chat and (
+                cleanup_state.get("has_chat_close")
+                or cleanup_state.get("has_chat_editor")
+                or residual_chat
+            )
+            need_dismiss_popup = dismiss_popup and (
+                cleanup_state.get("has_popup_closer")
+                or overlay_blocking
+            )
+            need_dismiss_card = dismiss_card and has_member_card
+
+            if not need_close_chat and not need_dismiss_popup and not need_dismiss_card:
+                break
+
+            if need_close_chat:
+                closed_chat += self._close_visible_chat_windows()
+            if need_dismiss_popup:
+                closed_popup += self._dismiss_interfering_popups(context=context)
+            if need_dismiss_card:
+                closed_card += self._dismiss_member_hover_card()
+
+            if time.time() >= deadline:
+                break
+            self._sleep(0.08, min_seconds=0.02)
+
+        final_state = self._inspect_surface_cleanup_state()
+        if dismiss_popup:
+            overlay_blocking = bool(self._detect_blocking_overlay())
+        if close_chat:
+            residual_chat = bool(self._locate_chat_session())
+        return {
+            "closed_chat": closed_chat,
+            "closed_popup": closed_popup,
+            "closed_card": closed_card,
+            "overlay_blocking": overlay_blocking,
+            "residual_chat": residual_chat,
+            "has_member_card": bool(final_state.get("has_member_card")),
+        }
 
     def _resolve_close_chat_session(self, chat_session, expected_name=None, timeout_ms=None):
         editor, close_button = self._extract_chat_session(chat_session)
