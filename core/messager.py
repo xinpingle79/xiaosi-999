@@ -1209,14 +1209,13 @@ class Messager:
                     self.success_close_delay_ms if delivery_state == "sent" else self.default_close_delay_ms
                 )
                 self._sleep(max(close_delay_ms, 0) / 1000, min_seconds=0.05)
-                close_editor, close_button = self._extract_chat_session(chat_session)
-                if not self._chat_editor_gone(close_editor):
-                    refreshed_session = self._locate_chat_session(expected_name=name) or self._locate_chat_session()
-                    if refreshed_session:
-                        refreshed_editor, refreshed_close_button = self._extract_chat_session(refreshed_session)
-                        close_button = refreshed_close_button or close_button
-                        close_editor = refreshed_editor or close_editor
                 close_wait_ms = self._scale_ms(2600 if delivery_state == "sent" else 1200, min_ms=480)
+                close_session = self._resolve_close_chat_session(
+                    chat_session,
+                    expected_name=name,
+                    timeout_ms=min(close_wait_ms, self._scale_ms(1200, min_ms=480)),
+                )
+                close_editor, close_button = self._extract_chat_session(close_session or chat_session)
                 closed_chat = self._close_chat_button(
                     close_button,
                     editor=close_editor,
@@ -2924,6 +2923,32 @@ class Messager:
     def _extract_chat_session(self, session):
         payload = session or {}
         return payload.get("editor"), payload.get("close_button")
+
+    def _resolve_close_chat_session(self, chat_session, expected_name=None, timeout_ms=None):
+        editor, close_button = self._extract_chat_session(chat_session)
+        try:
+            timeout_ms = int(timeout_ms or 0)
+        except Exception:
+            timeout_ms = 0
+        timeout_ms = max(timeout_ms, 0)
+        deadline = time.time() + timeout_ms / 1000 if timeout_ms > 0 else None
+
+        while True:
+            refreshed_session = self._locate_chat_session(expected_name=expected_name) or self._locate_chat_session()
+            if refreshed_session:
+                refreshed_editor, refreshed_close_button = self._extract_chat_session(refreshed_session)
+                return self._build_chat_session(
+                    refreshed_editor or editor,
+                    close_button=refreshed_close_button or close_button,
+                )
+
+            if deadline is None or time.time() >= deadline:
+                break
+            self._sleep(0.08, min_seconds=0.02)
+
+        if editor:
+            return self._build_chat_session(editor, close_button=close_button)
+        return None
 
     def _close_visible_chat_windows(self):
         try:
