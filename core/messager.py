@@ -3498,9 +3498,6 @@ class Messager:
                     generic_close_button = self._find_chat_close_button(editor, None)
                     close_button = close_button or generic_close_button
 
-                    if not close_button and not mentions_expected_name and not active_window:
-                        continue
-
                     score = 0
                     if mentions_expected_name:
                         score += 1000
@@ -3508,6 +3505,10 @@ class Messager:
                         score += 500
                     if close_button:
                         score += 220
+                    elif not mentions_expected_name and not active_window:
+                        # 前置清场已经尽量收干净残留聊天窗，这里保留右侧可见 editor 作为弱候选，
+                        # 避免聊天窗已打开却因为名字/激活态/关闭按钮尚未稳定而被误判成未打开。
+                        score -= 260
                     score += int(editor_box["x"] or 0)
                     candidates.append(
                         (
