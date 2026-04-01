@@ -439,6 +439,9 @@ def _log_window_finish_reason(summary, label, continue_other_windows=False):
 def run_bitbrowser_batch(config, msgs, browser_settings):
     bm = BrowserManager(browser_settings)
     profiles = sort_bitbrowser_profiles(bm.list_bitbrowser_profiles())
+    startup_gate_max_wait_seconds = 5.0
+    startup_gate_early_release_seconds = 2.8
+    startup_gate_poll_seconds = 0.2
     max_windows = int(config.get("task_settings", {}).get("max_windows", 0) or 0)
     if max_windows > 0:
         profiles = profiles[:max_windows]
@@ -447,8 +450,8 @@ def run_bitbrowser_batch(config, msgs, browser_settings):
         return
 
     log.info(
-        f"已自动识别 {len(profiles)} 个比特浏览器窗口，将顺序接入：前一窗口优先进入小组成员页，"
-        f"最多等待 5 秒后放行下一窗口，并发执行。"
+        f"已自动识别 {len(profiles)} 个比特浏览器窗口，将顺序接入：前一窗口优先完成群组接入，"
+        f"若已完成目标小组定位将提前放行，最多等待 {int(startup_gate_max_wait_seconds)} 秒后继续下一窗口，并发执行。"
     )
     total_sent = 0
     finished_groups = 0
@@ -462,7 +465,7 @@ def run_bitbrowser_batch(config, msgs, browser_settings):
     ) as executor:
         future_map = {}
 
-        def submit_profile(profile, startup_ready_event=None):
+        def submit_profile(profile, startup_ready_event=None, startup_ready_state=None):
             nonlocal submitted_window_runs
             future = executor.submit(
                 run_single_session,
@@ -472,23 +475,50 @@ def run_bitbrowser_batch(config, msgs, browser_settings):
                 profile,
                 None,
                 startup_ready_event,
+                startup_ready_state,
             )
             submitted_window_runs += 1
             future_map[future] = profile
 
         previous_startup_ready_event = None
+        previous_startup_ready_state = None
         previous_profile = None
         for profile in profiles:
             if previous_startup_ready_event is not None:
-                released = previous_startup_ready_event.wait(timeout=5.0)
+                released = False
+                wait_started_at = time.time()
+                early_released = False
+                while time.time() - wait_started_at < startup_gate_max_wait_seconds:
+                    if previous_startup_ready_event.wait(timeout=startup_gate_poll_seconds):
+                        released = True
+                        break
+                    elapsed = time.time() - wait_started_at
+                    phase = str((previous_startup_ready_state or {}).get("phase") or "").strip()
+                    if (
+                        elapsed >= startup_gate_early_release_seconds
+                        and phase in {"target_groups_ready", "members_ready"}
+                    ):
+                        early_released = True
+                        break
+                if early_released:
+                    log.info(
+                        f"[{format_account_label(previous_profile)}] 顺序接入已完成目标小组定位，"
+                        f"提前放行下一窗口并发执行。"
+                    )
                 if not released:
                     log.warning(
-                        f"[{format_account_label(previous_profile)}] 顺序接入等待超过 5 秒，"
+                        f"[{format_account_label(previous_profile)}] 顺序接入等待超过 {int(startup_gate_max_wait_seconds)} 秒，"
                         f"为避免后续窗口被阻塞，继续放行下一个窗口。"
                     )
             current_startup_ready_event = threading.Event()
-            submit_profile(profile, startup_ready_event=current_startup_ready_event)
+            current_startup_ready_state = {"phase": "init"}
+            submit_profile(
+                profile,
+                startup_ready_event=current_startup_ready_event,
+                startup_ready_state=current_startup_ready_state,
+            )
             previous_startup_ready_event = current_startup_ready_event
+            previous_startup_ready_state = current_startup_ready_state
             previous_profile = profile
 
         while future_map:
@@ -568,6 +598,7 @@ def run_single_session(
     profile=None,
     window_token=None,
     startup_ready_event=None,
+    startup_ready_state=None,
 ):
     db = Database()
     task_cfg = config["task_settings"]
@@ -590,6 +621,11 @@ def run_single_session(
             startup_ready_event.set()
             startup_gate_released = True
 
+    def update_startup_phase(phase):
+        if startup_ready_state is None:
+            return
+        startup_ready_state["phase"] = str(phase or "").strip()
+
     try:
         with sync_playwright() as p:
             try:
@@ -599,6 +635,7 @@ def run_single_session(
                     release_startup_gate()
                     log.error(f"[{label or '默认窗口'}] 连接浏览器失败，跳过当前窗口。")
                     return _build_window_summary(label or "unknown", "session_open_failed")
+                update_startup_phase("session_ready")
 
                 page = session["page"]
                 profile_account_id = session["account_id"]
@@ -688,6 +725,7 @@ def run_single_session(
                     else:
                         log.error(f"[{alert_account_id}] 当前窗口目标小组为空，流程结束。")
                     return _build_window_summary(alert_account_id, collection_reason)
+                update_startup_phase("target_groups_ready")
 
                 total_sent = 0
                 finished_groups = 0
@@ -695,12 +733,7 @@ def run_single_session(
                 final_reason = "completed"
                 delivery_runtime_state = ensure_delivery_runtime_state()
                 for idx, group_url in enumerate(group_urls, start=1):
-                    cont, _ = wait_if_paused(
-                        db=db,
-                        group_id=None,
-                        account_id=account_id,
-                        scope_id=scope_id,
-                    )
+                    cont, _ = wait_if_paused()
                     if not cont:
                         log.warning(f"[{alert_account_id}] 检测到停止标记，任务提前结束。")
                         final_reason = "stopped"
@@ -743,6 +776,7 @@ def run_single_session(
                         skipped_groups += 1
                         final_reason = "completed"
                         break
+                    update_startup_phase("members_ready")
                     release_startup_gate()
                     group_id = scraper.get_current_group_id()
                     if group_id and db.is_group_done(group_id, account_id=account_id, scope_id=scope_id):
@@ -967,12 +1001,48 @@ def resolve_window_scope_id(profile=None, browser_id=None, window_token=None):
 
 
 def collect_target_groups(scraper, task_cfg, window_token="", account_label=""):
+    selected_window_groups = _load_selected_window_groups()
+    normalized_window_token = str(window_token or "").strip()
+    account_prefix = f"[{account_label}] " if str(account_label or "").strip() else ""
+    current_window_selected = []
+    allowed_group_ids = set()
+    if selected_window_groups is None:
+        allowed_group_ids = set()
+    else:
+        current_window_selected = list(selected_window_groups.get(normalized_window_token, []))
+        if not current_window_selected:
+            if normalized_window_token:
+                log.info(f"{account_prefix}当前窗口未配置任何已选群，跳过正式运行。")
+                return _build_group_collection_result([], "window_selection_empty")
+            else:
+                log.info(f"{account_prefix}当前运行未命中窗口白名单，跳过正式运行。")
+                return _build_group_collection_result([], "window_whitelist_miss")
+
+        allowed_group_ids = {
+            str(item.get("group_id") or "").strip()
+            for item in current_window_selected
+            if str(item.get("group_id") or "").strip()
+        }
+        log.info(
+            f"{account_prefix}当前窗口允许运行的群组 {len(current_window_selected)} 个："
+            f"{_format_group_log_items(current_window_selected)}"
+        )
+
     current_group_root = scraper.get_current_group_root_url() if scraper.is_group_members_page() else None
     group_urls = scraper.collect_joined_group_urls(
-        max_scrolls=task_cfg.get("group_list_scroll_times", 8)
+        max_scrolls=task_cfg.get("group_list_scroll_times", 8),
+        allowed_group_ids=allowed_group_ids or None,
     )
 
-    if current_group_root:
+    current_group_id = _extract_group_id(current_group_root)
+    should_preserve_current_group = bool(
+        current_group_root
+        and (
+            not allowed_group_ids
+            or (current_group_id and current_group_id in allowed_group_ids)
+        )
+    )
+    if should_preserve_current_group:
         if current_group_root in group_urls:
             group_urls = [current_group_root] + [
                 url for url in group_urls if url != current_group_root
@@ -988,34 +1058,12 @@ def collect_target_groups(scraper, task_cfg, window_token="", account_label=""):
         seen.add(url)
         ordered.append(url)
 
-    selected_window_groups = _load_selected_window_groups()
-    normalized_window_token = str(window_token or "").strip()
-    account_prefix = f"[{account_label}] " if str(account_label or "").strip() else ""
     if selected_window_groups is None:
         limited_ordered = _limit_target_groups_for_single_run(ordered, account_prefix)
         return _build_group_collection_result(
             limited_ordered,
             reason="" if limited_ordered else "no_groups",
         )
-
-    current_window_selected = list(selected_window_groups.get(normalized_window_token, []))
-    if not current_window_selected:
-        if normalized_window_token:
-            log.info(f"{account_prefix}当前窗口未配置任何已选群，跳过正式运行。")
-            return _build_group_collection_result([], "window_selection_empty")
-        else:
-            log.info(f"{account_prefix}当前运行未命中窗口白名单，跳过正式运行。")
-            return _build_group_collection_result([], "window_whitelist_miss")
-
-    allowed_group_ids = {
-        str(item.get("group_id") or "").strip()
-        for item in current_window_selected
-        if str(item.get("group_id") or "").strip()
-    }
-    log.info(
-        f"{account_prefix}当前窗口允许运行的群组 {len(current_window_selected)} 个："
-        f"{_format_group_log_items(current_window_selected)}"
-    )
 
     filtered = []
     skipped = []
@@ -1473,13 +1521,7 @@ def process_member_targets(
                 messages_sent=messages_sent,
                 found_cursor=found_cursor,
             )
-        cont, _ = wait_if_paused(
-            db=db,
-            group_id=group_id,
-            account_id=account_id,
-            scope_id=scope_id,
-            anchor=last_anchor,
-        )
+        cont, _ = wait_if_paused()
         if not cont:
             return _build_group_result(
                 "stopped",
@@ -1671,14 +1713,7 @@ def process_member_targets(
         seen_profiles.add(profile_url)
         last_anchor = target
         last_anchor_was_tail = bool(target.get("is_tail"))
-        log.info(f"➡️ 正在处理成员卡片: {target.get('name')}")
-        cont, _ = wait_if_paused(
-            db=db,
-            group_id=group_id,
-            account_id=account_id,
-            scope_id=scope_id,
-            anchor=last_anchor,
-        )
+        cont, _ = wait_if_paused()
         if not cont:
             return _build_group_result(
                 "stopped",
@@ -1698,6 +1733,8 @@ def process_member_targets(
                     f"未找到断点用户，已连续扫描 {cursor_skip_count} 人，继续搜索断点..."
                 )
             continue
+
+        log.info(f"➡️ 正在处理成员卡片: {target.get('name')}")
 
         if db.is_sent(
             group_id=group_id,
@@ -1719,7 +1756,10 @@ def process_member_targets(
             scope_id=scope_id,
         ):
             log.info(f"其他窗口正在处理，跳过: {target['name']} ({profile_url})")
-            db.save_cursor(group_id, target, account_id=account_id, scope_id=scope_id)
+            log.info(
+                f"断点保留：成员 {target['name']} 当前由其他窗口占位处理中，"
+                "当前窗口不推进 cursor。"
+            )
             ui_settle_sleep()
             continue
 
@@ -2057,23 +2097,16 @@ def should_stop():
 def should_pause():
     return runtime_flag_active(ENV_PAUSE_FLAG)
 
-def wait_if_paused(db=None, group_id=None, account_id=None, scope_id=None, anchor=None):
+def wait_if_paused():
     if not should_pause():
         return True, False
     pause_logged = False
-    cursor_saved = False
 
     def _on_pause():
-        nonlocal pause_logged, cursor_saved
+        nonlocal pause_logged
         if not pause_logged:
             log.info("⏸ 已暂停，等待继续...")
             pause_logged = True
-        if not cursor_saved and db and group_id and anchor:
-            try:
-                db.save_cursor(group_id, anchor, account_id=account_id, scope_id=scope_id)
-            except Exception:
-                pass
-            cursor_saved = True
 
     def _on_resume():
         if pause_logged:

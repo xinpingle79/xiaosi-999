@@ -283,6 +283,9 @@ class Scraper:
         "모두 보기",
         "Посмотреть все",
     )
+    JOINED_GROUPS_ENTER_TIMEOUT_SECONDS = 4.5
+    JOINED_GROUPS_STABILIZE_TIMEOUT_SECONDS = 3.0
+    JOINED_GROUPS_QUICK_STABILIZE_TIMEOUT_SECONDS = 2.2
     JOINED_GROUP_SECTION_LABELS = (
         "你加入的小组",
         "已加入的小组",
@@ -1242,14 +1245,37 @@ class Scraper:
                 return False
         return self._has_groups_surface_ready()
 
-    def _stabilize_joined_groups_listing(self, timeout=2.5, step_name="已加入小组列表"):
+    def _stabilize_joined_groups_listing(self, timeout=None, step_name="已加入小组列表"):
+        if timeout is None:
+            timeout = self.JOINED_GROUPS_STABILIZE_TIMEOUT_SECONDS
         if not self._is_joined_groups_listing_ready():
             return False
         self.scroll_to_top()
         self._scroll_joined_groups_container(to_top=True)
         return self._wait_for_groups_list_ready(timeout=timeout, step_name=step_name)
 
-    def collect_joined_groups(self, max_scrolls=8):
+    def _wait_for_joined_groups_listing_ready(
+        self,
+        enter_timeout=None,
+        stabilize_timeout=None,
+        step_name="已加入小组列表",
+    ):
+        if enter_timeout is None:
+            enter_timeout = self.JOINED_GROUPS_ENTER_TIMEOUT_SECONDS
+        if stabilize_timeout is None:
+            stabilize_timeout = self.JOINED_GROUPS_STABILIZE_TIMEOUT_SECONDS
+        entered = self._wait_for_condition(
+            step_name,
+            "等待进入“你的小组”页面",
+            self._is_joined_groups_listing_ready,
+            timeout=enter_timeout,
+            interval=0.3,
+        )
+        if not entered:
+            return False
+        return self._stabilize_joined_groups_listing(timeout=stabilize_timeout, step_name=step_name)
+
+    def collect_joined_groups(self, max_scrolls=8, allowed_group_ids=None):
         if not self.open_groups_feed():
             return []
         if not self._open_joined_groups_listing():
@@ -1258,6 +1284,11 @@ class Scraper:
 
         groups = []
         seen_group_ids = set()
+        normalized_allowed_group_ids = {
+            str(group_id or "").strip()
+            for group_id in (allowed_group_ids or [])
+            if str(group_id or "").strip()
+        }
         idle_rounds = 0
         round_idx = 0
         recovery_attempts = 0
@@ -1267,7 +1298,10 @@ class Scraper:
         while unlimited or round_idx < int(max_scrolls):
             batch = self._joined_groups_snapshot()
             if not batch.get("ready"):
-                self._wait_for_groups_list_ready(timeout=5.0, step_name="已加入小组列表")
+                self._wait_for_groups_list_ready(
+                    timeout=self.JOINED_GROUPS_STABILIZE_TIMEOUT_SECONDS,
+                    step_name="已加入小组列表",
+                )
                 batch = self._joined_groups_snapshot()
             items = list(batch.get("items") or [])
             added = 0
@@ -1290,6 +1324,9 @@ class Scraper:
                 f"正在采集已加入小组 (轮次: {round_idx + 1}{'' if unlimited else '/' + str(max_scrolls)})，"
                 f"本轮新增 {added} 个，累计 {len(groups)} 个"
             )
+            if normalized_allowed_group_ids and normalized_allowed_group_ids.issubset(seen_group_ids):
+                log.info(f"{self._prefix()}白名单群已全部命中，提前结束已加入小组采集。")
+                break
 
             idle_rounds = idle_rounds + 1 if added == 0 else 0
             list_ready = bool(items) or self._has_groups_list_ready()
@@ -1315,8 +1352,11 @@ class Scraper:
 
         return groups
 
-    def collect_joined_group_urls(self, max_scrolls=8):
-        groups = self.collect_joined_groups(max_scrolls=max_scrolls)
+    def collect_joined_group_urls(self, max_scrolls=8, allowed_group_ids=None):
+        groups = self.collect_joined_groups(
+            max_scrolls=max_scrolls,
+            allowed_group_ids=allowed_group_ids,
+        )
         return [
             str(item.get("group_url") or "").strip()
             for item in groups
@@ -1329,12 +1369,62 @@ class Scraper:
             log.error(f"❌ 无法识别目标小组链接: {group_url}")
             return False
 
-        if not self.open_groups_feed():
-            log.warning(f"{self._prefix()}未能通过点击进入小组首页，跳过当前小组: {group_url}")
-            return False
-        if not self._open_joined_groups_listing():
-            log.warning(f"{self._prefix()}未能通过点击进入“你的小组”，跳过当前小组: {group_url}")
-            return False
+        def finish_members_entry():
+            members_ready = self._wait_for_members_page_ready(timeout=24.0)
+            if not members_ready:
+                log.warning(f"{self._prefix()}成员列表未完成加载，跳过当前小组: {group_url}")
+                return False
+            current_group_root = self.get_current_group_root_url()
+            if current_group_root and current_group_root != group_root:
+                log.warning(
+                    f"{self._prefix()}当前 members 页归属与目标小组不一致，跳过当前小组: "
+                    f"expected={group_root} actual={current_group_root}"
+                )
+                return False
+            if not self.is_group_members_page():
+                log.warning(f"{self._prefix()}当前 URL 未明确显示 members，但成员列表已可用: {self.page.url}")
+            log.success(f"{self._prefix()}✅ 已进入成员视图: {self.page.url}")
+            return True
+
+        current_url = str(self.page.url or "").strip()
+        current_group_root = self.get_current_group_root_url()
+
+        if self.is_group_members_page() and current_group_root == group_root:
+            return finish_members_entry()
+
+        if self._is_group_root_url(current_url, expected_root=group_root):
+            if not self._wait_for_group_page_ready(timeout=18.0):
+                log.warning(f"{self._prefix()}目标小组主页未完成加载，跳过当前小组: {group_url}")
+                return False
+            if not self._open_members_tab(group_root):
+                log.warning(f"{self._prefix()}未能通过点击进入成员页，跳过当前小组: {group_url}")
+                return False
+            return finish_members_entry()
+
+        if self._is_joined_groups_listing_ready():
+            if not self._open_target_group_page(group_root):
+                log.warning(f"{self._prefix()}未能通过点击进入目标小组主页，跳过当前小组: {group_url}")
+                return False
+            if not self._wait_for_group_page_ready(timeout=18.0):
+                log.warning(f"{self._prefix()}目标小组主页未完成加载，跳过当前小组: {group_url}")
+                return False
+            if not self._open_members_tab(group_root):
+                log.warning(f"{self._prefix()}未能通过点击进入成员页，跳过当前小组: {group_url}")
+                return False
+            return finish_members_entry()
+
+        if self._is_groups_surface(self.page.url):
+            if not self._open_joined_groups_listing():
+                log.warning(f"{self._prefix()}未能通过点击进入“你的小组”，跳过当前小组: {group_url}")
+                return False
+        else:
+            if not self.open_groups_feed():
+                log.warning(f"{self._prefix()}未能通过点击进入小组首页，跳过当前小组: {group_url}")
+                return False
+            if not self._open_joined_groups_listing():
+                log.warning(f"{self._prefix()}未能通过点击进入“你的小组”，跳过当前小组: {group_url}")
+                return False
+
         if not self._open_target_group_page(group_root):
             log.warning(f"{self._prefix()}未能通过点击进入目标小组主页，跳过当前小组: {group_url}")
             return False
@@ -1344,23 +1434,7 @@ class Scraper:
         if not self._open_members_tab(group_root):
             log.warning(f"{self._prefix()}未能通过点击进入成员页，跳过当前小组: {group_url}")
             return False
-
-        members_ready = self._wait_for_members_page_ready(timeout=24.0)
-        if not members_ready:
-            log.warning(f"{self._prefix()}成员列表未完成加载，跳过当前小组: {group_url}")
-            return False
-        current_group_root = self.get_current_group_root_url()
-        if current_group_root and current_group_root != group_root:
-            log.warning(
-                f"{self._prefix()}当前 members 页归属与目标小组不一致，跳过当前小组: "
-                f"expected={group_root} actual={current_group_root}"
-            )
-            return False
-        if not self.is_group_members_page():
-            log.warning(f"{self._prefix()}当前 URL 未明确显示 members，但成员列表已可用: {self.page.url}")
-
-        log.success(f"{self._prefix()}✅ 已进入成员视图: {self.page.url}")
-        return True
+        return finish_members_entry()
 
     def focus_newcomers_section(self, max_scroll_rounds=40):
         try:
@@ -1828,7 +1902,7 @@ class Scraper:
         try:
             if self._is_joined_groups_listing_ready():
                 return True
-            if self._stabilize_joined_groups_listing(timeout=5.0, step_name="已加入小组列表"):
+            if self._stabilize_joined_groups_listing(step_name="已加入小组列表"):
                 return True
 
             clicked_any = False
@@ -1899,34 +1973,23 @@ class Scraper:
                 )
                 if clicked:
                     clicked_any = True
-                    self._pause_aware_sleep(random.uniform(0.15, 0.35))
-                    entered = self._wait_for_condition(
-                        "已加入小组列表",
-                        "等待进入“你的小组”页面",
-                        self._is_joined_groups_listing_ready,
-                        timeout=7.0,
-                        interval=0.3,
-                    )
-                    if entered and self._stabilize_joined_groups_listing(timeout=5.0, step_name="已加入小组列表"):
+                    self._pause_aware_sleep(random.uniform(0.12, 0.28))
+                    if self._wait_for_joined_groups_listing_ready(step_name="已加入小组列表"):
                         return True
-                if self._stabilize_joined_groups_listing(timeout=3.5, step_name="已加入小组列表"):
+                elif self._stabilize_joined_groups_listing(
+                    timeout=self.JOINED_GROUPS_QUICK_STABILIZE_TIMEOUT_SECONDS,
+                    step_name="已加入小组列表",
+                ):
                     return True
-                self._pause_aware_sleep(0.35)
+                self._pause_aware_sleep(0.22)
 
             should_force_recover = clicked_any or not self._is_joined_groups_surface(self.page.url)
             if should_force_recover:
                 try:
                     log.info(f"{self._prefix()}已加入小组列表尚未稳定，尝试直接进入 joins 页面恢复列表。")
                     self._goto_pause_aware("https://www.facebook.com/groups/joins/", timeout_ms=30000, settle_timeout_ms=3000)
-                    if self._wait_for_condition(
-                        "已加入小组列表",
-                        "等待进入“你的小组”页面",
-                        self._is_joined_groups_listing_ready,
-                        timeout=7.0,
-                        interval=0.3,
-                    ):
-                        if self._stabilize_joined_groups_listing(timeout=5.0, step_name="已加入小组列表"):
-                            return True
+                    if self._wait_for_joined_groups_listing_ready(step_name="已加入小组列表"):
+                        return True
                 except Exception:
                     pass
         except Exception:
