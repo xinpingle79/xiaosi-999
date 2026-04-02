@@ -3898,7 +3898,7 @@ def handle_agent_log(payload):
 
 
 def handle_agent_report(payload):
-    ok, error, _agent = _verify_agent_request(payload)
+    ok, error, agent = _verify_agent_request(payload)
     if not ok:
         return {"ok": False, "error": error}
     task_id = payload.get("task_id")
@@ -3909,7 +3909,39 @@ def handle_agent_report(payload):
         return {"ok": False, "error": "missing_task_id"}
     db = Database()
     try:
+        task_row = db.fetch_one(
+            """
+            SELECT id, owner, assigned_machine_id, action, status
+            FROM agent_tasks
+            WHERE id = ?
+            LIMIT 1
+            """,
+            (task_id,),
+        )
         db.update_agent_task(task_id, status, error=error, exit_code=exit_code)
+        action = str((task_row or {}).get("action") or "").strip()
+        owner = str((task_row or {}).get("owner") or (agent or {}).get("owner") or "").strip()
+        machine_id = str((task_row or {}).get("assigned_machine_id") or payload.get("machine_id") or "").strip()
+        if action == "stop_collect" and status == "done" and owner and machine_id:
+            running_collect = db.fetch_one(
+                """
+                SELECT id
+                FROM agent_tasks
+                WHERE owner = ?
+                  AND assigned_machine_id = ?
+                  AND action = 'collect_groups'
+                  AND status = 'running'
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (owner, machine_id),
+            )
+            if running_collect and running_collect.get("id") is not None:
+                db.update_agent_task(
+                    running_collect.get("id"),
+                    "failed",
+                    error="collect_stopped",
+                )
     finally:
         db.close()
     return {"ok": True}
