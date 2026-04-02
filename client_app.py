@@ -1016,8 +1016,13 @@ class ClientApp:
                 )
             if refresh_shell or style_changed or not self._taskbar_style_ready:
                 self._taskbar_style_ready = True
-                self.root.withdraw()
-                self.root.after(30, self.root.deiconify)
+                try:
+                    window_state = self.root.state()
+                except Exception:
+                    window_state = ""
+                if not self._is_minimizing and window_state not in {"iconic", "withdrawn"}:
+                    self.root.withdraw()
+                    self.root.after(30, self.root.deiconify)
         except Exception:
             pass
 
@@ -1200,6 +1205,11 @@ class ClientApp:
         self._drag_origin = None
 
     def _handle_window_map(self, _event=None):
+        try:
+            if self.root.state() == "iconic":
+                return
+        except Exception:
+            pass
         if self._is_minimizing:
             self._is_minimizing = False
             self.root.after(10, self._restore_custom_window_chrome)
@@ -1207,6 +1217,11 @@ class ClientApp:
             self.root.after(10, self._restore_custom_window_chrome)
 
     def _restore_custom_window_chrome(self):
+        try:
+            if self.root.state() == "iconic":
+                return
+        except Exception:
+            pass
         self.root.overrideredirect(True)
         self._ensure_taskbar_window(refresh_shell=False)
 
@@ -1217,7 +1232,6 @@ class ClientApp:
             self.root.iconify()
             return
         self.root.overrideredirect(False)
-        self._ensure_taskbar_window(refresh_shell=False)
         self.root.iconify()
 
     def _toggle_maximize(self):

@@ -494,11 +494,7 @@ class TaskManager:
                         f"排队 {age_seconds:.0f} 秒仍未被真正接手（{trigger_label}） ==="
                     )
             elif status == "running":
-                collect_poll_recovery = (
-                    action == "collect_groups"
-                    and str(trigger or "").strip() == "agent_task_poll"
-                )
-                if age_seconds < STALE_RUNNING_SECONDS and not collect_poll_recovery:
+                if age_seconds < STALE_RUNNING_SECONDS:
                     continue
                 if action == "start":
                     later_stop = self._find_later_terminal_machine_action(
@@ -534,19 +530,13 @@ class TaskManager:
                             f"=== 检测到陈旧采集任务#{task_id}，已自动清理：执行端 {machine_id} "
                             f"后续采集任务#{later_collect['id']} 已结束（{trigger_label}） ==="
                         )
-                    elif collect_poll_recovery:
-                        stale_error = "stale_running_cleanup"
-                        cleanup_message = (
-                            f"=== 检测到陈旧采集任务#{task_id}，已自动清理：执行端 {machine_id} "
-                            f"已重新进入取任务轮询，旧采集任务不再活跃（{trigger_label}） ==="
-                        )
                     elif not agent_online:
                         stale_error = "stale_running_cleanup"
                         cleanup_message = (
                             f"=== 检测到陈旧采集任务#{task_id}，已自动清理：执行端 {machine_id} "
                             f"持续 {age_seconds:.0f} 秒无状态更新且执行端无心跳（{trigger_label}） ==="
                         )
-                elif action in {"stop", "pause", "resume"}:
+                elif action in {"stop", "pause", "resume", "stop_collect"}:
                     later_same = self._find_later_terminal_machine_action(
                         db,
                         machine_id,
@@ -1081,6 +1071,75 @@ class TaskManager:
                 owner_name,
                 wait_online_seconds=4.0,
             )
+
+    def _cancel_pending_collect_tasks_locked(self, db, owner_name):
+        owner_name = str(owner_name or "").strip()
+        if not owner_name:
+            return []
+        rows = db.fetch_all(
+            """
+            SELECT id, assigned_machine_id
+            FROM agent_tasks
+            WHERE owner = ?
+              AND action = 'collect_groups'
+              AND status = 'pending'
+            ORDER BY id DESC
+            """,
+            (owner_name,),
+        )
+        if not rows:
+            return []
+        now = time.time()
+        task_ids = [int(row["id"]) for row in rows if row and row.get("id") is not None]
+        if not task_ids:
+            return []
+        placeholders = ",".join("?" for _ in task_ids)
+        db.execute_statement(
+            f"""
+            UPDATE agent_tasks
+            SET status = 'failed', error = ?, updated_at = ?
+            WHERE id IN ({placeholders})
+              AND status = 'pending'
+            """,
+            ("collect_cancelled", now, *task_ids),
+        )
+        db.commit()
+        return [dict(row) for row in rows]
+
+    def stop_collect(self, owner=None):
+        owner_name = str(owner or "").strip()
+        if not owner_name:
+            return False, "总后台不参与任务操作，请在子后台执行"
+        with self._lock:
+            state = self._get_owner_runtime_state(owner_name)
+            if not (state["collect_running"] or state["collect_pending"]):
+                return False, "当前没有可停止的采集任务"
+            db = Database()
+            try:
+                cancelled_rows = self._cancel_pending_collect_tasks_locked(db, owner_name)
+            finally:
+                db.close()
+            for row in cancelled_rows:
+                machine_id = str(row.get("assigned_machine_id") or "").strip()
+                task_id = row.get("id")
+                self._append_control_log(
+                    f"=== 已取消排队中的采集任务#{task_id}：执行端 {machine_id or '-'} ===",
+                    owner=owner_name,
+                    machine_id=machine_id or None,
+                    already_locked=True,
+                )
+            if state["collect_running"]:
+                self._append_control_log(
+                    "=== 停止采集指令已下发 ===",
+                    owner=owner_name,
+                    already_locked=True,
+                )
+                return self._enqueue_owner_device_actions(
+                    "stop_collect",
+                    owner_name,
+                    allow_disabled=True,
+                )
+            return True, None
 
     def status(self, owner=None):
         with self._lock:
@@ -1791,7 +1850,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     return
                 self._send_json(result)
                 return
-            if path in {"/restart-window", "/start", "/stop", "/pause", "/resume"}:
+            if path in {"/restart-window", "/start", "/stop", "/pause", "/resume", "/stop-collect"}:
                 self._send_json(
                     {"error": "总后台不参与任务操作，请在子后台执行"},
                     status=HTTPStatus.FORBIDDEN,
@@ -1897,6 +1956,13 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 return
             if path == "/collect-groups":
                 ok, error = TASK_MANAGER.collect(owner=self._current_username(prefer_sub=True))
+                if not ok:
+                    self._send_json({"error": error}, status=HTTPStatus.CONFLICT)
+                    return
+                self._send_json({"ok": True})
+                return
+            if path == "/stop-collect":
+                ok, error = TASK_MANAGER.stop_collect(owner=self._current_username(prefer_sub=True))
                 if not ok:
                     self._send_json({"error": error}, status=HTTPStatus.CONFLICT)
                     return

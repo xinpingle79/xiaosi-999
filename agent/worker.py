@@ -153,6 +153,15 @@ def _selected_window_groups_path(owner, task_id=None, window_token=""):
     )
 
 
+def _collect_task_payload_path(owner, task_id=None):
+    owner_part = _sanitize_owner(owner) or "default"
+    task_part = _sanitize_owner(task_id) if task_id not in (None, "") else "collect"
+    return _runtime_path(
+        "data",
+        f"collect_task_payload_{owner_part}_{task_part}.json",
+    )
+
+
 def _runtime_messages_path():
     return _runtime_path("data", "runtime_messages.yaml")
 
@@ -706,9 +715,10 @@ class Worker:
         self.cfg = cfg
         self.main_process = None
         self.single_processes = {}
-        self.collect_thread = None
+        self.collect_process = None
         self.collect_task_id = None
         self.collect_owner = ""
+        self.collect_payload_file = ""
         self.lock = threading.Lock()
 
     def _emit_local_log(self, owner, line):
@@ -810,7 +820,7 @@ class Worker:
             )
 
     def _cleanup_finished_processes_locked(self):
-        self._cleanup_collect_thread_locked()
+        self._cleanup_collect_process_locked()
         if self.main_process and self.main_process.poll() is not None:
             self.main_process = None
         dead_tokens = [
@@ -819,17 +829,24 @@ class Worker:
         for token in dead_tokens:
             self.single_processes.pop(token, None)
 
-    def _cleanup_collect_thread_locked(self):
-        thread = self.collect_thread
-        if thread and not thread.is_alive():
-            self.collect_thread = None
+    def _cleanup_collect_process_locked(self):
+        process = self.collect_process
+        if process and process.poll() is not None:
+            self.collect_process = None
             self.collect_task_id = None
             self.collect_owner = ""
+            payload_file = str(self.collect_payload_file or "").strip()
+            self.collect_payload_file = ""
+            if payload_file:
+                try:
+                    Path(payload_file).unlink(missing_ok=True)
+                except Exception:
+                    pass
 
     def _has_active_collect_task_locked(self):
-        self._cleanup_collect_thread_locked()
-        thread = self.collect_thread
-        return bool(thread and thread.is_alive())
+        self._cleanup_collect_process_locked()
+        process = self.collect_process
+        return bool(process and process.poll() is None)
 
     def _build_env(self, owner, payload):
         env = os.environ.copy()
@@ -964,6 +981,73 @@ class Worker:
         ).start()
         return process
 
+    def _launch_collect_process(self, owner, payload, task_id):
+        owner = str(owner or self.cfg.get("owner") or "").strip()
+        try:
+            _sync_runtime_bundle(
+                self.cfg,
+                config_path=self.cfg.get("config_path"),
+            )
+        except Exception as exc:
+            self._emit_local_log(owner, f"[worker] 采集启动前同步运行配置失败：{exc}")
+        payload_path = _collect_task_payload_path(owner, task_id)
+        _save_json(payload_path, dict(payload or {}))
+        command = [sys.executable]
+        if not IS_FROZEN:
+            command.append(str(Path(__file__).resolve()))
+        if self.cfg.get("server_url"):
+            command.append(f"--server={self.cfg['server_url']}")
+        if self.cfg.get("bit_api"):
+            command.append(f"--bit-api={self.cfg['bit_api']}")
+        if self.cfg.get("api_token"):
+            command.append(f"--api-token={self.cfg['api_token']}")
+        if owner:
+            command.append(f"--owner={owner}")
+        if self.cfg.get("machine_id"):
+            command.append(f"--machine-id={self.cfg['machine_id']}")
+        if self.cfg.get("label"):
+            command.append(f"--label={self.cfg['label']}")
+        if self.cfg.get("poll_interval") not in (None, ""):
+            command.append(f"--poll-interval={self.cfg['poll_interval']}")
+        if self.cfg.get("config_path"):
+            command.append(f"--config={self.cfg['config_path']}")
+        if self.cfg.get("agent_token"):
+            command.append(f"--agent-token={self.cfg['agent_token']}")
+        if self.cfg.get("runtime_dir"):
+            command.append(f"--runtime-dir={self.cfg['runtime_dir']}")
+        if self.cfg.get("client_version"):
+            command.append(f"--client-version={self.cfg['client_version']}")
+        command.append(f"--collect-task-id={task_id}")
+        command.append(f"--collect-owner={owner}")
+        command.append(f"--collect-payload-file={payload_path}")
+        env = os.environ.copy()
+        env["PYTHONUNBUFFERED"] = "1"
+        if self.cfg.get("runtime_dir"):
+            env[ENV_RUNTIME_DIR] = str(self.cfg["runtime_dir"])
+        creationflags = 0
+        startupinfo = None
+        if sys.platform.startswith("win"):
+            creationflags = (
+                getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+            )
+            startupinfo = self._build_hidden_startupinfo()
+        try:
+            process = subprocess.Popen(
+                command,
+                cwd=str(ROOT_DIR),
+                env=env,
+                creationflags=creationflags,
+                startupinfo=startupinfo,
+            )
+        except Exception:
+            try:
+                payload_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+            raise
+        return process, str(payload_path)
+
     def _build_hidden_startupinfo(self):
         startupinfo = subprocess.STARTUPINFO()
         startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
@@ -985,6 +1069,9 @@ class Worker:
             for process in self.single_processes.values():
                 if process.poll() is None:
                     targets.append(process)
+            collect_process = None
+            if self.collect_process and self.collect_process.poll() is None:
+                collect_process = self.collect_process
         time.sleep(2)
         for process in targets:
             try:
@@ -995,6 +1082,68 @@ class Worker:
         deadline = time.time() + 8
         for process in targets:
             while time.time() < deadline:
+                if process.poll() is not None:
+                    break
+                time.sleep(0.2)
+            if process.poll() is None:
+                try:
+                    process.kill()
+                except Exception:
+                    pass
+        if collect_process and collect_process.poll() is None:
+            deadline = time.time() + 8
+            while time.time() < deadline:
+                if collect_process.poll() is not None:
+                    break
+                time.sleep(0.2)
+            if collect_process.poll() is None:
+                try:
+                    collect_process.terminate()
+                except Exception:
+                    pass
+                kill_deadline = time.time() + 5
+                while time.time() < kill_deadline:
+                    if collect_process.poll() is not None:
+                        break
+                    time.sleep(0.2)
+                if collect_process.poll() is None:
+                    try:
+                        collect_process.kill()
+                    except Exception:
+                        pass
+        with self.lock:
+            self._cleanup_finished_processes_locked()
+
+    def _stop_collect(self, owner):
+        stop_flag = _stop_flag_path(owner)
+        stop_flag.parent.mkdir(parents=True, exist_ok=True)
+        stop_flag.write_text("stop\n", encoding="utf-8")
+        pause_flag = _pause_flag_path(owner)
+        if pause_flag.exists():
+            pause_flag.unlink()
+        with self.lock:
+            self._cleanup_finished_processes_locked()
+            process = None
+            if (
+                self.collect_process
+                and self.collect_process.poll() is None
+                and str(self.collect_owner or "").strip() == str(owner or "").strip()
+            ):
+                process = self.collect_process
+        if not process:
+            return
+        graceful_deadline = time.time() + 8
+        while time.time() < graceful_deadline:
+            if process.poll() is not None:
+                break
+            time.sleep(0.2)
+        if process.poll() is None:
+            try:
+                process.terminate()
+            except Exception:
+                pass
+            kill_deadline = time.time() + 5
+            while time.time() < kill_deadline:
                 if process.poll() is not None:
                     break
                 time.sleep(0.2)
@@ -1192,16 +1341,6 @@ class Worker:
             {"task_id": task_id, "status": "done"},
         )
 
-    def _run_collect_task(self, owner, payload, task_id):
-        try:
-            self._handle_collect_groups(owner, payload, task_id)
-        finally:
-            with self.lock:
-                if self.collect_task_id == task_id:
-                    self.collect_thread = None
-                    self.collect_task_id = None
-                    self.collect_owner = ""
-
     def _start_collect_task(self, owner, payload, task_id):
         owner = str(owner or self.cfg.get("owner") or "").strip()
         with self.lock:
@@ -1220,15 +1359,22 @@ class Worker:
                     {"task_id": task_id, "status": "failed", "error": "busy_running_task"},
                 )
                 return
-            thread = threading.Thread(
-                target=self._run_collect_task,
-                args=(owner, dict(payload or {}), task_id),
-                daemon=True,
+        try:
+            process, payload_file = self._launch_collect_process(owner, payload, task_id)
+        except Exception as exc:
+            self._emit_collect_log(owner, f"[采集] 启动失败：{exc}")
+            traceback.print_exc()
+            _post_agent_json(
+                self.cfg,
+                f"{self.cfg['server_url']}/api/agent/report",
+                {"task_id": task_id, "status": "failed", "error": "collect_launch_failed"},
             )
-            self.collect_thread = thread
+            return
+        with self.lock:
+            self.collect_process = process
             self.collect_task_id = task_id
             self.collect_owner = owner
-        thread.start()
+            self.collect_payload_file = payload_file
 
     def handle_task(self, task):
         task_id = task.get("id")
@@ -1310,6 +1456,15 @@ class Worker:
             )
             return
 
+        if action == "stop_collect":
+            self._stop_collect(owner)
+            _post_agent_json(
+                self.cfg,
+                f"{self.cfg['server_url']}/api/agent/report",
+                {"task_id": task_id, "status": "done"},
+            )
+            return
+
         if action == "collect_groups":
             self._start_collect_task(owner, payload, task_id)
             return
@@ -1334,6 +1489,9 @@ def main():
     parser.add_argument("--agent-token", dest="agent_token")
     parser.add_argument("--runtime-dir", dest="runtime_dir")
     parser.add_argument("--client-version", dest="client_version")
+    parser.add_argument("--collect-task-id", dest="collect_task_id")
+    parser.add_argument("--collect-owner", dest="collect_owner")
+    parser.add_argument("--collect-payload-file", dest="collect_payload_file")
     args = parser.parse_args()
 
     cfg = _build_config(args)
@@ -1342,6 +1500,24 @@ def main():
         print("缺少 API Token，无法启动 worker")
         return
     if not _ensure_runtime_token(cfg, config_path=args.config):
+        return
+
+    if args.collect_task_id:
+        worker = Worker(cfg)
+        payload_path = Path(str(args.collect_payload_file or "").strip()) if args.collect_payload_file else None
+        payload = _load_json(payload_path) if payload_path else {}
+        try:
+            worker._handle_collect_groups(
+                str(args.collect_owner or cfg.get("owner") or "").strip(),
+                payload,
+                args.collect_task_id,
+            )
+        finally:
+            if payload_path:
+                try:
+                    payload_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
         return
 
     stop_event = threading.Event()

@@ -9,6 +9,7 @@ const stopBtn = document.getElementById("stop-btn");
 const pauseBtn = document.getElementById("pause-btn");
 const resumeBtn = document.getElementById("resume-btn");
 const collectBtn = document.getElementById("collect-btn");
+const stopCollectBtn = document.getElementById("stop-collect-btn");
 const restartWindowBtn = document.getElementById("restart-window-btn");
 const currentAccountName = document.getElementById("current-account-name");
 const currentAccountRole = document.getElementById("current-account-role");
@@ -185,6 +186,9 @@ if (resumeBtn) {
 }
 if (collectBtn) {
   collectBtn.addEventListener("click", collectGroups);
+}
+if (stopCollectBtn) {
+  stopCollectBtn.addEventListener("click", stopCollectTask);
 }
 if (restartWindowToken) {
   restartWindowToken.addEventListener("input", () => applyTaskButtonState());
@@ -569,6 +573,16 @@ async function collectGroups() {
   const response = await api("/collect-groups", { method: "POST", body: {} });
   if (!response.ok) {
     showAlert(translateErrorMessage(response.data?.error) || "采集失败");
+    return;
+  }
+  await refreshStatus();
+}
+
+async function stopCollectTask() {
+  if (!(await ensureTaskActionAllowed(stopCollectBtn))) return;
+  const response = await api("/stop-collect", { method: "POST", body: {} });
+  if (!response.ok) {
+    showAlert(translateErrorMessage(response.data?.error) || "停止采集失败");
     return;
   }
   await refreshStatus();
@@ -1005,6 +1019,7 @@ function applyTaskButtonState() {
     setTaskActionButtonState(pauseBtn, true, "状态同步中");
     setTaskActionButtonState(resumeBtn, true, "状态同步中");
     setTaskActionButtonState(collectBtn, true, "状态同步中");
+    setTaskActionButtonState(stopCollectBtn, true, "状态同步中");
     setTaskActionButtonState(restartWindowBtn, true, "状态同步中");
     return;
   }
@@ -1075,6 +1090,11 @@ function applyTaskButtonState() {
               ? "采集排队中"
               : "");
   setTaskActionButtonState(collectBtn, !startReady || isBusy || collectBusy, collectReason);
+  setTaskActionButtonState(
+    stopCollectBtn,
+    !collectBusy,
+    collectBusy ? "" : "当前没有采集中的任务"
+  );
   const windowToken = String(restartWindowToken?.value || "").trim();
   const restartReason = !windowToken ? "请输入窗口编号" : startReason;
   setTaskActionButtonState(restartWindowBtn, !windowToken || !startReady || collectBusy, restartReason);

@@ -1024,7 +1024,7 @@ class Scraper:
                         const text = normalize(el.innerText);
                         const matched = labels.find((label) => matchesLabel(text, label));
                         if (!matched) continue;
-                        if (text.length > matched.length + 32) continue;
+                        if (text.length > matched.length + 80) continue;
                         let node = el;
                         const candidates = [];
                         for (let depth = 0; depth < 7 && node; depth += 1) {
@@ -1049,7 +1049,15 @@ class Scraper:
 
                     const path = location.pathname || '';
                     const onGroupsSurface = path === '/groups' || path === '/groups/' || path.startsWith('/groups/feed') || path.startsWith('/groups/joins');
-                    const minimumItems = path.startsWith('/groups/joins') ? 1 : 2;
+                    const joinedSectionHints = labels.some((label) => {
+                        return Array.from(document.querySelectorAll('h1, h2, h3, h4, [role="heading"], [aria-level], div, span'))
+                            .some((el) => {
+                                if (el.offsetParent === null) return false;
+                                const text = normalize(el.innerText);
+                                return matchesLabel(text, label);
+                            });
+                    });
+                    const minimumItems = path.startsWith('/groups/joins') || joinedSectionHints ? 1 : 2;
 
                     const containerCandidates = Array.from(document.querySelectorAll('main, [role="main"], div, section, ul, aside'))
                         .map((el) => {
@@ -2025,7 +2033,7 @@ class Scraper:
                     return True
                 self._pause_aware_sleep(0.22)
 
-            should_force_recover = clicked_any or not self._is_joined_groups_surface(self.page.url)
+            should_force_recover = clicked_any or not self._is_joined_groups_listing_ready()
             if should_force_recover:
                 try:
                     log.info(f"{self._prefix()}已加入小组列表尚未稳定，尝试直接进入 joins 页面恢复列表。")
@@ -2203,7 +2211,7 @@ class Scraper:
     def _is_home_surface(self, url):
         parsed = urlparse(urljoin("https://www.facebook.com", url or ""))
         path = (parsed.path or "").rstrip("/")
-        return path == ""
+        return path in {"", "/home.php"}
 
     def _has_groups_sidebar_entry(self):
         try:
@@ -2506,7 +2514,11 @@ class Scraper:
                         if (candidate.rect.left >= (mainRect ? mainRect.left + 40 : 320)) score += 40;
                         return score;
                     };
-                    const onJoinedSurface = /^\\/groups\\/joins(\\/|\\?|$)/i.test(location.pathname || '');
+                    const path = location.pathname || '';
+                    const onJoinedSurface =
+                        path === '/groups' ||
+                        path === '/groups/' ||
+                        /^\\/groups\\/(joins|feed)(\\/|\\?|$)/i.test(path);
                     if (onJoinedSurface && main) {
                         const rootAnchors = Array.from(main.querySelectorAll('a[href]')).filter((el) => {
                             if (!visible(el)) return false;
@@ -2845,10 +2857,12 @@ class Scraper:
     def _is_joined_groups_surface(self, url):
         parsed = urlparse(urljoin("https://www.facebook.com", url or ""))
         path = parsed.path or ""
-        return path.startswith("/groups/joins")
+        return path.startswith("/groups/joins") or path.startswith("/groups/feed") or path in {"/groups", "/groups/"}
 
     def _is_joined_groups_listing_ready(self):
-        return self._is_joined_groups_surface(self.page.url) and self._has_groups_list_ready()
+        if not self._is_groups_surface(self.page.url):
+            return False
+        return self._has_groups_list_ready()
 
     def _has_groups_surface_ready(self):
         if self._has_groups_list_ready():
