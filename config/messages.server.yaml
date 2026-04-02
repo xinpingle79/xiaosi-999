@@ -9,3 +9,9 @@ templates:
   please state your age and whether you've traded stocks before?
 - Hi, just a quick check per moderator instructions. To ensure eligibility, could
   you confirm your age and if you have any stock holding history?
+restriction_detection_texts:
+  stranger_limit: []
+  message_request_limit: []
+  messenger_login_required: []
+  account_cannot_message: []
+permanent_skip_texts: []

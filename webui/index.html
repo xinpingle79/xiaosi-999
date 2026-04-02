@@ -21,6 +21,7 @@
             <div class="nav-item" data-page="device" data-title="设备管理">设备管理</div>
             <div class="nav-item" data-page="device-info" data-title="设备信息">设备信息</div>
             <div class="nav-item" data-page="template" data-title="文案管理">文案管理</div>
+            <div class="nav-item" data-page="restriction" data-title="限制管理">限制管理</div>
           </nav>
           <div class="sidebar-footer">
             <div class="account-card">
@@ -110,7 +111,6 @@
               <div class="card-header">
                 <div class="card-title">任务管理</div>
               </div>
-              <p class="placeholder-text">总后台仅查看数据和管理账号，任务启动、暂停、继续、停止与单独启动请在子后台执行。</p>
             </section>
 
             <section class="card log-card" data-page="task">
@@ -135,7 +135,6 @@
               <div class="card-header">
                 <div class="card-title">实时日志</div>
               </div>
-              <p class="placeholder-text">以上运行统计按正式任务状态计算，不按保留中的 BitBrowser 窗口数量计算。</p>
               <pre id="log-output"></pre>
             </section>
 
@@ -144,7 +143,23 @@
                 <div class="card-title">文案管理</div>
               </div>
               <div class="form-field full">
+                <label for="templates">正式文案</label>
                 <textarea id="templates" rows="10"></textarea>
+              </div>
+            </section>
+
+            <section class="card" data-page="restriction">
+              <div class="card-header">
+                <div class="card-title">限制管理</div>
+              </div>
+              <p class="placeholder-text">这里只做汇总展示，自动汇总当前全局限制词与所有子后台已保存的限制词，不参与运行判定。</p>
+              <div class="form-field full">
+                <label for="admin-popup-stop-texts">弹窗停止运行</label>
+                <textarea id="admin-popup-stop-texts" rows="8" readonly></textarea>
+              </div>
+              <div class="form-field full">
+                <label for="admin-permanent-skip-texts">永久跳过</label>
+                <textarea id="admin-permanent-skip-texts" rows="8" readonly></textarea>
               </div>
             </section>
 
@@ -332,6 +347,6 @@
       </div>
     </div>
 
-    <script src="/app.js?v=20260327b"></script>
+    <script src="/app.js?v=20260402d"></script>
   </body>
 </html>

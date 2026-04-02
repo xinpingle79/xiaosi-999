@@ -1,5 +1,6 @@
 import errno
 import calendar
+import copy
 import json
 import mimetypes
 import os
@@ -25,7 +26,7 @@ import hmac
 
 import yaml
 
-from utils.helpers import Database
+from utils.helpers import ServerDatabase as Database
 from utils.logger import log
 
 
@@ -34,7 +35,6 @@ ROOT_DIR = (
     if getattr(sys, "frozen", False)
     else Path(__file__).resolve().parent
 )
-os.environ.setdefault("FB_RPA_DB_ROLE", "server")
 STATIC_DIR = ROOT_DIR / "webui"
 SETTINGS_PATH = ROOT_DIR / "config" / "server.yaml"
 MESSAGES_PATH = ROOT_DIR / "config" / "messages.server.yaml"
@@ -51,6 +51,51 @@ AGENT_LOCK = threading.Lock()
 DEFAULT_WEB_PORT = 43090
 STALE_PENDING_SECONDS = 60.0
 STALE_RUNNING_SECONDS = 120.0
+DB_STATS_CACHE_TTL_SECONDS = 5.0
+USER_LIST_CACHE_TTL_SECONDS = 10.0
+RUNTIME_READ_CACHE_LOCK = threading.Lock()
+DB_STATS_CACHE = {}
+USER_LIST_CACHE = {}
+LEGACY_POPUP_STOP_RULE_GROUP_KEYS = (
+    "stranger_limit",
+    "message_request_limit",
+)
+LEGACY_PERMANENT_SKIP_RULE_GROUP_KEYS = (
+    "messenger_login_required",
+    "account_cannot_message",
+)
+
+
+def _clone_runtime_read_cache_value(value):
+    return copy.deepcopy(value)
+
+
+def _get_runtime_read_cache(cache_store, cache_key):
+    now = time.time()
+    with RUNTIME_READ_CACHE_LOCK:
+        entry = cache_store.get(cache_key)
+        if not entry:
+            return None
+        if float(entry.get("expires_at") or 0) <= now:
+            cache_store.pop(cache_key, None)
+            return None
+        return _clone_runtime_read_cache_value(entry.get("value"))
+
+
+def _set_runtime_read_cache(cache_store, cache_key, value, ttl_seconds):
+    with RUNTIME_READ_CACHE_LOCK:
+        cache_store[cache_key] = {
+            "expires_at": time.time() + max(float(ttl_seconds or 0), 0.0),
+            "value": _clone_runtime_read_cache_value(value),
+        }
+
+
+def _invalidate_runtime_read_caches(clear_db_stats=False, clear_user_list=False):
+    with RUNTIME_READ_CACHE_LOCK:
+        if clear_db_stats:
+            DB_STATS_CACHE.clear()
+        if clear_user_list:
+            USER_LIST_CACHE.clear()
 
 
 def _runtime_dir():
@@ -140,7 +185,145 @@ def _purge_expired_sessions(now=None):
 class TaskManager:
     def __init__(self):
         self._lock = threading.Lock()
-        self._logs = deque(maxlen=1200)
+        self._runtime_logs = deque(maxlen=1200)
+        self._control_logs = deque(maxlen=400)
+        self._log_sequence = 0
+
+    def _next_log_sequence_locked(self):
+        self._log_sequence += 1
+        return self._log_sequence
+
+    def _normalize_log_scope(self, owner="", machine_id=""):
+        return (
+            str(owner or "").strip(),
+            str(machine_id or "").strip(),
+        )
+
+    def _decorate_control_log_message(self, message, owner="", machine_id=""):
+        text = str(message or "").strip()
+        if not text:
+            return ""
+        owner, machine_id = self._normalize_log_scope(owner, machine_id)
+        if owner and machine_id:
+            return f"[{owner}@{machine_id}] {text}"
+        if owner:
+            return f"[{owner}] {text}"
+        if machine_id:
+            return f"[{machine_id}] {text}"
+        return text
+
+    def _make_log_entry_locked(self, message, owner="", machine_id="", decorate=False):
+        text = str(message or "").strip()
+        if decorate:
+            text = self._decorate_control_log_message(text, owner=owner, machine_id=machine_id)
+        if not text:
+            return None
+        owner, machine_id = self._normalize_log_scope(owner, machine_id)
+        return {
+            "seq": self._next_log_sequence_locked(),
+            "owner": owner,
+            "machine_id": machine_id,
+            "message": text,
+        }
+
+    def _append_control_log(self, message, owner="", machine_id="", already_locked=False):
+        if already_locked:
+            entry = self._make_log_entry_locked(
+                message,
+                owner=owner,
+                machine_id=machine_id,
+                decorate=True,
+            )
+            if entry:
+                self._control_logs.append(entry)
+            return
+        with self._lock:
+            entry = self._make_log_entry_locked(
+                message,
+                owner=owner,
+                machine_id=machine_id,
+                decorate=True,
+            )
+            if entry:
+                self._control_logs.append(entry)
+
+    def _append_runtime_log(self, message, owner="", machine_id="", already_locked=False):
+        if already_locked:
+            entry = self._make_log_entry_locked(
+                message,
+                owner=owner,
+                machine_id=machine_id,
+                decorate=False,
+            )
+            if entry:
+                self._runtime_logs.append(entry)
+            return
+        with self._lock:
+            entry = self._make_log_entry_locked(
+                message,
+                owner=owner,
+                machine_id=machine_id,
+                decorate=False,
+            )
+            if entry:
+                self._runtime_logs.append(entry)
+
+    def _log_entry_matches_scope(self, entry, owner="", machine_id=""):
+        owner_filter, machine_filter = self._normalize_log_scope(owner, machine_id)
+        if not owner_filter and not machine_filter:
+            return True
+        if isinstance(entry, dict):
+            owner_hit = (not owner_filter) or str(entry.get("owner") or "").strip() == owner_filter
+            machine_hit = (not machine_filter) or str(entry.get("machine_id") or "").strip() == machine_filter
+            return owner_hit and machine_hit
+        message = str(entry or "").strip()
+        if not message:
+            return False
+        return bool(_filter_runtime_logs([message], account_id=owner_filter, machine_id=machine_filter))
+
+    def _filter_log_entries_locked(self, entries, owner="", machine_id=""):
+        return [
+            entry
+            for entry in (entries or [])
+            if self._log_entry_matches_scope(entry, owner=owner, machine_id=machine_id)
+        ]
+
+    def _render_log_messages_locked(self, entries):
+        normalized = []
+        fallback_index = 0
+        for entry in entries or []:
+            if isinstance(entry, dict):
+                message = str(entry.get("message") or "").strip()
+                if not message:
+                    continue
+                try:
+                    seq = int(entry.get("seq") or 0)
+                except Exception:
+                    seq = 0
+            else:
+                message = str(entry or "").strip()
+                if not message:
+                    continue
+                seq = -(10**9) + fallback_index
+                fallback_index += 1
+            normalized.append((seq, message))
+        normalized.sort(key=lambda item: item[0])
+        return [message for _, message in normalized]
+
+    def _clear_scoped_logs_locked(self, queue_name, owner="", machine_id=""):
+        attr = "_runtime_logs" if queue_name == "runtime" else "_control_logs"
+        current_queue = getattr(self, attr)
+        maxlen = current_queue.maxlen
+        owner_filter, machine_filter = self._normalize_log_scope(owner, machine_id)
+        if not owner_filter and not machine_filter:
+            setattr(self, attr, deque(maxlen=maxlen))
+            return
+        retained = [
+            entry
+            for entry in current_queue
+            if not self._log_entry_matches_scope(entry, owner=owner_filter, machine_id=machine_filter)
+        ]
+        setattr(self, attr, deque(retained, maxlen=maxlen))
 
     def _resolve_owner_agent_with_retry(
         self,
@@ -201,7 +384,7 @@ class TaskManager:
         return agent, None
 
     def _find_existing_machine_action_task(self, db, owner_name, machine_id, action):
-        row = db.conn.execute(
+        row = db.fetch_one(
             """
             SELECT id, status
             FROM agent_tasks
@@ -213,7 +396,7 @@ class TaskManager:
             LIMIT 1
             """,
             (owner_name, machine_id, action),
-        ).fetchone()
+        )
         if not row:
             return None
         return {
@@ -235,7 +418,7 @@ class TaskManager:
         if window_token is not None:
             clauses.append("ifnull(window_token, '') = ?")
             params.append(str(window_token or "").strip())
-        row = db.conn.execute(
+        row = db.fetch_one(
             f"""
             SELECT id, action, status, error
             FROM agent_tasks
@@ -244,7 +427,7 @@ class TaskManager:
             LIMIT 1
             """,
             tuple(params),
-        ).fetchone()
+        )
         if not row:
             return None
         return {
@@ -254,7 +437,15 @@ class TaskManager:
             "error": str(row["error"] or "").strip(),
         }
 
-    def _cleanup_stale_machine_action_tasks(self, db, owner_name, machine_id, heartbeat_ttl, trigger=""):
+    def _cleanup_stale_machine_action_tasks(
+        self,
+        db,
+        owner_name,
+        machine_id,
+        heartbeat_ttl,
+        trigger="",
+        already_locked=False,
+    ):
         machine_id = str(machine_id or "").strip()
         if not machine_id:
             return []
@@ -276,7 +467,7 @@ class TaskManager:
             "agent_heartbeat": "执行端心跳",
             "agent_task_poll": "执行端取任务",
         }.get(str(trigger or "").strip(), "任务状态治理")
-        rows = db.conn.execute(
+        rows = db.fetch_all(
             """
             SELECT id, action, window_token, status, updated_at
             FROM agent_tasks
@@ -285,7 +476,7 @@ class TaskManager:
             ORDER BY id ASC
             """,
             (machine_id,),
-        ).fetchall()
+        )
         for row in rows:
             task_id = int(row["id"])
             action = str(row["action"] or "").strip()
@@ -373,7 +564,7 @@ class TaskManager:
                     )
             if not stale_error:
                 continue
-            db.conn.execute(
+            db.execute_statement(
                 """
                 UPDATE agent_tasks
                 SET status = 'failed', error = ?, updated_at = ?
@@ -390,11 +581,16 @@ class TaskManager:
                     "message": cleanup_message,
                 }
             )
-        if stale_rows:
-            db.conn.commit()
-            for row in stale_rows:
-                self._logs.append(row["message"])
-            active_row = db.conn.execute(
+            if stale_rows:
+                db.commit()
+                for row in stale_rows:
+                    self._append_control_log(
+                        row["message"],
+                        owner=owner_name,
+                        machine_id=machine_id,
+                        already_locked=already_locked,
+                    )
+                active_row = db.fetch_one(
                 """
                 SELECT COUNT(1) AS total
                 FROM agent_tasks
@@ -402,11 +598,14 @@ class TaskManager:
                   AND status IN ('pending', 'running')
                 """,
                 (machine_id,),
-            ).fetchone()
-            if int(active_row["total"] or 0) == 0:
-                self._logs.append(
-                    f"=== 当前状态已恢复，可重新启动：执行端 {machine_id}（{trigger_label}） ==="
                 )
+                if int(active_row["total"] or 0) == 0:
+                    self._append_control_log(
+                        f"=== 当前状态已恢复，可重新启动：执行端 {machine_id}（{trigger_label}） ===",
+                        owner=owner_name,
+                        machine_id=machine_id,
+                        already_locked=already_locked,
+                    )
         return stale_rows
 
     def _build_machine_action_payload(
@@ -468,21 +667,19 @@ class TaskManager:
                 enabled_configs = [
                     cfg for cfg in configs if int(cfg.get("status", 1) or 0) == 1
                 ]
-                errors = []
                 if not enabled_configs:
                     return False, "未配置设备"
+                bound_configs = [
+                    cfg
+                    for cfg in enabled_configs
+                    if str(cfg.get("machine_id") or "").strip()
+                ]
+                if not bound_configs:
+                    return False, "未绑定设备"
                 task_ids = []
                 has_online = False
-                has_valid_config = False
-                for cfg in enabled_configs:
+                for cfg in bound_configs:
                     machine_id = str(cfg.get("machine_id") or "").strip()
-                    if not machine_id:
-                        cfg_label = str(cfg.get("name") or cfg.get("id") or "")
-                        self._logs.append(
-                            f"=== 跳过配置{cfg_label}：未绑定设备 ==="
-                        )
-                        continue
-                    has_valid_config = True
                     agent, agent_error = self._resolve_machine_agent(
                         db,
                         owner_name,
@@ -491,8 +688,11 @@ class TaskManager:
                         allow_disabled,
                     )
                     if not agent:
-                        self._logs.append(
-                            f"=== 跳过设备 {machine_id}：{agent_error} ==="
+                        self._append_control_log(
+                            f"=== 跳过设备 {machine_id}：{agent_error} ===",
+                            owner=owner_name,
+                            machine_id=machine_id,
+                            already_locked=True,
                         )
                         continue
                     has_online = True
@@ -502,6 +702,7 @@ class TaskManager:
                         machine_id,
                         heartbeat_ttl,
                         trigger="enqueue_owner_action",
+                        already_locked=True,
                     )
                     existing_task = self._find_existing_machine_action_task(
                         db,
@@ -510,8 +711,11 @@ class TaskManager:
                         action,
                     )
                     if existing_task:
-                        self._logs.append(
-                            f"=== 跳过重复 {action} 指令：执行端 {machine_id} 已存在任务#{existing_task['id']} ({existing_task['status']}) ==="
+                        self._append_control_log(
+                            f"=== 跳过重复 {action} 指令：执行端 {machine_id} 已存在任务#{existing_task['id']} ({existing_task['status']}) ===",
+                            owner=owner_name,
+                            machine_id=machine_id,
+                            already_locked=True,
                         )
                         task_ids.append((machine_id, existing_task["id"]))
                         continue
@@ -523,8 +727,11 @@ class TaskManager:
                         window_token=window_token,
                     )
                     if payload_error:
-                        self._logs.append(
-                            f"=== 跳过设备 {machine_id}：{payload_error} ==="
+                        self._append_control_log(
+                            f"=== 跳过设备 {machine_id}：{payload_error} ===",
+                            owner=owner_name,
+                            machine_id=machine_id,
+                            already_locked=True,
                         )
                         continue
                     task_id = db.enqueue_agent_task(
@@ -537,16 +744,17 @@ class TaskManager:
                     task_ids.append((machine_id, task_id))
                 if task_ids:
                     for machine_id, task_id in task_ids:
-                        self._logs.append(
-                            f"=== 已下发 {action} 指令到执行端 {machine_id} (任务#{task_id}) ==="
+                        self._append_control_log(
+                            f"=== 已下发 {action} 指令到执行端 {machine_id} (任务#{task_id}) ===",
+                            owner=owner_name,
+                            machine_id=machine_id,
+                            already_locked=True,
                         )
                     return True, None
-                if not has_valid_config:
-                    return False, "未绑定设备"
                 if time.time() >= deadline:
-                    if has_valid_config and not has_online:
+                    if not has_online:
                         return False, "暂无在线设备"
-                    return False, errors[0] if errors else "执行端离线"
+                    return False, "执行端离线"
                 time.sleep(0.5)
         finally:
             db.close()
@@ -595,8 +803,10 @@ class TaskManager:
                 action,
             )
             if existing_task:
-                self._logs.append(
-                    f"=== 跳过重复 {action} 指令：执行端 {machine_id} 已存在任务#{existing_task['id']} ({existing_task['status']}) ==="
+                self._append_control_log(
+                    f"=== 跳过重复 {action} 指令：执行端 {machine_id} 已存在任务#{existing_task['id']} ({existing_task['status']}) ===",
+                    owner=owner_name,
+                    machine_id=machine_id,
                 )
                 return True, None
             configs = db.list_device_configs(owner_name)
@@ -621,7 +831,13 @@ class TaskManager:
             )
         finally:
             db.close()
-        self._logs.append(f"=== 已下发 {action} 指令到执行端 {machine_id} (任务#{task_id}) ===")
+        with self._lock:
+            self._append_control_log(
+                f"=== 已下发 {action} 指令到执行端 {machine_id} (任务#{task_id}) ===",
+                owner=owner_name,
+                machine_id=machine_id,
+                already_locked=True,
+            )
         return True, None
 
     def enqueue_machine_action(
@@ -696,6 +912,7 @@ class TaskManager:
                         machine_id,
                         heartbeat_ttl,
                         trigger="enqueue_machine_action",
+                        already_locked=True,
                     )
                     existing_task = self._find_existing_machine_action_task(
                         db,
@@ -704,8 +921,11 @@ class TaskManager:
                         action,
                     )
                     if existing_task:
-                        self._logs.append(
-                            f"=== 跳过重复 {action} 指令：执行端 {machine_id} 已存在任务#{existing_task['id']} ({existing_task['status']}) ==="
+                        self._append_control_log(
+                            f"=== 跳过重复 {action} 指令：执行端 {machine_id} 已存在任务#{existing_task['id']} ({existing_task['status']}) ===",
+                            owner=owner_name,
+                            machine_id=machine_id,
+                            already_locked=True,
                         )
                         return True, None, {
                             "result": "duplicate",
@@ -719,8 +939,11 @@ class TaskManager:
                         machine_id=machine_id,
                         payload=payload,
                     )
-                    self._logs.append(
-                        f"=== 已下发 {action} 指令到执行端 {machine_id} (任务#{task_id}) ==="
+                    self._append_control_log(
+                        f"=== 已下发 {action} 指令到执行端 {machine_id} (任务#{task_id}) ===",
+                        owner=owner_name,
+                        machine_id=machine_id,
+                        already_locked=True,
                     )
                     return True, None, {
                         "result": "accepted",
@@ -734,18 +957,19 @@ class TaskManager:
         if not owner_name:
             return False, "总后台不参与任务操作，请在子后台执行"
         with self._lock:
-            db = Database()
-            try:
-                task_counts = _load_runtime_task_counts(owner=owner_name, db=db)
-            finally:
-                db.close()
-            if int(task_counts.get("collect_running_tasks") or 0) > 0 or int(
-                task_counts.get("collect_pending_tasks") or 0
-            ) > 0:
+            state = self._get_owner_runtime_state(owner_name)
+            if state["collect_running"] or state["collect_pending"]:
                 return False, "当前正在采集群组，请等待采集完成后再启动"
-            self._logs.clear()
-            self._logs.append("=== 任务已下发 ===")
-            self._logs.append("=== 正在确认执行端在线状态 ===")
+            if state["task_paused"]:
+                return False, "当前任务处于暂停中，请先点击继续或停止"
+            if state["task_running"]:
+                return False, "当前任务已在运行，无需重复启动"
+            if state["task_pending"]:
+                return False, "启动任务已在排队，请勿重复启动"
+            self._clear_scoped_logs_locked("runtime", owner=owner_name)
+            self._clear_scoped_logs_locked("control", owner=owner_name)
+            self._append_control_log("=== 任务已下发 ===", owner=owner_name, already_locked=True)
+            self._append_control_log("=== 正在确认执行端在线状态 ===", owner=owner_name, already_locked=True)
             return self._enqueue_owner_device_actions(
                 "start",
                 owner_name,
@@ -757,6 +981,9 @@ class TaskManager:
         if not owner_name:
             return False, "总后台不参与任务操作，请在子后台执行"
         with self._lock:
+            state = self._get_owner_runtime_state(owner_name)
+            if not (state["task_running"] or state["task_pending"] or state["task_paused"]):
+                return False, "当前没有可停止的运行任务"
             return self._enqueue_owner_device_actions(
                 "stop", owner_name, allow_disabled=True
             )
@@ -766,8 +993,11 @@ class TaskManager:
         if not owner_name:
             return False, "总后台不参与任务操作，请在子后台执行"
         with self._lock:
-            if not self._agent_has_running(owner_name):
-                return False, "当前没有运行中的任务"
+            state = self._get_owner_runtime_state(owner_name)
+            if state["task_paused"]:
+                return False, "当前任务已处于暂停状态"
+            if not state["task_running"]:
+                return False, "当前没有可暂停的运行任务"
             return self._enqueue_owner_device_actions("pause", owner_name)
 
     def resume(self, owner=None):
@@ -775,8 +1005,9 @@ class TaskManager:
         if not owner_name:
             return False, "总后台不参与任务操作，请在子后台执行"
         with self._lock:
-            if not self._agent_has_running(owner_name):
-                return False, "当前没有运行中的任务"
+            state = self._get_owner_runtime_state(owner_name)
+            if not state["task_paused"]:
+                return False, "当前没有可继续的暂停任务"
             return self._enqueue_owner_device_actions("resume", owner_name)
 
     def restart_window(self, window_token, owner=None):
@@ -784,14 +1015,8 @@ class TaskManager:
         if not owner_name:
             return False, "总后台不参与任务操作，请在子后台执行"
         with self._lock:
-            db = Database()
-            try:
-                task_counts = _load_runtime_task_counts(owner=owner_name, db=db)
-            finally:
-                db.close()
-            if int(task_counts.get("collect_running_tasks") or 0) > 0 or int(
-                task_counts.get("collect_pending_tasks") or 0
-            ) > 0:
+            state = self._get_owner_runtime_state(owner_name)
+            if state["collect_running"] or state["collect_pending"]:
                 return False, "当前正在采集群组，请等待采集完成后再单独启动"
             return self._enqueue_owner_device_actions(
                 "restart_window",
@@ -804,27 +1029,17 @@ class TaskManager:
         if not owner_name:
             return False, "总后台不参与任务操作，请在子后台执行"
         with self._lock:
-            db = Database()
-            try:
-                task_counts = _load_runtime_task_counts(owner=owner_name, db=db)
-                running_tasks = int(task_counts.get("running_tasks") or 0)
-                pending_tasks = int(task_counts.get("pending_tasks") or 0)
-                collect_running_tasks = int(task_counts.get("collect_running_tasks") or 0)
-                collect_pending_tasks = int(task_counts.get("collect_pending_tasks") or 0)
-                task_paused = bool(
-                    running_tasks > 0
-                    and self._is_task_paused_from_actions(db, owner=owner_name)
-                )
-            finally:
-                db.close()
-            if running_tasks > 0 or pending_tasks > 0 or task_paused:
+            state = self._get_owner_runtime_state(owner_name)
+            if state["task_running"] or state["task_pending"] or state["task_paused"]:
                 return False, "当前存在正式运行任务，请先停止或等待任务结束后再采集"
-            if collect_running_tasks > 0:
+            if state["collect_running"]:
                 return False, "当前正在采集群组，请勿重复下发"
-            if collect_pending_tasks > 0:
+            if state["collect_pending"]:
                 return False, "采集任务已在排队中，请稍后再试"
-            self._logs.append("=== 采集指令已下发 ===")
-            self._logs.append("=== 正在确认执行端在线状态 ===")
+            self._clear_scoped_logs_locked("runtime", owner=owner_name)
+            self._clear_scoped_logs_locked("control", owner=owner_name)
+            self._append_control_log("=== 采集指令已下发 ===", owner=owner_name, already_locked=True)
+            self._append_control_log("=== 正在确认执行端在线状态 ===", owner=owner_name, already_locked=True)
             return self._enqueue_owner_device_actions(
                 "collect_groups",
                 owner_name,
@@ -835,53 +1050,77 @@ class TaskManager:
         with self._lock:
             db = Database()
             try:
-                task_counts = _load_runtime_task_counts(owner=owner, db=db)
-                running_tasks = int(task_counts.get("running_tasks") or 0)
-                pending_tasks = int(task_counts.get("pending_tasks") or 0)
-                collect_running_tasks = int(task_counts.get("collect_running_tasks") or 0)
-                collect_pending_tasks = int(task_counts.get("collect_pending_tasks") or 0)
-                running_accounts = int(task_counts.get("running_accounts") or 0)
-                task_paused = bool(
-                    running_tasks > 0
-                    and self._is_task_paused_from_actions(db, owner=owner)
-                )
+                state = self._load_owner_runtime_state(db, owner=owner)
             except Exception:
-                running_tasks = 0
-                pending_tasks = 0
-                collect_running_tasks = 0
-                collect_pending_tasks = 0
-                running_accounts = 0
-                task_paused = False
+                state = {
+                    "running_tasks": 0,
+                    "pending_tasks": 0,
+                    "collect_running_tasks": 0,
+                    "collect_pending_tasks": 0,
+                    "running_accounts": 0,
+                    "task_running": False,
+                    "task_pending": False,
+                    "task_paused": False,
+                    "collect_running": False,
+                    "collect_pending": False,
+                }
             finally:
                 db.close()
-            running = running_tasks > 0
-            logs = _filter_runtime_logs(list(self._logs), account_id=owner)
-            task_pending = bool(pending_tasks > 0)
+            runtime_entries = self._filter_log_entries_locked(
+                list(self._runtime_logs),
+                owner=owner,
+            )
+            control_entries = self._filter_log_entries_locked(
+                list(self._control_logs),
+                owner=owner,
+            )
+            runtime_logs = self._render_log_messages_locked(runtime_entries)
+            logs = self._render_log_messages_locked(list(runtime_entries) + list(control_entries))
             stats = build_runtime_stats(
-                logs,
+                runtime_logs,
                 account_id=owner,
-                running_tasks=running_tasks,
-                running_accounts=running_accounts,
+                running_tasks=state["running_tasks"],
+                running_accounts=state["running_accounts"],
             )
             return {
-                "task_running": running,
-                "task_pending": task_pending,
-                "task_paused": task_paused,
-                "collect_running": bool(collect_running_tasks > 0),
-                "collect_pending": bool(collect_pending_tasks > 0),
+                "task_running": state["task_running"],
+                "task_pending": state["task_pending"],
+                "task_paused": state["task_paused"],
+                "collect_running": state["collect_running"],
+                "collect_pending": state["collect_pending"],
                 "logs": logs,
+                "control_logs": [],
                 "stats": stats,
             }
 
-    def _agent_has_running(self, owner=None):
+    def _load_owner_runtime_state(self, db, owner=None):
+        task_counts = _load_runtime_task_counts(owner=owner, db=db)
+        running_tasks = int(task_counts.get("running_tasks") or 0)
+        pending_tasks = int(task_counts.get("pending_tasks") or 0)
+        collect_running_tasks = int(task_counts.get("collect_running_tasks") or 0)
+        collect_pending_tasks = int(task_counts.get("collect_pending_tasks") or 0)
+        running_accounts = int(task_counts.get("running_accounts") or 0)
+        task_paused = bool(
+            running_tasks > 0
+            and self._is_task_paused_from_actions(db, owner=owner)
+        )
+        return {
+            "running_tasks": running_tasks,
+            "pending_tasks": pending_tasks,
+            "collect_running_tasks": collect_running_tasks,
+            "collect_pending_tasks": collect_pending_tasks,
+            "running_accounts": running_accounts,
+            "task_running": running_tasks > 0,
+            "task_pending": pending_tasks > 0,
+            "task_paused": task_paused,
+            "collect_running": collect_running_tasks > 0,
+            "collect_pending": collect_pending_tasks > 0,
+        }
+
+    def _get_owner_runtime_state(self, owner=None):
         db = Database()
         try:
-            return _count_agent_tasks_by_scope(
-                db,
-                owner=owner,
-                statuses=("running",),
-                actions=("start",),
-            ) > 0
+            return self._load_owner_runtime_state(db, owner=owner)
         finally:
             db.close()
 
@@ -903,9 +1142,17 @@ class TaskManager:
                 "stop", owner, allow_disabled=True
             )
             if ok:
-                self._logs.append(f"=== 已禁用账号 {owner}，已下发停止指令 ===")
+                self._append_control_log(
+                    f"=== 已禁用账号 {owner}，已下发停止指令 ===",
+                    owner=owner,
+                    already_locked=True,
+                )
             else:
-                self._logs.append(f"=== 已禁用账号 {owner}，停止指令下发失败: {error} ===")
+                self._append_control_log(
+                    f"=== 已禁用账号 {owner}，停止指令下发失败: {error} ===",
+                    owner=owner,
+                    already_locked=True,
+                )
 
     def _load_owner_account(self, owner):
         if not owner:
@@ -916,11 +1163,6 @@ class TaskManager:
         finally:
             db.close()
 
-    def _append_runtime_log(self, message):
-        with self._lock:
-            self._logs.append(message)
-
-
 TASK_MANAGER = TaskManager()
 
 
@@ -929,6 +1171,136 @@ def read_yaml(path):
         return {}
     with open(path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f) or {}
+
+
+def _normalize_message_lines(values):
+    return [
+        str(item).strip()
+        for item in (values or [])
+        if str(item).strip()
+    ]
+
+
+def _merge_message_lines(*groups):
+    merged = []
+    seen = set()
+    for group in groups:
+        for item in _normalize_message_lines(group or []):
+            if item in seen:
+                continue
+            seen.add(item)
+            merged.append(item)
+    return merged
+
+
+def _decode_message_json_list(raw_value):
+    if raw_value is None:
+        return []
+    try:
+        payload = json.loads(raw_value) if raw_value else []
+    except Exception:
+        payload = []
+    return _normalize_message_lines(payload)
+
+
+def _default_messages_config():
+    return {
+        "templates": [],
+        "popup_stop_texts": [],
+        "permanent_skip_texts": [],
+    }
+
+
+def _normalize_messages_config(data):
+    payload = data if isinstance(data, dict) else {}
+    normalized = _default_messages_config()
+    normalized["templates"] = _normalize_message_lines(payload.get("templates") or [])
+    normalized["popup_stop_texts"] = _normalize_message_lines(
+        payload.get("popup_stop_texts") or []
+    )
+    restriction_payload = payload.get("restriction_detection_texts")
+    if not normalized["popup_stop_texts"] and isinstance(restriction_payload, dict):
+        normalized["popup_stop_texts"] = _merge_message_lines(
+            *[
+                restriction_payload.get(key) or []
+                for key in LEGACY_POPUP_STOP_RULE_GROUP_KEYS
+            ]
+        )
+    legacy_permanent_skip_texts = []
+    if isinstance(restriction_payload, dict):
+        legacy_permanent_skip_texts = _merge_message_lines(
+            *[
+                restriction_payload.get(key) or []
+                for key in LEGACY_PERMANENT_SKIP_RULE_GROUP_KEYS
+            ]
+        )
+    normalized["permanent_skip_texts"] = _merge_message_lines(
+        payload.get("permanent_skip_texts") or [],
+        legacy_permanent_skip_texts,
+    )
+    return normalized
+
+
+def _clone_messages_config(data):
+    normalized = _normalize_messages_config(data)
+    return {
+        "templates": list(normalized["templates"]),
+        "popup_stop_texts": list(normalized["popup_stop_texts"]),
+        "permanent_skip_texts": list(normalized["permanent_skip_texts"]),
+    }
+
+
+def _merge_messages_config(current, incoming):
+    merged = _clone_messages_config(current)
+    payload = incoming if isinstance(incoming, dict) else {}
+
+    if "templates" in payload:
+        merged["templates"] = _normalize_message_lines(payload.get("templates") or [])
+
+    if "popup_stop_texts" in payload:
+        merged["popup_stop_texts"] = _normalize_message_lines(
+            payload.get("popup_stop_texts") or []
+        )
+
+    if "permanent_skip_texts" in payload:
+        merged["permanent_skip_texts"] = _normalize_message_lines(
+            payload.get("permanent_skip_texts") or []
+        )
+
+    return merged
+
+
+def _apply_owner_messages_config(base_messages, owner_messages):
+    merged = _clone_messages_config(base_messages)
+    payload = owner_messages if isinstance(owner_messages, dict) else {}
+    templates = payload.get("templates")
+    if templates is not None:
+        merged["templates"] = _normalize_message_lines(templates or [])
+    popup_stop_texts = payload.get("popup_stop_texts")
+    if popup_stop_texts is not None:
+        merged["popup_stop_texts"] = _normalize_message_lines(popup_stop_texts or [])
+    permanent_skip_texts = payload.get("permanent_skip_texts")
+    if permanent_skip_texts is not None:
+        merged["permanent_skip_texts"] = _normalize_message_lines(
+            permanent_skip_texts or []
+        )
+    return merged
+
+
+def _build_admin_restriction_summary(base_messages, rows):
+    popup_stop_groups = [base_messages.get("popup_stop_texts") or []]
+    permanent_skip_groups = [base_messages.get("permanent_skip_texts") or []]
+    for row in rows or []:
+        popup_stop_groups.append(
+            _decode_message_json_list(row.get("popup_stop_texts"))
+        )
+        permanent_skip_groups.append(
+            _decode_message_json_list(row.get("permanent_skip_texts"))
+        )
+    return {
+        "popup_stop_texts": _merge_message_lines(*popup_stop_groups),
+        "permanent_skip_texts": _merge_message_lines(*permanent_skip_groups),
+    }
 
 
 def _load_agent_settings():
@@ -1809,14 +2181,14 @@ class WebUIHandler(BaseHTTPRequestHandler):
         )
 
 def load_full_config(username=None):
-    messages = read_yaml(MESSAGES_PATH)
+    messages = _normalize_messages_config(read_yaml(MESSAGES_PATH))
     result = {
         "messages": messages,
     }
 
-    if username:
-        db = Database()
-        try:
+    db = Database()
+    try:
+        if username:
             account = db.get_user_account(username)
             if account is not None:
                 expire_at = account.get("expire_at")
@@ -1834,11 +2206,24 @@ def load_full_config(username=None):
                     "expire_at": expire_at_val,
                     "days_left": days_left,
                 }
-            templates = db.get_message_templates(username)
-            if templates is not None:
-                messages["templates"] = templates.get("templates") or []
-        finally:
-            db.close()
+            owner_messages = db.get_message_templates(username)
+            if owner_messages is not None:
+                messages = _apply_owner_messages_config(messages, owner_messages)
+                result["messages"] = messages
+        else:
+            rows = db.fetch_all(
+                """
+                SELECT username, popup_stop_texts, permanent_skip_texts
+                FROM message_templates
+                ORDER BY updated_at DESC, username ASC
+                """
+            )
+            result["restriction_summary"] = _build_admin_restriction_summary(
+                messages,
+                rows,
+            )
+    finally:
+        db.close()
 
     return result
 
@@ -2003,7 +2388,7 @@ def _load_owner_device_summary(owner, db=None):
         settings = _load_agent_settings()
         heartbeat_ttl = max(float(settings.get("heartbeat_ttl", 180) or 180), 0.0)
         cutoff = time.time() - heartbeat_ttl
-        row = db.conn.execute(
+        row = db.fetch_one(
             """
             SELECT COUNT(1) AS total
             FROM agent_registry
@@ -2012,7 +2397,7 @@ def _load_owner_device_summary(owner, db=None):
               AND COALESCE(last_seen, 0) >= ?
             """,
             (owner, cutoff),
-        ).fetchone()
+        )
         online_devices = int(row["total"] or 0) if row else 0
 
         max_devices = None
@@ -2056,10 +2441,10 @@ def _count_agent_tasks_by_scope(db, owner=None, machine_id=None, statuses=None, 
         clauses.append(f"action IN ({placeholders})")
         params.extend(action_values)
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-    row = db.conn.execute(
+    row = db.fetch_one(
         f"SELECT COUNT(1) AS total FROM agent_tasks {where}",
         tuple(params),
-    ).fetchone()
+    )
     return int(row["total"] or 0) if row else 0
 
 
@@ -2085,7 +2470,7 @@ def _load_latest_agent_task_by_scope(db, owner=None, machine_id=None, statuses=N
         clauses.append(f"action IN ({placeholders})")
         params.extend(action_values)
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-    row = db.conn.execute(
+    row = db.fetch_one(
         f"""
         SELECT *
         FROM agent_tasks
@@ -2094,8 +2479,8 @@ def _load_latest_agent_task_by_scope(db, owner=None, machine_id=None, statuses=N
         LIMIT 1
         """,
         tuple(params),
-    ).fetchone()
-    return dict(row) if row else None
+    )
+    return row if row else None
 
 
 def _count_distinct_running_start_accounts(db, owner=None):
@@ -2107,7 +2492,7 @@ def _count_distinct_running_start_accounts(db, owner=None):
             statuses=("running",),
             actions=("start",),
         ) > 0 else 0
-    row = db.conn.execute(
+    row = db.fetch_one(
         """
         SELECT COUNT(DISTINCT owner) AS total
         FROM agent_tasks
@@ -2115,7 +2500,7 @@ def _count_distinct_running_start_accounts(db, owner=None):
           AND action = 'start'
           AND COALESCE(owner, '') != ''
         """
-    ).fetchone()
+    )
     return int(row["total"] or 0) if row else 0
 
 
@@ -2161,6 +2546,13 @@ def _load_runtime_task_counts(owner=None, db=None):
 
 
 def _load_db_stats(account_id=None, machine_id=None):
+    account_filter = str(account_id or "").strip()
+    machine_filter = str(machine_id or "").strip()
+    cache_key = (account_filter, machine_filter)
+    cached = _get_runtime_read_cache(DB_STATS_CACHE, cache_key)
+    if cached is not None:
+        return cached
+
     db = Database()
     try:
         now = datetime.now()
@@ -2169,8 +2561,6 @@ def _load_db_stats(account_id=None, machine_id=None):
         today_text = today_start.strftime("%Y-%m-%d %H:%M:%S")
         yesterday_text = yesterday_start.strftime("%Y-%m-%d %H:%M:%S")
 
-        account_filter = str(account_id or "").strip()
-        machine_filter = str(machine_id or "").strip()
         device_total = 0
         device_online = 0
         device_yesterday = 0
@@ -2178,15 +2568,15 @@ def _load_db_stats(account_id=None, machine_id=None):
         if account_filter and not machine_filter:
             today_start_ts = today_start.timestamp()
             yesterday_start_ts = yesterday_start.timestamp()
-            row = db.conn.execute(
+            row = db.fetch_one(
                 "SELECT COUNT(1) AS total FROM agent_registry WHERE owner = ?",
                 (account_filter,),
-            ).fetchone()
+            )
             device_total = int(row["total"] or 0) if row else 0
             device_summary = _load_owner_device_summary(account_filter, db=db)
             device_online = int(device_summary.get("online_devices") or 0)
             max_devices = device_summary.get("max_devices")
-            row = db.conn.execute(
+            row = db.fetch_one(
                 """
                 SELECT COUNT(1) AS total FROM agent_registry
                 WHERE owner = ?
@@ -2195,7 +2585,7 @@ def _load_db_stats(account_id=None, machine_id=None):
                   AND COALESCE(last_seen, 0) < ?
                 """,
                 (account_filter, yesterday_start_ts, today_start_ts),
-            ).fetchone()
+            )
             device_yesterday = int(row["total"] or 0) if row else 0
 
         def count_status(status, start=None, end=None):
@@ -2214,7 +2604,7 @@ def _load_db_stats(account_id=None, machine_id=None):
                 clauses.append("created_at < ?")
                 params.append(end)
             query = f"SELECT COUNT(1) AS total FROM sent_history WHERE {' AND '.join(clauses)}"
-            row = db.conn.execute(query, tuple(params)).fetchone()
+            row = db.fetch_one(query, tuple(params))
             return int(row["total"] or 0) if row else 0
 
         def count_distinct(field, start=None, end=None, status=None, require_status=False):
@@ -2236,7 +2626,7 @@ def _load_db_stats(account_id=None, machine_id=None):
                 clauses.append("created_at < ?")
                 params.append(end)
             query = f"SELECT COUNT(DISTINCT {field}) AS total FROM sent_history WHERE {' AND '.join(clauses)}"
-            row = db.conn.execute(query, tuple(params)).fetchone()
+            row = db.fetch_one(query, tuple(params))
             return int(row["total"] or 0) if row else 0
 
         def count_user_accounts(start=None, end=None):
@@ -2254,7 +2644,7 @@ def _load_db_stats(account_id=None, machine_id=None):
             query = "SELECT COUNT(1) AS total FROM user_accounts"
             if clauses:
                 query += f" WHERE {' AND '.join(clauses)}"
-            row = db.conn.execute(query, tuple(params)).fetchone()
+            row = db.fetch_one(query, tuple(params))
             return int(row["total"] or 0) if row else 0
 
         user_field = "profile_url" if (account_filter or machine_filter) else "account_id"
@@ -2318,7 +2708,7 @@ def _load_db_stats(account_id=None, machine_id=None):
 
         trend = build_trend_series(now)
 
-        return {
+        result = {
             "sent_today": sent_today,
             "sent_yesterday": sent_yesterday,
             "sent_total": sent_total,
@@ -2337,12 +2727,26 @@ def _load_db_stats(account_id=None, machine_id=None):
             "max_devices": max_devices,
             "trend": trend,
         }
+        _set_runtime_read_cache(
+            DB_STATS_CACHE,
+            cache_key,
+            result,
+            DB_STATS_CACHE_TTL_SECONDS,
+        )
+        return result
     except Exception as exc:
         log.error(f"读取统计数据失败: {exc}")
         return {}
+    finally:
+        db.close()
 
 
 def _load_user_list():
+    cache_key = "all"
+    cached = _get_runtime_read_cache(USER_LIST_CACHE, cache_key)
+    if cached is not None:
+        return cached
+
     db = Database()
     try:
         db.seed_user_accounts_from_sent_history()
@@ -2372,9 +2776,16 @@ def _load_user_list():
                     "activation_code": activation_code,
                 }
             )
-        return {
+        result = {
             "users": users,
         }
+        _set_runtime_read_cache(
+            USER_LIST_CACHE,
+            cache_key,
+            result,
+            USER_LIST_CACHE_TTL_SECONDS,
+        )
+        return result
     except Exception as exc:
         log.error(f"读取用户列表失败: {exc}")
         return {
@@ -2537,6 +2948,7 @@ def _issue_agent_token_for_machine(db, owner, machine_id, client_version=""):
         token=agent_token,
         client_version=client_version or None,
     )
+    _invalidate_runtime_read_caches(clear_db_stats=True)
     return agent_token
 
 
@@ -2689,6 +3101,7 @@ def handle_client_unbind(payload):
         db.unbind_agent(verified.get("machine_id"), owner=verified.get("owner"))
     finally:
         db.close()
+    _invalidate_runtime_read_caches(clear_db_stats=True)
     return {"ok": True}
 
 
@@ -2823,7 +3236,7 @@ def _build_client_runtime_snapshot(verified, api_token=""):
     runtime_task_settings = dict(server_settings.get("task_settings") or {})
     heartbeat_ttl = float(settings.get("heartbeat_ttl", 180) or 180)
     now = time.time()
-    runtime_messages = {"templates": []}
+    runtime_messages = _normalize_messages_config(read_yaml(MESSAGES_PATH))
 
     db = Database()
     try:
@@ -2842,10 +3255,8 @@ def _build_client_runtime_snapshot(verified, api_token=""):
             machine_id=machine_id,
             api_token=api_token,
         )
-        owner_templates = db.get_message_templates(owner) or {}
-        runtime_messages = {
-            "templates": owner_templates.get("templates") or [],
-        }
+        owner_messages = db.get_message_templates(owner) or {}
+        runtime_messages = _apply_owner_messages_config(runtime_messages, owner_messages)
 
         TASK_MANAGER._cleanup_stale_machine_action_tasks(
             db,
@@ -2899,7 +3310,7 @@ def _build_client_runtime_snapshot(verified, api_token=""):
 
     with TASK_MANAGER._lock:
         owner_logs = _filter_runtime_logs(
-            list(TASK_MANAGER._logs),
+            list(TASK_MANAGER._runtime_logs),
             account_id=owner,
             machine_id=machine_id,
         )
@@ -3117,6 +3528,7 @@ def handle_agent_heartbeat(payload):
         )
     finally:
         db.close()
+    _invalidate_runtime_read_caches(clear_db_stats=True)
     return {"ok": True}
 
 
@@ -3361,6 +3773,10 @@ def handle_agent_log(payload):
                     )
                 finally:
                     db.close()
+                _invalidate_runtime_read_caches(
+                    clear_db_stats=True,
+                    clear_user_list=True,
+                )
     prefix = ""
     if owner and machine_id:
         prefix = f"[{owner}@{machine_id}] "
@@ -3371,7 +3787,11 @@ def handle_agent_log(payload):
     for line in lines:
         if not line:
             continue
-        TASK_MANAGER._append_runtime_log(f"{prefix}{line}")
+        TASK_MANAGER._append_runtime_log(
+            f"{prefix}{line}",
+            owner=owner,
+            machine_id=machine_id,
+        )
     return {"ok": True}
 
 
@@ -3438,10 +3858,14 @@ def handle_agent_collect_report(payload):
     prefix = f"[{owner}@{machine_id}] " if owner and machine_id else ""
     for row in summaries:
         TASK_MANAGER._append_runtime_log(
-            f"{prefix}窗口 {row.get('window_token') or '-'} 采集完成，共采集 {int(row.get('saved') or 0)} 个群"
+            f"{prefix}窗口 {row.get('window_token') or '-'} 采集完成，共采集 {int(row.get('saved') or 0)} 个群",
+            owner=owner,
+            machine_id=machine_id,
         )
     TASK_MANAGER._append_runtime_log(
-        f"{prefix}群组采集上报完成，共处理 {len(summaries)} 个窗口"
+        f"{prefix}群组采集上报完成，共处理 {len(summaries)} 个窗口",
+        owner=owner,
+        machine_id=machine_id,
     )
     return {
         "ok": True,
@@ -3529,6 +3953,10 @@ def handle_user_add(payload):
             expire_at=expire_at,
             activation_code=activation_code,
         )
+        _invalidate_runtime_read_caches(
+            clear_db_stats=True,
+            clear_user_list=True,
+        )
         return {"ok": True}
     finally:
         db.close()
@@ -3576,6 +4004,10 @@ def handle_user_update(payload):
         )
         if username != original_username:
             invalidate_user_sessions(original_username)
+        _invalidate_runtime_read_caches(
+            clear_db_stats=True,
+            clear_user_list=True,
+        )
         return {"ok": True}
     finally:
         db.close()
@@ -3593,6 +4025,10 @@ def handle_user_disable(payload):
         db.set_user_account_status(username, 0 if disabled else 1)
     finally:
         db.close()
+    _invalidate_runtime_read_caches(
+        clear_db_stats=True,
+        clear_user_list=True,
+    )
     if disabled:
         invalidate_user_sessions(username)
         TASK_MANAGER.stop_for_owner(username)
@@ -3610,6 +4046,10 @@ def handle_user_delete(payload):
         db.delete_user_account(username)
     finally:
         db.close()
+    _invalidate_runtime_read_caches(
+        clear_db_stats=True,
+        clear_user_list=True,
+    )
     invalidate_user_sessions(username)
     TASK_MANAGER.stop_for_owner(username)
     return {"ok": True}
@@ -3623,25 +4063,31 @@ def save_full_config(payload, actor_username=None, actor_role=None):
             db = Database()
             try:
                 existing = db.get_message_templates(actor_username) or {}
-                templates = messages_payload.get("templates")
-                if templates is None:
-                    templates = existing.get("templates") or []
+                templates = existing.get("templates")
+                if "templates" in messages_payload:
+                    templates = messages_payload.get("templates") or []
+                popup_stop_texts = existing.get("popup_stop_texts")
+                if "popup_stop_texts" in messages_payload:
+                    popup_stop_texts = _normalize_message_lines(
+                        messages_payload.get("popup_stop_texts") or []
+                    )
+                permanent_skip_texts = existing.get("permanent_skip_texts")
+                if "permanent_skip_texts" in messages_payload:
+                    permanent_skip_texts = _normalize_message_lines(
+                        messages_payload.get("permanent_skip_texts") or []
+                    )
                 db.set_message_templates(
                     actor_username,
-                    templates or [],
+                    templates,
+                    popup_stop_texts=popup_stop_texts,
+                    permanent_skip_texts=permanent_skip_texts,
                 )
             finally:
                 db.close()
         return
 
-    current_messages = read_yaml(MESSAGES_PATH) or {}
-    messages = dict(current_messages)
-    messages.update(messages_payload)
-    messages["templates"] = (
-        messages.get("templates")
-        or current_messages.get("templates")
-        or []
-    )
+    current_messages = _normalize_messages_config(read_yaml(MESSAGES_PATH) or {})
+    messages = _merge_messages_config(current_messages, messages_payload)
     write_yaml(MESSAGES_PATH, messages)
 
 

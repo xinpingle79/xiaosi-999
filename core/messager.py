@@ -342,6 +342,11 @@ class Messager:
         "您無法向此帳號傳送訊息",
         "你无法向此帐户发送消息",
         "你无法向此账户发送消息",
+        "你无法发消息给这个帐户",
+        "你无法发消息给这个账户",
+        "你無法發訊息給這個帳戶",
+        "你無法發訊息給這個帳號",
+        "你无法发消息给这个账号",
         "無法向此帳戶傳送訊息",
         "無法向此帳號傳送訊息",
         "你無法向此帳戶傳送訊息",
@@ -486,7 +491,7 @@ class Messager:
     MESSAGE_REQUEST_LIMIT_ALERT_TEXT = (
         "你已达到消息请求发送上限\n24 小时内可发起的新对话数量有限，请稍后再试。"
     )
-    def __init__(self, page, task_cfg=None, window_label=None):
+    def __init__(self, page, task_cfg=None, window_label=None, runtime_messages=None):
         self.page = page
         self.window_label = (window_label or "").strip()
         task_cfg = task_cfg or {}
@@ -521,6 +526,63 @@ class Messager:
         self.editor_ready_wait_timeout_ms = int(
             task_cfg.get("editor_ready_wait_timeout_ms", 8000) or 8000
         )
+        self.update_runtime_messages(runtime_messages)
+
+    def _normalize_runtime_message_lines(self, values):
+        return [
+            str(item).strip()
+            for item in (values or [])
+            if str(item).strip()
+        ]
+
+    def _normalize_runtime_messages(self, runtime_messages):
+        payload = runtime_messages if isinstance(runtime_messages, dict) else {}
+        popup_stop_texts = self._normalize_runtime_message_lines(
+            payload.get("popup_stop_texts") or []
+        )
+        restriction_payload = payload.get("restriction_detection_texts")
+        if not popup_stop_texts and isinstance(restriction_payload, dict):
+            popup_stop_texts = self._merge_runtime_texts(
+                restriction_payload.get("stranger_limit") or [],
+                restriction_payload.get("message_request_limit") or [],
+            )
+        legacy_permanent_skip_texts = []
+        if isinstance(restriction_payload, dict):
+            legacy_permanent_skip_texts = self._merge_runtime_texts(
+                restriction_payload.get("messenger_login_required") or [],
+                restriction_payload.get("account_cannot_message") or [],
+            )
+        return {
+            "popup_stop_texts": popup_stop_texts,
+            "permanent_skip_texts": self._merge_runtime_texts(
+                payload.get("permanent_skip_texts") or [],
+                legacy_permanent_skip_texts,
+            ),
+        }
+
+    def _merge_runtime_texts(self, defaults, extra_texts):
+        merged = []
+        seen = set()
+        for item in list(defaults or []) + list(extra_texts or []):
+            normalized = str(item or "").strip()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            merged.append(normalized)
+        return merged
+
+    def update_runtime_messages(self, runtime_messages=None):
+        normalized = self._normalize_runtime_messages(runtime_messages)
+        self.runtime_message_rules = normalized
+        self.RUNTIME_POPUP_STOP_TEXTS = self._merge_runtime_texts(
+            [],
+            normalized.get("popup_stop_texts") or [],
+        )
+        self.RUNTIME_PERMANENT_SKIP_TEXTS = self._merge_runtime_texts(
+            [],
+            normalized.get("permanent_skip_texts") or [],
+        )
+        return normalized
 
     def _prefix(self):
         return f"[{self.window_label}] " if self.window_label else ""
@@ -3043,6 +3105,10 @@ class Messager:
             return "messenger_login_required"
         if self._matches_any_text(normalized, self.ACCOUNT_CANNOT_MESSAGE_TEXTS):
             return "account_cannot_message"
+        if self._matches_any_text(normalized, self.RUNTIME_PERMANENT_SKIP_TEXTS):
+            return "configured_permanent_skip"
+        if self._matches_any_text(normalized, self.RUNTIME_POPUP_STOP_TEXTS):
+            return "send_restricted_ui"
         if self._matches_identity_verification_send_restricted_text(normalized):
             return "send_restricted_ui"
         if self._matches_any_text(normalized, self.DELIVERY_FAILURE_TEXTS):
@@ -3137,6 +3203,7 @@ class Messager:
         reason_label_map = {
             "messenger_login_required": "未登录 Messenger",
             "account_cannot_message": "当前无法私聊该成员",
+            "configured_permanent_skip": "永久跳过提醒词",
         }
         reason_label = reason_label_map.get(normalized_reason, normalized_reason)
         log_text = ""
@@ -3248,6 +3315,7 @@ class Messager:
         return normalized_reason in {
             "messenger_login_required",
             "account_cannot_message",
+            "configured_permanent_skip",
         }
 
     def _default_skip_alert_text(self, reason):
@@ -3256,6 +3324,8 @@ class Messager:
             return "对方当前未登录 Messenger，暂时无法发起对话，已跳过。"
         if normalized_reason == "account_cannot_message":
             return "当前无法向该成员发起私聊，已跳过。"
+        if normalized_reason == "configured_permanent_skip":
+            return "命中永久跳过提醒词，已跳过当前成员。"
         return ""
 
     def _sanitize_restriction_alert_text(self, reason, alert_text):

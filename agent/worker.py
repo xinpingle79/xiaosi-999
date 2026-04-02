@@ -37,6 +37,47 @@ ENV_SELECTED_WINDOW_GROUPS_FILE = "FB_RPA_SELECTED_WINDOW_GROUPS_FILE"
 _RUNTIME_DIR = ""
 DEFAULT_BIT_API = ""
 DEFAULT_POLL_INTERVAL = 2.0
+LEGACY_POPUP_STOP_RULE_GROUP_KEYS = (
+    "stranger_limit",
+    "message_request_limit",
+)
+LEGACY_PERMANENT_SKIP_RULE_GROUP_KEYS = (
+    "messenger_login_required",
+    "account_cannot_message",
+)
+SERVER_KEY_LOG_SUBSTRINGS = (
+    "已自动识别 ",
+    "个比特浏览器窗口，将顺序接入",
+    "未获取到任何可用的比特浏览器窗口，任务结束。",
+    "检测到 Facebook checkpoint 账号异常页",
+    "温馨提示：",
+    "已成功接入 BitBrowser 会话，开始按小组顺序执行成员私聊...",
+    "✅ 成员页消息已发送:",
+    "处理成员失败，保留原断点等待下次重试:",
+    "断点保留：成员 ",
+    "检测到静默失败信号:",
+    "点赞型探针未恢复窗口健康，继续保留静默失败计数:",
+    "检测到账号异常或风控限制，立即停止当前账号:",
+    "当前窗口收到停止信号，已结束当前任务。",
+    "当前窗口因账号异常或风控已停止",
+    "当前窗口连接浏览器失败，未能启动发送任务。",
+    "当前窗口未能生成窗口级运行标识，已跳过本窗口。",
+    "当前窗口正式发送文案为空，未能启动发送任务。",
+    "当前窗口未能收集到任何已加入小组，流程已结束。",
+    "当前窗口未配置任何已选群，已跳过正式运行。",
+    "当前运行未命中窗口白名单，已跳过正式运行。",
+    "当前窗口白名单中的群未出现在已加入小组列表中，未启动正式运行。",
+    "当前窗口因陌生消息额度上限已停止",
+    "当前窗口因消息请求发送上限已停止",
+    "当前窗口因当前无法发送已停止",
+    "当前窗口因聊天窗口状态异常已停止",
+    "当前窗口已达到发送额度上限，停止继续处理后续成员",
+    "当前窗口账号已禁用，已停止运行",
+    "当前窗口任务已正常完成。",
+    "当前窗口任务已结束，完成 ",
+    "当前任务结束仅退出执行进程，保留 BitBrowser 窗口。",
+    "本轮全部窗口已处理结束，",
+)
 
 
 def _user_data_root() -> Path:
@@ -111,6 +152,10 @@ def _selected_window_groups_path(owner, task_id=None, window_token=""):
     )
 
 
+def _runtime_messages_path():
+    return _runtime_path("data", "runtime_messages.yaml")
+
+
 def _load_json(path):
     if not path.exists():
         return {}
@@ -144,6 +189,14 @@ def _load_license():
 def _save_json(path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _save_yaml(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        yaml.safe_dump(data, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
 
 
 def _save_license(data):
@@ -345,6 +398,54 @@ def _normalize_message_templates(templates):
     ]
 
 
+def _normalize_message_lines(values):
+    return [
+        str(item).strip()
+        for item in (values or [])
+        if str(item).strip()
+    ]
+
+
+def _merge_message_lines(*groups):
+    merged = []
+    seen = set()
+    for group in groups:
+        for item in _normalize_message_lines(group or []):
+            if item in seen:
+                continue
+            seen.add(item)
+            merged.append(item)
+    return merged
+
+
+def _normalize_runtime_messages(messages):
+    payload = messages if isinstance(messages, dict) else {}
+    popup_stop_texts = _normalize_message_lines(payload.get("popup_stop_texts") or [])
+    restriction_payload = payload.get("restriction_detection_texts")
+    if not popup_stop_texts and isinstance(restriction_payload, dict):
+        popup_stop_texts = _merge_message_lines(
+            *[
+                restriction_payload.get(key) or []
+                for key in LEGACY_POPUP_STOP_RULE_GROUP_KEYS
+            ]
+        )
+    legacy_permanent_skip_texts = []
+    if isinstance(restriction_payload, dict):
+        legacy_permanent_skip_texts = _merge_message_lines(
+            *[
+                restriction_payload.get(key) or []
+                for key in LEGACY_PERMANENT_SKIP_RULE_GROUP_KEYS
+            ]
+        )
+    return {
+        "popup_stop_texts": popup_stop_texts,
+        "permanent_skip_texts": _merge_message_lines(
+            payload.get("permanent_skip_texts") or [],
+            legacy_permanent_skip_texts,
+        ),
+    }
+
+
 def _normalize_runtime_task_settings(task_settings):
     if not isinstance(task_settings, dict):
         return {}
@@ -375,13 +476,13 @@ def _save_client_config(target, config):
 
 
 def _sync_runtime_owner_message_templates(owner, messages):
-    from utils.helpers import Database
+    from utils.helpers import RuntimeDatabase
 
     owner = str(owner or "").strip()
     if not owner or not isinstance(messages, dict):
         return False
     templates = _normalize_message_templates(messages.get("templates") or [])
-    db = Database(db_path=str(_runtime_path("data", "server.db")))
+    db = RuntimeDatabase(db_path=str(_runtime_path("data", "server.db")))
     try:
         existing = db.get_message_templates(owner) or {}
         existing_templates = _normalize_message_templates(existing.get("templates") or [])
@@ -394,6 +495,16 @@ def _sync_runtime_owner_message_templates(owner, messages):
         return True
     finally:
         db.close()
+
+
+def _sync_runtime_message_rules(messages):
+    normalized = _normalize_runtime_messages(messages)
+    path = _runtime_messages_path()
+    existing = _normalize_runtime_messages(_load_yaml(path))
+    if existing == normalized:
+        return False
+    _save_yaml(path, normalized)
+    return True
 
 
 def _sync_authoritative_task_settings(config_path=None, task_settings=None):
@@ -431,6 +542,7 @@ def _sync_runtime_bundle(cfg, config_path=None):
         config_path=config_path,
         task_settings=info.get("task_settings"),
     )
+    _sync_runtime_message_rules(info.get("messages") or {})
     _sync_runtime_owner_message_templates(
         info.get("owner") or cfg.get("owner") or "",
         info.get("messages") or {},
@@ -578,6 +690,13 @@ def _heartbeat_loop(cfg, stop_event, worker, config_path=None):
                     config_path=config_path,
                 )
                 break
+        try:
+            _sync_runtime_bundle(
+                cfg,
+                config_path=config_path,
+            )
+        except Exception:
+            pass
         stop_event.wait(30)
 
 
@@ -588,15 +707,37 @@ class Worker:
         self.single_processes = {}
         self.lock = threading.Lock()
 
-    def _send_log(self, owner, line):
-        if not line:
+    def _emit_local_log(self, owner, line):
+        normalized_line = str(line or "").rstrip("\r\n")
+        if not normalized_line:
+            return
+        normalized_owner = str(owner or "").strip()
+        text = f"[{normalized_owner}] {normalized_line}" if normalized_owner else normalized_line
+        try:
+            print(text, flush=True)
+        except Exception:
+            try:
+                sys.stdout.write(text + "\n")
+                sys.stdout.flush()
+            except Exception:
+                pass
+
+    def _should_forward_server_log(self, line):
+        normalized_line = str(line or "").strip()
+        if not normalized_line:
+            return False
+        return any(token in normalized_line for token in SERVER_KEY_LOG_SUBSTRINGS)
+
+    def _emit_server_key_log(self, owner, line):
+        normalized_line = str(line or "").rstrip("\r\n")
+        if not normalized_line or not self._should_forward_server_log(normalized_line):
             return
         _post_agent_json(
             self.cfg,
             f"{self.cfg['server_url']}/api/agent/log",
             {
                 "owner": owner or "",
-                "lines": [line],
+                "lines": [normalized_line],
             },
             timeout=5,
         )
@@ -628,9 +769,9 @@ class Worker:
                 if not line:
                     break
                 decoded = self._decode_output_line(line).rstrip("\r\n")
-                self._send_log(owner, decoded)
+                self._emit_server_key_log(owner, decoded)
         except Exception as exc:
-            self._send_log(owner, f"[worker] 输出流读取异常: {exc}")
+            self._emit_local_log(owner, f"[worker] 输出流读取异常: {exc}")
         finally:
             exit_code = process.wait()
             with self.lock:
@@ -730,7 +871,7 @@ class Worker:
                 config_path=self.cfg.get("config_path"),
             )
         except Exception as exc:
-            self._send_log(owner, f"[worker] 启动前同步运行配置失败：{exc}")
+            self._emit_local_log(owner, f"[worker] 启动前同步运行配置失败：{exc}")
         if IS_FROZEN:
             main_exe = ROOT_DIR / "FB_RPA_Main.exe"
             if not main_exe.exists():
@@ -756,7 +897,7 @@ class Worker:
             if selected_window_groups_file:
                 launch_payload["selected_window_groups_file"] = selected_window_groups_file
         except Exception as exc:
-            self._send_log(owner, f"[worker] 写入窗口白名单运行投影失败：{exc}")
+            self._emit_local_log(owner, f"[worker] 写入窗口白名单运行投影失败：{exc}")
         env = self._build_env(owner, launch_payload)
         if owner:
             stop_flag = _stop_flag_path(owner)
@@ -923,11 +1064,10 @@ class Worker:
         except Exception:
             max_scrolls = 8
 
-        self._send_log(owner, "[采集] 已收到群组采集任务，开始准备窗口采集。")
+        self._emit_local_log(owner, "[采集] 已收到群组采集任务，开始准备窗口采集。")
         result = collect_groups_for_machine(
             browser_settings=browser_settings,
             max_scrolls=max_scrolls,
-            log_callback=lambda line: self._send_log(owner, line),
         )
         windows = list(result.get("windows") or [])
         if int(result.get("profile_count") or 0) <= 0:
@@ -949,22 +1089,13 @@ class Worker:
             timeout=60,
         )
         if status_code != 200 or not isinstance(collect_result, dict) or not collect_result.get("ok"):
-            self._send_log(owner, "[采集] 采集结果上报失败。")
+            self._emit_local_log(owner, "[采集] 采集结果上报失败。")
             _post_agent_json(
                 self.cfg,
                 f"{self.cfg['server_url']}/api/agent/report",
                 {"task_id": task_id, "status": "failed", "error": "collect_report_failed"},
             )
             return
-
-        self._send_log(
-            owner,
-            (
-                f"[采集] 采集完成：成功窗口 {int(result.get('collected_window_count') or 0)} 个，"
-                f"失败窗口 {int(result.get('failed_window_count') or 0)} 个，"
-                f"累计群组 {int(result.get('total_groups') or 0)} 个。"
-            ),
-        )
         _post_agent_json(
             self.cfg,
             f"{self.cfg['server_url']}/api/agent/report",

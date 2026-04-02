@@ -1,5 +1,13 @@
 min_client_version: ""
 runtime_dir: ""
+database:
+  driver: mysql
+  host: 127.0.0.1
+  port: 3306
+  name: ""
+  user: ""
+  password: ""
+  charset: utf8mb4
 web_ui:
   host: 0.0.0.0
   port: 43090

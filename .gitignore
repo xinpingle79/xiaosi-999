@@ -6,6 +6,8 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+.venv/
+.venv/**
 
 build/
 dist/

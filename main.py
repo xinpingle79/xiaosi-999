@@ -20,7 +20,7 @@ from playwright.sync_api import sync_playwright
 from core.browser_manager import BrowserManager
 from core.messager import Messager
 from core.scraper import Scraper
-from utils.helpers import Database, runtime_flag_active, wait_if_runtime_paused
+from utils.helpers import RuntimeDatabase, runtime_flag_active, wait_if_runtime_paused
 from utils.logger import log
 
 warnings.filterwarnings("ignore")
@@ -82,7 +82,7 @@ def run_task(window_token=None):
     runtime_dir = (config.get("runtime_dir") or "").strip()
     if runtime_dir and not os.environ.get(ENV_RUNTIME_DIR):
         os.environ[ENV_RUNTIME_DIR] = runtime_dir
-    bootstrap_db = Database()
+    bootstrap_db = RuntimeDatabase()
     bootstrap_db.close()
     start_cleanup_daemon(config)
 
@@ -118,6 +118,85 @@ def _normalize_message_templates(templates):
         for item in (templates or [])
         if str(item).strip()
     ]
+
+
+LEGACY_POPUP_STOP_RULE_GROUP_KEYS = (
+    "stranger_limit",
+    "message_request_limit",
+)
+LEGACY_PERMANENT_SKIP_RULE_GROUP_KEYS = (
+    "messenger_login_required",
+    "account_cannot_message",
+)
+DEFAULT_PERMANENT_SKIP_REASONS = {
+    "messenger_login_required",
+    "account_cannot_message",
+    "configured_permanent_skip",
+}
+
+
+def _normalize_message_lines(values):
+    return [
+        str(item).strip()
+        for item in (values or [])
+        if str(item).strip()
+    ]
+
+
+def _merge_message_lines(*groups):
+    merged = []
+    seen = set()
+    for group in groups:
+        for item in _normalize_message_lines(group or []):
+            if item in seen:
+                continue
+            seen.add(item)
+            merged.append(item)
+    return merged
+
+
+def _normalize_runtime_messages(messages):
+    payload = messages if isinstance(messages, dict) else {}
+    popup_stop_texts = _normalize_message_lines(payload.get("popup_stop_texts") or [])
+    restriction_payload = payload.get("restriction_detection_texts")
+    if not popup_stop_texts and isinstance(restriction_payload, dict):
+        popup_stop_texts = _merge_message_lines(
+            *[
+                restriction_payload.get(key) or []
+                for key in LEGACY_POPUP_STOP_RULE_GROUP_KEYS
+            ]
+        )
+    legacy_permanent_skip_texts = []
+    if isinstance(restriction_payload, dict):
+        legacy_permanent_skip_texts = _merge_message_lines(
+            *[
+                restriction_payload.get(key) or []
+                for key in LEGACY_PERMANENT_SKIP_RULE_GROUP_KEYS
+            ]
+        )
+    return {
+        "popup_stop_texts": popup_stop_texts,
+        "permanent_skip_texts": _merge_message_lines(
+            payload.get("permanent_skip_texts") or [],
+            legacy_permanent_skip_texts,
+        ),
+    }
+
+
+def _normalize_match_text(text):
+    normalized = re.sub(r"\s+", "", str(text or "")).strip().lower()
+    return normalized
+
+
+def _matches_configured_texts(text, configured_texts):
+    normalized_text = _normalize_match_text(text)
+    if not normalized_text:
+        return False
+    for item in configured_texts or []:
+        normalized_item = _normalize_match_text(item)
+        if normalized_item and normalized_item in normalized_text:
+            return True
+    return False
 
 
 def _extract_group_id(group_url):
@@ -335,6 +414,22 @@ def _restart_requests_file(config):
     return _runtime_path(config, "data", "restart_window_requests.txt")
 
 
+def _runtime_messages_file(config):
+    return _runtime_path(config, "data", "runtime_messages.yaml")
+
+
+def load_runtime_message_rules(config):
+    path = _runtime_messages_file(config)
+    if not path.exists():
+        return _normalize_runtime_messages({})
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            payload = yaml.safe_load(f) or {}
+    except Exception:
+        payload = {}
+    return _normalize_runtime_messages(payload)
+
+
 def build_browser_settings(config):
     bit_api_override = (os.environ.get(ENV_BIT_API) or "").strip()
     api_token_override = (os.environ.get(ENV_API_TOKEN) or "").strip()
@@ -385,10 +480,15 @@ def _limit_target_groups_for_single_run(group_urls=None, account_prefix=""):
     return normalized[:1]
 
 
-def _is_permanent_skip_reason(reason):
-    return str(reason or "").strip() in {
-        "messenger_login_required",
-    }
+def _is_permanent_skip_reason(reason, alert_text="", runtime_messages=None):
+    normalized_reason = str(reason or "").strip()
+    if normalized_reason in DEFAULT_PERMANENT_SKIP_REASONS:
+        return True
+    runtime_payload = _normalize_runtime_messages(runtime_messages)
+    return _matches_configured_texts(
+        alert_text,
+        runtime_payload.get("permanent_skip_texts") or [],
+    )
 
 
 def _log_window_finish_reason(summary, label, continue_other_windows=False):
@@ -600,7 +700,7 @@ def run_single_session(
     startup_ready_event=None,
     startup_ready_state=None,
 ):
-    db = Database()
+    db = RuntimeDatabase()
     task_cfg = config["task_settings"]
     bm = BrowserManager(browser_settings)
     session = None
@@ -612,6 +712,7 @@ def run_single_session(
     formal_templates = template_resolution["templates"]
     template_source = template_resolution["template_source"]
     template_stats = template_resolution["stats"]
+    runtime_message_rules = load_runtime_message_rules(config)
     startup_gate_released = False
     alert_account_id = label or "默认窗口"
 
@@ -652,7 +753,12 @@ def run_single_session(
                     log.error(f"[{alert_account_id}] 未能生成窗口级 scope_id，跳过当前窗口。")
                     return _build_window_summary(alert_account_id, "window_scope_unresolved")
                 scraper = Scraper(page, window_label=alert_account_id)
-                sender = Messager(page, task_cfg, window_label=alert_account_id)
+                sender = Messager(
+                    page,
+                    task_cfg,
+                    window_label=alert_account_id,
+                    runtime_messages=runtime_message_rules,
+                )
                 max_messages = normalize_message_limit(task_cfg.get("max_messages_per_account", 0))
                 page = resolve_active_runtime_page(page, scraper=scraper, sender=sender)
                 checkpoint_url = detect_checkpoint_account_issue(
@@ -673,6 +779,11 @@ def run_single_session(
                     f"local_formal={template_stats['local_formal']}，"
                     f"owner_formal={template_stats['owner_formal']}，"
                     f"active={len(formal_templates)}"
+                )
+                log.info(
+                    f"[{alert_account_id}] 限制词装载完成："
+                    f"popup_stop={len(runtime_message_rules.get('popup_stop_texts') or [])}，"
+                    f"permanent_skip={len(runtime_message_rules.get('permanent_skip_texts') or [])}"
                 )
                 log.info(
                     f"[{alert_account_id}] 发送频率来源：source=client_yaml.task_settings.send_interval_seconds"
@@ -795,6 +906,7 @@ def run_single_session(
                         db=db,
                         config=config,
                         local_messages=msgs,
+                        runtime_messages=runtime_message_rules,
                         account_id=account_id,
                         scope_id=scope_id,
                         machine_id=machine_id,
@@ -1336,6 +1448,7 @@ def process_current_group(
     db,
     config,
     local_messages,
+    runtime_messages,
     account_id,
     scope_id,
     machine_id,
@@ -1391,6 +1504,7 @@ def process_current_group(
             db=db,
             config=config,
             local_messages=local_messages,
+            runtime_messages=runtime_messages,
             account_id=account_id,
             scope_id=scope_id,
             machine_id=machine_id,
@@ -1421,6 +1535,7 @@ def process_current_group(
         db=db,
         config=config,
         local_messages=local_messages,
+        runtime_messages=runtime_messages,
         account_id=account_id,
         scope_id=scope_id,
         machine_id=machine_id,
@@ -1446,6 +1561,7 @@ def process_member_targets(
     db,
     config,
     local_messages,
+    runtime_messages,
     account_id,
     scope_id,
     machine_id,
@@ -1464,6 +1580,7 @@ def process_member_targets(
     delivery_runtime_state=None,
 ):
     delivery_runtime_state = ensure_delivery_runtime_state(delivery_runtime_state)
+    runtime_message_rules = _normalize_runtime_messages(runtime_messages)
     seen_profiles = set()
     found_cursor = not skip_until_cursor
     messages_sent = 0
@@ -1763,6 +1880,16 @@ def process_member_targets(
             ui_settle_sleep()
             continue
 
+        latest_runtime_message_rules = load_runtime_message_rules(config)
+        if latest_runtime_message_rules != runtime_message_rules:
+            runtime_message_rules = latest_runtime_message_rules
+            sender.update_runtime_messages(runtime_message_rules)
+            log.info(
+                f"🧩 限制词热更新："
+                f"popup_stop={len(runtime_message_rules.get('popup_stop_texts') or [])}，"
+                f"permanent_skip={len(runtime_message_rules.get('permanent_skip_texts') or [])}"
+            )
+
         latest_template_resolution = load_runtime_message_templates(
             db=db,
             owner_username=owner_username,
@@ -1876,7 +2003,11 @@ def process_member_targets(
             delivery_runtime_state["delivery_not_confirmed_streak"] = 0
             skip_reason = str(result.get("reason") or "").strip()
             log.info(f"跳过成员 {target['name']}: {skip_reason}")
-            if _is_permanent_skip_reason(skip_reason):
+            if _is_permanent_skip_reason(
+                skip_reason,
+                alert_text=result.get("alert_text"),
+                runtime_messages=runtime_message_rules,
+            ):
                 db.save_cursor(group_id, target, account_id=account_id, scope_id=scope_id)
                 log.info(
                     f"断点推进：成员 {target['name']} 命中永久跳过原因 {skip_reason}，已更新 cursor。"
@@ -2175,7 +2306,7 @@ def start_cleanup_daemon(config=None):
         while True:
             time.sleep(_seconds_until_next_midnight())
             try:
-                db = Database()
+                db = RuntimeDatabase()
                 try:
                     db.cleanup_old_history(history_days=CLEANUP_HISTORY_DAYS, claim_days=3)
                 finally:

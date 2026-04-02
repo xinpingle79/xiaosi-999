@@ -449,14 +449,15 @@ button.ghost:active {
   background: linear-gradient(180deg, #d9e3f2 0%, #eef4fc 100%);
 }
 
-button:disabled {
+button:disabled,
+button.is-blocked,
+button[aria-disabled="true"] {
   background: linear-gradient(180deg, #f5f7fb 0%, #e8edf5 100%);
   border-color: #d2dae8;
-  color: #000000;
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.92),
-    inset 0 -1px 0 rgba(205, 214, 228, 0.9);
-  opacity: 1;
+  color: #7e8da5;
+  box-shadow: none;
+  opacity: 0.72;
+  filter: saturate(0.55);
   cursor: not-allowed;
 }
 

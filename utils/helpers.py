@@ -7,12 +7,142 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import parse_qs, urljoin, urlparse
 
+import yaml
+
 from utils.logger import log
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+SERVER_SETTINGS_PATH = BASE_DIR / "config" / "server.yaml"
 ENV_STOP_FLAG = "FB_RPA_STOP_FLAG"
 ENV_PAUSE_FLAG = "FB_RPA_PAUSE_FLAG"
+
+
+def _read_yaml_dict(path):
+    target = Path(path)
+    if not target.exists():
+        return {}
+    try:
+        with open(target, "r", encoding="utf-8") as handle:
+            data = yaml.safe_load(handle) or {}
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _normalize_message_list(values):
+    return [
+        str(item).strip()
+        for item in (values or [])
+        if str(item).strip()
+    ]
+
+
+def _decode_optional_json_list(raw_value):
+    if raw_value is None:
+        return None
+    try:
+        payload = json.loads(raw_value) if raw_value else []
+    except Exception:
+        payload = []
+    return _normalize_message_list(payload)
+
+
+def _normalize_mysql_result_value(value):
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%d %H:%M:%S")
+    return value
+
+
+def _normalize_mysql_result_row(row):
+    if not row:
+        return row
+    if isinstance(row, dict):
+        return {
+            key: _normalize_mysql_result_value(value)
+            for key, value in row.items()
+        }
+    return row
+
+
+class _MySQLCompatResult:
+    def __init__(self, cursor):
+        self._cursor = cursor
+        self.lastrowid = getattr(cursor, "lastrowid", None)
+        self.rowcount = getattr(cursor, "rowcount", 0)
+
+    def fetchone(self):
+        try:
+            row = self._cursor.fetchone()
+            return _normalize_mysql_result_row(row)
+        finally:
+            self.close()
+
+    def fetchall(self):
+        try:
+            rows = self._cursor.fetchall()
+            return [_normalize_mysql_result_row(row) for row in list(rows or [])]
+        finally:
+            self.close()
+
+    def close(self):
+        cursor = self._cursor
+        if cursor is None:
+            return
+        self._cursor = None
+        try:
+            cursor.close()
+        except Exception:
+            pass
+
+
+class _MySQLCompatConnection:
+    _RESULT_PREFIXES = ("SELECT", "SHOW", "DESCRIBE", "EXPLAIN")
+
+    def __init__(self, raw_conn):
+        self._raw = raw_conn
+        self._last_rowcount = 0
+
+    def _normalize_params(self, params=None):
+        if params is None:
+            return ()
+        if isinstance(params, tuple):
+            return params
+        if isinstance(params, list):
+            return tuple(params)
+        return (params,)
+
+    def _translate_query(self, query):
+        return str(query or "").replace("?", "%s")
+
+    def _is_result_query(self, query):
+        statement = str(query or "").lstrip().upper()
+        return statement.startswith(self._RESULT_PREFIXES)
+
+    @property
+    def total_changes(self):
+        try:
+            return max(int(self._last_rowcount or 0), 0)
+        except Exception:
+            return 0
+
+    def execute(self, query, params=None):
+        cursor = self._raw.cursor()
+        cursor.execute(self._translate_query(query), self._normalize_params(params))
+        self._last_rowcount = getattr(cursor, "rowcount", 0)
+        result = _MySQLCompatResult(cursor)
+        if not self._is_result_query(query):
+            result.close()
+        return result
+
+    def commit(self):
+        self._raw.commit()
+
+    def rollback(self):
+        self._raw.rollback()
+
+    def close(self):
+        self._raw.close()
 
 
 def _runtime_dir():
@@ -123,7 +253,7 @@ def _generate_uuid_code(existing=None):
             return code
 
 
-class Database:
+class _SQLiteDatabaseBase:
     LEGACY_GROUP_SCOPE = "__legacy_global__"
 
     def __init__(self, db_path=None):
@@ -293,6 +423,24 @@ class Database:
             """
             CREATE UNIQUE INDEX IF NOT EXISTS idx_sent_history_group_user_id
             ON sent_history(scope_id, group_id, user_id)
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_sent_history_status_created_at
+            ON sent_history(status, created_at)
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_sent_history_account_created_at
+            ON sent_history(account_id, created_at)
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_sent_history_machine_created_at
+            ON sent_history(machine_id, created_at)
             """
         )
 
@@ -743,6 +891,7 @@ class Database:
         columns = self._fetch_table_columns("agent_registry")
         if not columns:
             self._create_agent_registry_table()
+            self._ensure_agent_registry_indexes()
             return
         expected = {
             "machine_id",
@@ -770,6 +919,7 @@ class Database:
                 self.conn.execute("ALTER TABLE agent_registry ADD COLUMN token TEXT")
             elif column == "client_version":
                 self.conn.execute("ALTER TABLE agent_registry ADD COLUMN client_version TEXT")
+        self._ensure_agent_registry_indexes()
 
     def _create_agent_registry_table(self):
         self.conn.execute(
@@ -787,10 +937,31 @@ class Database:
             """
         )
 
+    def _ensure_agent_registry_indexes(self):
+        self.conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_agent_registry_token
+            ON agent_registry(token)
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_agent_registry_owner_status_last_seen
+            ON agent_registry(owner, status, last_seen, created_at)
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_agent_registry_owner_last_seen
+            ON agent_registry(owner, last_seen, created_at)
+            """
+        )
+
     def _migrate_agent_tasks(self):
         columns = self._fetch_table_columns("agent_tasks")
         if not columns:
             self._create_agent_tasks_table()
+            self._ensure_agent_tasks_indexes()
             return
         expected = {
             "id",
@@ -829,6 +1000,7 @@ class Database:
                 self.conn.execute("ALTER TABLE agent_tasks ADD COLUMN created_at REAL")
             elif column == "updated_at":
                 self.conn.execute("ALTER TABLE agent_tasks ADD COLUMN updated_at REAL")
+        self._ensure_agent_tasks_indexes()
 
     def _create_agent_tasks_table(self):
         self.conn.execute(
@@ -846,6 +1018,20 @@ class Database:
                 created_at REAL,
                 updated_at REAL
             )
+            """
+        )
+
+    def _ensure_agent_tasks_indexes(self):
+        self.conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_agent_tasks_machine_status_id
+            ON agent_tasks(assigned_machine_id, status, id)
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_agent_tasks_action_status_owner_id
+            ON agent_tasks(action, status, owner, id)
             """
         )
 
@@ -931,12 +1117,35 @@ class Database:
     def _migrate_message_templates(self):
         columns = self._fetch_table_columns("message_templates")
         if columns:
-            expected = {"username", "templates", "updated_at"}
+            expected = {
+                "username",
+                "templates",
+                "popup_stop_texts",
+                "permanent_skip_texts",
+                "updated_at",
+            }
             if expected.issubset(columns) and "probe_templates" not in columns:
                 return
+            template_column = "templates" if "templates" in columns else "NULL AS templates"
+            popup_stop_column = (
+                "popup_stop_texts"
+                if "popup_stop_texts" in columns
+                else "NULL AS popup_stop_texts"
+            )
+            permanent_skip_column = (
+                "permanent_skip_texts"
+                if "permanent_skip_texts" in columns
+                else "NULL AS permanent_skip_texts"
+            )
+            updated_at_column = "updated_at" if "updated_at" in columns else "NULL AS updated_at"
             legacy_rows = self.conn.execute(
-                """
-                SELECT username, templates, updated_at
+                f"""
+                SELECT
+                    username,
+                    {template_column},
+                    {popup_stop_column},
+                    {permanent_skip_column},
+                    {updated_at_column}
                 FROM message_templates
                 """
             ).fetchall()
@@ -946,6 +1155,8 @@ class Database:
                 CREATE TABLE IF NOT EXISTS message_templates (
                     username TEXT NOT NULL PRIMARY KEY,
                     templates TEXT,
+                    popup_stop_texts TEXT,
+                    permanent_skip_texts TEXT,
                     updated_at DATETIME
                 )
                 """
@@ -954,11 +1165,17 @@ class Database:
                 self.conn.executemany(
                     """
                     INSERT OR REPLACE INTO message_templates
-                    (username, templates, updated_at)
-                    VALUES (?, ?, ?)
+                    (username, templates, popup_stop_texts, permanent_skip_texts, updated_at)
+                    VALUES (?, ?, ?, ?, ?)
                     """,
                     [
-                        (row["username"], row["templates"], row["updated_at"])
+                        (
+                            row["username"],
+                            row["templates"],
+                            row["popup_stop_texts"],
+                            row["permanent_skip_texts"],
+                            row["updated_at"],
+                        )
                         for row in legacy_rows
                     ],
                 )
@@ -969,6 +1186,8 @@ class Database:
             CREATE TABLE IF NOT EXISTS message_templates (
                 username TEXT NOT NULL PRIMARY KEY,
                 templates TEXT,
+                popup_stop_texts TEXT,
+                permanent_skip_texts TEXT,
                 updated_at DATETIME
             )
             """
@@ -998,7 +1217,7 @@ class Database:
             return None
         row = self.conn.execute(
             """
-            SELECT templates
+            SELECT templates, popup_stop_texts, permanent_skip_texts
             FROM message_templates
             WHERE username = ?
             """,
@@ -1006,25 +1225,57 @@ class Database:
         ).fetchone()
         if not row:
             return None
-        try:
-            templates = json.loads(row["templates"]) if row["templates"] else []
-        except Exception:
-            templates = []
-        return {"templates": templates}
+        templates = _decode_optional_json_list(row["templates"])
+        popup_stop_texts = _decode_optional_json_list(row["popup_stop_texts"])
+        permanent_skip_texts = _decode_optional_json_list(row["permanent_skip_texts"])
+        return {
+            "templates": templates,
+            "popup_stop_texts": popup_stop_texts,
+            "permanent_skip_texts": permanent_skip_texts,
+        }
 
-    def set_message_templates(self, username, templates):
+    def set_message_templates(
+        self,
+        username,
+        templates,
+        popup_stop_texts=None,
+        permanent_skip_texts=None,
+    ):
         username = (username or "").strip()
         if not username:
             return
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        templates_payload = json.dumps(templates or [], ensure_ascii=False)
+        templates_payload = None
+        if templates is not None:
+            templates_payload = json.dumps(
+                _normalize_message_list(templates or []),
+                ensure_ascii=False,
+            )
+        popup_stop_payload = None
+        if popup_stop_texts is not None:
+            popup_stop_payload = json.dumps(
+                _normalize_message_list(popup_stop_texts),
+                ensure_ascii=False,
+            )
+        permanent_skip_payload = None
+        if permanent_skip_texts is not None:
+            permanent_skip_payload = json.dumps(
+                _normalize_message_list(permanent_skip_texts),
+                ensure_ascii=False,
+            )
         self.conn.execute(
             """
             INSERT OR REPLACE INTO message_templates
-            (username, templates, updated_at)
-            VALUES (?, ?, ?)
+            (username, templates, popup_stop_texts, permanent_skip_texts, updated_at)
+            VALUES (?, ?, ?, ?, ?)
             """,
-            (username, templates_payload, now),
+            (
+                username,
+                templates_payload,
+                popup_stop_payload,
+                permanent_skip_payload,
+                now,
+            ),
         )
         self.conn.commit()
 
@@ -1820,6 +2071,7 @@ class Database:
         if not machine_id:
             return
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        task_now = time.time()
         if owner:
             self.conn.execute(
                 "DELETE FROM agent_registry WHERE machine_id = ? AND owner = ?",
@@ -1828,10 +2080,18 @@ class Database:
             self.conn.execute(
                 """
                 UPDATE device_configs
-                SET machine_id = NULL, updated_at = ?
+                SET machine_id = NULL, status = 0, updated_at = ?
                 WHERE owner = ? AND machine_id = ?
                 """,
                 (now, owner, machine_id),
+            )
+            self.conn.execute(
+                """
+                UPDATE agent_tasks
+                SET status = 'failed', error = ?, updated_at = ?
+                WHERE owner = ? AND assigned_machine_id = ? AND status IN ('pending', 'running')
+                """,
+                ("device_unbound_cleanup", task_now, owner, machine_id),
             )
         else:
             self.conn.execute(
@@ -1841,10 +2101,18 @@ class Database:
             self.conn.execute(
                 """
                 UPDATE device_configs
-                SET machine_id = NULL, updated_at = ?
+                SET machine_id = NULL, status = 0, updated_at = ?
                 WHERE machine_id = ?
                 """,
                 (now, machine_id),
+            )
+            self.conn.execute(
+                """
+                UPDATE agent_tasks
+                SET status = 'failed', error = ?, updated_at = ?
+                WHERE assigned_machine_id = ? AND status IN ('pending', 'running')
+                """,
+                ("device_unbound_cleanup", task_now, machine_id),
             )
         self.conn.commit()
 
@@ -2421,3 +2689,1036 @@ class Database:
             conditions.append("user_id = ?")
             params.append(normalized_user_id)
         return conditions, params
+
+
+class RuntimeDatabase(_SQLiteDatabaseBase):
+    pass
+
+
+class ServerDatabase(_SQLiteDatabaseBase):
+    _SERVICE_TABLES = {
+        "sent_history": (
+            "id",
+            "scope_id",
+            "account_id",
+            "group_id",
+            "profile_url",
+            "user_id",
+            "status",
+            "created_at",
+            "machine_id",
+        ),
+        "message_templates": (
+            "username",
+            "templates",
+            "popup_stop_texts",
+            "permanent_skip_texts",
+            "updated_at",
+        ),
+        "sessions": ("token", "username", "role", "created_at"),
+        "user_accounts": (
+            "id",
+            "username",
+            "password_hash",
+            "activation_code",
+            "role",
+            "status",
+            "created_at",
+            "max_devices",
+            "expire_at",
+        ),
+        "agent_registry": (
+            "machine_id",
+            "label",
+            "last_seen",
+            "created_at",
+            "owner",
+            "status",
+            "token",
+            "client_version",
+        ),
+        "device_configs": (
+            "id",
+            "owner",
+            "name",
+            "machine_id",
+            "bit_api",
+            "api_token",
+            "status",
+            "created_at",
+            "updated_at",
+        ),
+        "device_windows": (
+            "id",
+            "owner",
+            "machine_id",
+            "window_token",
+            "window_name",
+            "last_seen",
+            "last_collect_at",
+            "last_collect_status",
+            "last_collect_message",
+        ),
+        "window_group_collections": (
+            "id",
+            "owner",
+            "machine_id",
+            "window_token",
+            "group_id",
+            "group_name",
+            "group_url",
+            "collected_at",
+            "selected",
+        ),
+        "agent_tasks": (
+            "id",
+            "owner",
+            "action",
+            "window_token",
+            "status",
+            "assigned_machine_id",
+            "payload",
+            "error",
+            "exit_code",
+            "created_at",
+            "updated_at",
+        ),
+    }
+
+    def __init__(self):
+        self._config = self._load_server_database_config()
+        self._mysql_conn = None
+        self._schema_ready = False
+
+    def _load_server_database_config(self):
+        settings = _read_yaml_dict(SERVER_SETTINGS_PATH)
+        database = dict(settings.get("database") or {})
+        driver = str(database.get("driver") or "").strip().lower()
+        if driver != "mysql":
+            raise RuntimeError("server_database_driver_not_configured")
+        host = str(database.get("host") or "127.0.0.1").strip()
+        name = str(database.get("name") or "").strip()
+        user = str(database.get("user") or "").strip()
+        password = str(database.get("password") or "")
+        charset = str(database.get("charset") or "utf8mb4").strip() or "utf8mb4"
+        try:
+            port = int(database.get("port") or 3306)
+        except Exception:
+            port = 3306
+        if not host or not name or not user:
+            raise RuntimeError("server_database_config_incomplete")
+        return {
+            "host": host,
+            "port": port,
+            "name": name,
+            "user": user,
+            "password": password,
+            "charset": charset,
+        }
+
+    def _open_mysql_connection(self):
+        try:
+            import pymysql
+        except Exception as exc:
+            raise RuntimeError(f"pymysql_not_available: {exc}") from exc
+        raw_conn = pymysql.connect(
+            host=self._config["host"],
+            port=int(self._config["port"]),
+            user=self._config["user"],
+            password=self._config["password"],
+            database=self._config["name"],
+            charset=self._config["charset"],
+            autocommit=False,
+            connect_timeout=10,
+            read_timeout=30,
+            write_timeout=30,
+            cursorclass=pymysql.cursors.DictCursor,
+        )
+        return _MySQLCompatConnection(raw_conn)
+
+    @property
+    def conn(self):
+        if self._mysql_conn is None:
+            self._mysql_conn = self._open_mysql_connection()
+        if not self._schema_ready:
+            self._ensure_server_schema()
+        return self._mysql_conn
+
+    def _fetch_mysql_table_columns(self, table_name):
+        table_name = str(table_name or "").strip()
+        if not table_name:
+            return set()
+        rows = self._mysql_conn.execute(f"SHOW COLUMNS FROM {table_name}").fetchall()
+        return {
+            str((row or {}).get("Field") or "").strip()
+            for row in list(rows or [])
+            if str((row or {}).get("Field") or "").strip()
+        }
+
+    def _migrate_mysql_message_templates(self):
+        columns = self._fetch_mysql_table_columns("message_templates")
+        alter_statements = []
+        if "templates" not in columns:
+            alter_statements.append(
+                "ALTER TABLE message_templates ADD COLUMN templates LONGTEXT NULL AFTER username"
+            )
+        if "popup_stop_texts" not in columns:
+            alter_statements.append(
+                "ALTER TABLE message_templates ADD COLUMN popup_stop_texts LONGTEXT NULL AFTER templates"
+            )
+        if "permanent_skip_texts" not in columns:
+            alter_statements.append(
+                "ALTER TABLE message_templates ADD COLUMN permanent_skip_texts LONGTEXT NULL AFTER popup_stop_texts"
+            )
+        if "updated_at" not in columns:
+            alter_statements.append(
+                "ALTER TABLE message_templates ADD COLUMN updated_at DATETIME NULL AFTER permanent_skip_texts"
+            )
+        for statement in alter_statements:
+            self._mysql_conn.execute(statement)
+
+    def _ensure_server_schema(self):
+        if self._schema_ready:
+            return
+        self._schema_ready = True
+        try:
+            statements = (
+                """
+                CREATE TABLE IF NOT EXISTS sent_history (
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    scope_id VARCHAR(191) NOT NULL,
+                    account_id VARCHAR(191) NOT NULL,
+                    group_id VARCHAR(191) NOT NULL,
+                    profile_url TEXT NOT NULL,
+                    user_id VARCHAR(191) NULL,
+                    status TINYINT NULL,
+                    created_at DATETIME NULL,
+                    machine_id VARCHAR(191) NULL,
+                    UNIQUE KEY idx_sent_history_group_user_id (scope_id, group_id, user_id),
+                    KEY idx_sent_history_status_created_at (status, created_at),
+                    KEY idx_sent_history_account_created_at (account_id, created_at),
+                    KEY idx_sent_history_machine_created_at (machine_id, created_at)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                """,
+                """
+                CREATE TABLE IF NOT EXISTS message_templates (
+                    username VARCHAR(191) NOT NULL PRIMARY KEY,
+                    templates LONGTEXT NULL,
+                    popup_stop_texts LONGTEXT NULL,
+                    permanent_skip_texts LONGTEXT NULL,
+                    updated_at DATETIME NULL
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                """,
+                """
+                CREATE TABLE IF NOT EXISTS sessions (
+                    token VARCHAR(191) NOT NULL PRIMARY KEY,
+                    username VARCHAR(191) NOT NULL,
+                    role VARCHAR(32) NOT NULL,
+                    created_at DOUBLE NOT NULL,
+                    KEY idx_sessions_username (username)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                """,
+                """
+                CREATE TABLE IF NOT EXISTS user_accounts (
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    username VARCHAR(191) NOT NULL,
+                    password_hash TEXT NULL,
+                    activation_code VARCHAR(191) NULL,
+                    role VARCHAR(32) NOT NULL DEFAULT 'user',
+                    status TINYINT NOT NULL DEFAULT 1,
+                    created_at DATETIME NULL,
+                    max_devices INT NULL,
+                    expire_at DOUBLE NULL,
+                    UNIQUE KEY idx_user_accounts_username (username),
+                    UNIQUE KEY idx_user_accounts_activation_code (activation_code)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                """,
+                """
+                CREATE TABLE IF NOT EXISTS agent_registry (
+                    machine_id VARCHAR(191) NOT NULL PRIMARY KEY,
+                    label VARCHAR(255) NULL,
+                    last_seen DOUBLE NULL,
+                    created_at DOUBLE NULL,
+                    owner VARCHAR(191) NULL,
+                    status TINYINT NOT NULL DEFAULT 1,
+                    token VARCHAR(191) NULL,
+                    client_version VARCHAR(64) NULL,
+                    KEY idx_agent_registry_token (token),
+                    KEY idx_agent_registry_owner_status_last_seen (owner, status, last_seen, created_at),
+                    KEY idx_agent_registry_owner_last_seen (owner, last_seen, created_at)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                """,
+                """
+                CREATE TABLE IF NOT EXISTS device_configs (
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    owner VARCHAR(191) NOT NULL,
+                    name VARCHAR(255) NULL,
+                    machine_id VARCHAR(191) NULL,
+                    bit_api VARCHAR(255) NULL,
+                    api_token VARCHAR(255) NULL,
+                    status TINYINT NOT NULL DEFAULT 1,
+                    created_at DATETIME NULL,
+                    updated_at DATETIME NULL,
+                    KEY idx_device_configs_owner (owner)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                """,
+                """
+                CREATE TABLE IF NOT EXISTS device_windows (
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    owner VARCHAR(191) NOT NULL,
+                    machine_id VARCHAR(191) NOT NULL,
+                    window_token VARCHAR(191) NOT NULL,
+                    window_name VARCHAR(255) NULL,
+                    last_seen DOUBLE NULL,
+                    last_collect_at DOUBLE NULL,
+                    last_collect_status VARCHAR(64) NULL,
+                    last_collect_message TEXT NULL,
+                    UNIQUE KEY idx_device_windows_owner_machine_window (owner, machine_id, window_token),
+                    KEY idx_device_windows_owner_machine (owner, machine_id),
+                    KEY idx_device_windows_machine (machine_id)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                """,
+                """
+                CREATE TABLE IF NOT EXISTS window_group_collections (
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    owner VARCHAR(191) NOT NULL,
+                    machine_id VARCHAR(191) NOT NULL,
+                    window_token VARCHAR(191) NOT NULL,
+                    group_id VARCHAR(191) NOT NULL,
+                    group_name VARCHAR(255) NULL,
+                    group_url TEXT NULL,
+                    collected_at DOUBLE NULL,
+                    selected TINYINT NOT NULL DEFAULT 0,
+                    UNIQUE KEY idx_window_group_collections_owner_machine_window_group (owner, machine_id, window_token, group_id),
+                    KEY idx_window_group_collections_owner_machine_window (owner, machine_id, window_token),
+                    KEY idx_window_group_collections_owner_machine_window_selected (owner, machine_id, window_token, selected)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                """,
+                """
+                CREATE TABLE IF NOT EXISTS agent_tasks (
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    owner VARCHAR(191) NULL,
+                    action VARCHAR(64) NULL,
+                    window_token VARCHAR(191) NULL,
+                    status VARCHAR(32) NULL,
+                    assigned_machine_id VARCHAR(191) NULL,
+                    payload LONGTEXT NULL,
+                    error TEXT NULL,
+                    exit_code INT NULL,
+                    created_at DOUBLE NULL,
+                    updated_at DOUBLE NULL,
+                    KEY idx_agent_tasks_machine_status_id (assigned_machine_id, status, id),
+                    KEY idx_agent_tasks_action_status_owner_id (action, status, owner, id)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                """,
+            )
+            for statement in statements:
+                self._mysql_conn.execute(statement)
+            self._migrate_mysql_message_templates()
+            self._mysql_conn.commit()
+            self._import_legacy_sqlite_server_data()
+        except Exception:
+            self._schema_ready = False
+            raise
+
+    def _legacy_sqlite_path(self):
+        return _runtime_path("data", "server.db")
+
+    def _count_table_rows(self, table_name):
+        row = self.fetch_one(f"SELECT COUNT(1) AS total FROM {table_name}")
+        return int(row["total"] or 0) if row else 0
+
+    def _import_legacy_sqlite_server_data(self):
+        legacy_path = self._legacy_sqlite_path()
+        if not legacy_path.exists():
+            return
+        try:
+            legacy_conn = sqlite3.connect(str(legacy_path))
+            legacy_conn.row_factory = sqlite3.Row
+        except Exception as exc:
+            log.warning(f"读取旧 SQLite 服务端数据失败，已跳过迁移: {exc}")
+            return
+        try:
+            for table_name, columns in self._SERVICE_TABLES.items():
+                if self._count_table_rows(table_name) > 0:
+                    continue
+                try:
+                    if table_name == "message_templates":
+                        legacy_columns = {
+                            row["name"]
+                            for row in legacy_conn.execute(
+                                "PRAGMA table_info(message_templates)"
+                            ).fetchall()
+                        }
+                        select_columns = []
+                        for column in columns:
+                            if column in legacy_columns:
+                                select_columns.append(column)
+                            else:
+                                select_columns.append(f"NULL AS {column}")
+                        rows = legacy_conn.execute(
+                            f"SELECT {', '.join(select_columns)} FROM {table_name}"
+                        ).fetchall()
+                    else:
+                        rows = legacy_conn.execute(
+                            f"SELECT {', '.join(columns)} FROM {table_name}"
+                        ).fetchall()
+                except Exception:
+                    continue
+                if not rows:
+                    continue
+                placeholders = ", ".join("?" for _ in columns)
+                insert_sql = (
+                    f"INSERT INTO {table_name} ({', '.join(columns)}) "
+                    f"VALUES ({placeholders})"
+                )
+                for row in rows:
+                    self.execute_statement(
+                        insert_sql,
+                        tuple(row[column] for column in columns),
+                    )
+            self.commit()
+        finally:
+            try:
+                legacy_conn.close()
+            except Exception:
+                pass
+
+    def _normalize_params(self, params=None):
+        if params is None:
+            return ()
+        if isinstance(params, tuple):
+            return params
+        if isinstance(params, list):
+            return tuple(params)
+        return (params,)
+
+    def fetch_one(self, query, params=None):
+        row = self.conn.execute(query, self._normalize_params(params)).fetchone()
+        return row if row else None
+
+    def fetch_all(self, query, params=None):
+        rows = self.conn.execute(query, self._normalize_params(params)).fetchall()
+        return list(rows or [])
+
+    def execute_statement(self, query, params=None, commit=False):
+        cursor = self.conn.execute(query, self._normalize_params(params))
+        if commit:
+            self.conn.commit()
+        return cursor
+
+    def commit(self):
+        self.conn.commit()
+
+    def close(self):
+        if self._mysql_conn is None:
+            return
+        try:
+            self._mysql_conn.close()
+        except Exception:
+            pass
+        finally:
+            self._mysql_conn = None
+
+    def set_message_templates(
+        self,
+        username,
+        templates,
+        popup_stop_texts=None,
+        permanent_skip_texts=None,
+    ):
+        username = (username or "").strip()
+        if not username:
+            return
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        templates_payload = None
+        if templates is not None:
+            templates_payload = json.dumps(
+                _normalize_message_list(templates or []),
+                ensure_ascii=False,
+            )
+        popup_stop_payload = None
+        if popup_stop_texts is not None:
+            popup_stop_payload = json.dumps(
+                _normalize_message_list(popup_stop_texts),
+                ensure_ascii=False,
+            )
+        permanent_skip_payload = None
+        if permanent_skip_texts is not None:
+            permanent_skip_payload = json.dumps(
+                _normalize_message_list(permanent_skip_texts),
+                ensure_ascii=False,
+            )
+        self.execute_statement(
+            """
+            INSERT INTO message_templates
+            (username, templates, popup_stop_texts, permanent_skip_texts, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON DUPLICATE KEY UPDATE
+                templates = VALUES(templates),
+                popup_stop_texts = VALUES(popup_stop_texts),
+                permanent_skip_texts = VALUES(permanent_skip_texts),
+                updated_at = VALUES(updated_at)
+            """,
+            (
+                username,
+                templates_payload,
+                popup_stop_payload,
+                permanent_skip_payload,
+                now,
+            ),
+            commit=True,
+        )
+
+    def save_session(self, token, username, role, created_at=None):
+        token = (token or "").strip()
+        username = (username or "").strip()
+        if not token or not username:
+            return
+        if created_at is None:
+            created_at = time.time()
+        self.execute_statement(
+            """
+            INSERT INTO sessions (token, username, role, created_at)
+            VALUES (?, ?, ?, ?)
+            ON DUPLICATE KEY UPDATE
+                username = VALUES(username),
+                role = VALUES(role),
+                created_at = VALUES(created_at)
+            """,
+            (token, username, role or "user", float(created_at)),
+            commit=True,
+        )
+
+    def add_device_config(self, owner, name, machine_id, bit_api, api_token, status=1):
+        owner = (owner or "").strip()
+        if not owner:
+            return None
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        cursor = self.execute_statement(
+            """
+            INSERT INTO device_configs
+            (owner, name, machine_id, bit_api, api_token, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (owner, name, machine_id, bit_api, api_token, int(status), now, now),
+            commit=True,
+        )
+        try:
+            return int(cursor.lastrowid or 0) or None
+        except Exception:
+            return None
+
+    def claim_agent_task(self, machine_id):
+        machine_id = (machine_id or "").strip()
+        if not machine_id:
+            return None
+        now = time.time()
+        try:
+            row = self.fetch_one(
+                """
+                SELECT *
+                FROM agent_tasks
+                WHERE status = 'pending' AND assigned_machine_id = ?
+                ORDER BY id DESC
+                LIMIT 1
+                FOR UPDATE
+                """,
+                (machine_id,),
+            )
+            if not row:
+                self.conn.rollback()
+                return None
+            self.execute_statement(
+                """
+                UPDATE agent_tasks
+                SET status = ?, error = ?, updated_at = ?
+                WHERE status = 'pending' AND assigned_machine_id = ? AND id <> ?
+                """,
+                ("failed", "stale_queue_cleanup", now, machine_id, row["id"]),
+            )
+            self.execute_statement(
+                """
+                UPDATE agent_tasks
+                SET status = ?, error = ?, updated_at = ?
+                WHERE id = ? AND status = 'pending'
+                """,
+                ("running", None, now, row["id"]),
+            )
+            self.commit()
+            claimed = dict(row)
+            claimed["status"] = "running"
+            claimed["error"] = None
+            claimed["updated_at"] = now
+            return claimed
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def list_window_group_collections(self, owner="", machine_id="", window_token=""):
+        conditions = []
+        params = []
+        owner = self.normalize_account_scope(owner)
+        machine_id = str(machine_id or "").strip()
+        window_token = str(window_token or "").strip()
+        if owner:
+            conditions.append("owner = ?")
+            params.append(owner)
+        if machine_id:
+            conditions.append("machine_id = ?")
+            params.append(machine_id)
+        if window_token:
+            conditions.append("window_token = ?")
+            params.append(window_token)
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        return self.fetch_all(
+            f"""
+            SELECT id, owner, machine_id, window_token, group_id, group_name, group_url, collected_at, selected
+            FROM window_group_collections
+            {where}
+            ORDER BY owner ASC, machine_id ASC, window_token ASC, group_name ASC, group_id ASC
+            """,
+            tuple(params),
+        )
+
+    def save_window_group_selections(self, owner, machine_id, selections):
+        owner = self.normalize_account_scope(owner)
+        machine_id = str(machine_id or "").strip()
+        if not owner or not machine_id:
+            return False
+        selections = selections or []
+        try:
+            for item in selections:
+                if not isinstance(item, dict):
+                    continue
+                window_token = str(item.get("window_token") or "").strip()
+                if not window_token:
+                    continue
+                raw_group_ids = item.get("group_ids") or []
+                group_ids = []
+                for group_id in raw_group_ids:
+                    normalized_group_id = self.normalize_group_id(group_id)
+                    if normalized_group_id:
+                        group_ids.append(normalized_group_id)
+                deduped_group_ids = list(dict.fromkeys(group_ids))
+                self.execute_statement(
+                    """
+                    UPDATE window_group_collections
+                    SET selected = 0
+                    WHERE owner = ? AND machine_id = ? AND window_token = ?
+                    """,
+                    (owner, machine_id, window_token),
+                )
+                if deduped_group_ids:
+                    placeholders = ",".join("?" for _ in deduped_group_ids)
+                    self.execute_statement(
+                        f"""
+                        UPDATE window_group_collections
+                        SET selected = 1
+                        WHERE owner = ? AND machine_id = ? AND window_token = ?
+                          AND group_id IN ({placeholders})
+                        """,
+                        (owner, machine_id, window_token, *deduped_group_ids),
+                    )
+            self.commit()
+            return True
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def seed_user_accounts_from_sent_history(self):
+        if self.count_user_accounts() > 0:
+            return
+        rows = self.fetch_all(
+            """
+            SELECT account_id, MIN(created_at) AS created_at
+            FROM sent_history
+            WHERE account_id IS NOT NULL AND account_id != ''
+            GROUP BY account_id
+            ORDER BY MIN(created_at) DESC
+            """
+        )
+        for row in rows:
+            username = row["account_id"]
+            created_at = row["created_at"] or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            self.execute_statement(
+                """
+                INSERT IGNORE INTO user_accounts
+                (username, password_hash, role, status, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (username, "", "user", 1, created_at),
+            )
+        self.commit()
+
+    def mark_done(self, group_id, profile_url, account_id, success=True, user_id=None, machine_id=None, scope_id=None):
+        try:
+            normalized_group_id = self.normalize_group_id(group_id)
+            normalized_url = self.normalize_profile_url(profile_url)
+            normalized_user_id = user_id or self.extract_user_id(normalized_url)
+            normalized_account_id = self.normalize_account_scope(account_id)
+            normalized_scope_id = self.normalize_scope_id(scope_id)
+            normalized_machine_id = str(machine_id or "").strip() or None
+            if not normalized_scope_id or not normalized_group_id or not normalized_url:
+                raise ValueError("invalid_profile_url")
+
+            status = 1 if success else 0
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            conditions, params = self._build_target_conditions(normalized_url, normalized_user_id)
+            existing_success = self.fetch_one(
+                "SELECT 1 FROM sent_history "
+                f"WHERE scope_id = ? AND group_id = ? AND status = 1 "
+                f"AND ({' OR '.join(conditions)}) LIMIT 1",
+                tuple([normalized_scope_id, normalized_group_id] + params),
+            )
+            if existing_success and not success:
+                log.debug(
+                    f"保留已有成功记录，不用失败状态覆盖: {normalized_group_id} -> {normalized_url}"
+                )
+                return
+            self.execute_statement(
+                f"DELETE FROM sent_history WHERE scope_id = ? AND group_id = ? AND ({' OR '.join(conditions)})",
+                tuple([normalized_scope_id, normalized_group_id] + params),
+            )
+            self.execute_statement(
+                """
+                INSERT INTO sent_history
+                (scope_id, account_id, group_id, profile_url, user_id, status, created_at, machine_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    normalized_scope_id,
+                    normalized_account_id,
+                    normalized_group_id,
+                    normalized_url,
+                    normalized_user_id,
+                    status,
+                    now,
+                    normalized_machine_id,
+                ),
+            )
+            self.commit()
+            log.debug(f"数据已入库: {normalized_group_id} -> {normalized_url}")
+        except Exception as exc:
+            log.error(f"数据库写入失败: {exc}")
+
+    def cleanup_old_history(self, history_days=15, claim_days=3):
+        try:
+            history_days = int(history_days)
+        except Exception:
+            history_days = 0
+        removed = {"sent_history": 0, "send_claims": 0}
+        try:
+            if history_days > 0:
+                cutoff = (
+                    datetime.now() - timedelta(days=history_days)
+                ).strftime("%Y-%m-%d %H:%M:%S")
+                cur = self.execute_statement(
+                    "DELETE FROM sent_history WHERE created_at IS NOT NULL AND created_at < ?",
+                    (cutoff,),
+                )
+                removed["sent_history"] = int(getattr(cur, "rowcount", 0) or 0)
+            self.commit()
+        except Exception as exc:
+            log.error(f"清理历史数据失败: {exc}")
+        return removed
+
+    def _call_base_service_method(self, method_name, *args, **kwargs):
+        return getattr(_SQLiteDatabaseBase, method_name)(self, *args, **kwargs)
+
+    def enqueue_agent_task(self, owner, action, window_token=None, machine_id=None, payload=None):
+        return self._call_base_service_method(
+            "enqueue_agent_task",
+            owner,
+            action,
+            window_token=window_token,
+            machine_id=machine_id,
+            payload=payload,
+        )
+
+    def update_agent_task(self, task_id, status, error=None, exit_code=None):
+        return self._call_base_service_method(
+            "update_agent_task",
+            task_id,
+            status,
+            error=error,
+            exit_code=exit_code,
+        )
+
+    def count_agent_tasks(self, status=None, owner=None):
+        return self._call_base_service_method("count_agent_tasks", status=status, owner=owner)
+
+    def get_message_templates(self, username):
+        return self._call_base_service_method("get_message_templates", username)
+
+    def set_message_templates(
+        self,
+        username,
+        templates,
+        popup_stop_texts=None,
+        permanent_skip_texts=None,
+    ):
+        return self._call_base_service_method(
+            "set_message_templates",
+            username,
+            templates,
+            popup_stop_texts=popup_stop_texts,
+            permanent_skip_texts=permanent_skip_texts,
+        )
+
+    def delete_message_templates(self, username):
+        return self._call_base_service_method("delete_message_templates", username)
+
+    def get_session(self, token):
+        return self._call_base_service_method("get_session", token)
+
+    def delete_session(self, token):
+        return self._call_base_service_method("delete_session", token)
+
+    def delete_sessions_by_username(self, username):
+        return self._call_base_service_method("delete_sessions_by_username", username)
+
+    def count_user_accounts(self):
+        return self._call_base_service_method("count_user_accounts")
+
+    def migrate_activation_codes_to_uuid(self):
+        return self._call_base_service_method("migrate_activation_codes_to_uuid")
+
+    def list_user_accounts(self):
+        return self._call_base_service_method("list_user_accounts")
+
+    def get_user_account(self, username):
+        return self._call_base_service_method("get_user_account", username)
+
+    def get_user_account_by_activation_code(self, activation_code):
+        return self._call_base_service_method("get_user_account_by_activation_code", activation_code)
+
+    def add_user_account(
+        self,
+        username,
+        password_hash,
+        role="user",
+        max_devices=None,
+        expire_at=None,
+        activation_code=None,
+    ):
+        return self._call_base_service_method(
+            "add_user_account",
+            username,
+            password_hash,
+            role=role,
+            max_devices=max_devices,
+            expire_at=expire_at,
+            activation_code=activation_code,
+        )
+
+    def update_user_account(
+        self,
+        original_username,
+        username,
+        password_hash,
+        role=None,
+        max_devices=None,
+        expire_at=None,
+        activation_code=None,
+    ):
+        return self._call_base_service_method(
+            "update_user_account",
+            original_username,
+            username,
+            password_hash,
+            role=role,
+            max_devices=max_devices,
+            expire_at=expire_at,
+            activation_code=activation_code,
+        )
+
+    def list_device_configs(self, owner):
+        return self._call_base_service_method("list_device_configs", owner)
+
+    def list_all_device_configs(self):
+        return self._call_base_service_method("list_all_device_configs")
+
+    def update_device_config(self, config_id, owner, name, machine_id, bit_api, api_token, status=1):
+        return self._call_base_service_method(
+            "update_device_config",
+            config_id,
+            owner,
+            name,
+            machine_id,
+            bit_api,
+            api_token,
+            status=status,
+        )
+
+    def delete_device_config(self, config_id, owner):
+        return self._call_base_service_method("delete_device_config", config_id, owner)
+
+    def upsert_device_window(
+        self,
+        owner,
+        machine_id,
+        window_token,
+        window_name="",
+        last_seen=None,
+        last_collect_at=None,
+        last_collect_status=None,
+        last_collect_message=None,
+    ):
+        return self._call_base_service_method(
+            "upsert_device_window",
+            owner,
+            machine_id,
+            window_token,
+            window_name=window_name,
+            last_seen=last_seen,
+            last_collect_at=last_collect_at,
+            last_collect_status=last_collect_status,
+            last_collect_message=last_collect_message,
+        )
+
+    def list_device_windows(self, owner="", machine_id=""):
+        return self._call_base_service_method("list_device_windows", owner=owner, machine_id=machine_id)
+
+    def replace_window_group_collections(
+        self,
+        owner,
+        machine_id,
+        window_token,
+        groups,
+        collected_at=None,
+        window_name="",
+        last_collect_status=None,
+        last_collect_message=None,
+    ):
+        return self._call_base_service_method(
+            "replace_window_group_collections",
+            owner,
+            machine_id,
+            window_token,
+            groups,
+            collected_at=collected_at,
+            window_name=window_name,
+            last_collect_status=last_collect_status,
+            last_collect_message=last_collect_message,
+        )
+
+    def get_device_window_group_detail(self, owner, machine_id):
+        return self._call_base_service_method("get_device_window_group_detail", owner, machine_id)
+
+    def list_selected_window_groups(self, owner, machine_id):
+        return self._call_base_service_method("list_selected_window_groups", owner, machine_id)
+
+    def set_user_activation_code(self, username, activation_code):
+        return self._call_base_service_method("set_user_activation_code", username, activation_code)
+
+    def upsert_agent(
+        self,
+        machine_id,
+        label,
+        last_seen,
+        owner=None,
+        status=1,
+        token=None,
+        client_version=None,
+    ):
+        return self._call_base_service_method(
+            "upsert_agent",
+            machine_id,
+            label,
+            last_seen,
+            owner=owner,
+            status=status,
+            token=token,
+            client_version=client_version,
+        )
+
+    def get_agent(self, machine_id):
+        return self._call_base_service_method("get_agent", machine_id)
+
+    def get_agent_by_token(self, token):
+        return self._call_base_service_method("get_agent_by_token", token)
+
+    def list_agents(self):
+        return self._call_base_service_method("list_agents")
+
+    def get_latest_agent_for_owner(self, owner, include_disabled=False):
+        return self._call_base_service_method(
+            "get_latest_agent_for_owner",
+            owner,
+            include_disabled=include_disabled,
+        )
+
+    def get_online_agent_for_owner(self, owner, heartbeat_ttl):
+        return self._call_base_service_method("get_online_agent_for_owner", owner, heartbeat_ttl)
+
+    def count_agents_for_owner(self, owner, include_disabled=False):
+        return self._call_base_service_method(
+            "count_agents_for_owner",
+            owner,
+            include_disabled=include_disabled,
+        )
+
+    def set_agent_status(self, machine_id, status):
+        return self._call_base_service_method("set_agent_status", machine_id, status)
+
+    def unbind_agent(self, machine_id, owner=None):
+        return self._call_base_service_method("unbind_agent", machine_id, owner=owner)
+
+    def mark_agent_seen(self, machine_id, last_seen=None, client_version=None):
+        return self._call_base_service_method(
+            "mark_agent_seen",
+            machine_id,
+            last_seen=last_seen,
+            client_version=client_version,
+        )
+
+    def set_user_account_status(self, username, status):
+        return self._call_base_service_method("set_user_account_status", username, status)
+
+    def delete_user_account(self, username):
+        return self._call_base_service_method("delete_user_account", username)
+
+    def set_user_password_hash(self, username, password_hash):
+        return self._call_base_service_method("set_user_password_hash", username, password_hash)
+
+    def set_user_send_interval(self, username, min_seconds, max_seconds):
+        return self._call_base_service_method(
+            "set_user_send_interval",
+            username,
+            min_seconds,
+            max_seconds,
+        )
+
+    def is_account_disabled(self, username):
+        return self._call_base_service_method("is_account_disabled", username)
+
+    def set_user_role(self, username, role):
+        return self._call_base_service_method("set_user_role", username, role)
+
+    def _raise_runtime_only_method_disabled(self, method_name):
+        raise RuntimeError(f"{method_name}_disabled_on_server_database")
+
+    def mark_group_done(self, group_id, account_id=None, scope_id=None, done_at=None):
+        self._raise_runtime_only_method_disabled("mark_group_done")
+
+    def is_group_done(self, group_id, account_id=None, scope_id=None, ttl_hours=0):
+        self._raise_runtime_only_method_disabled("is_group_done")
+
+    def is_sent(self, group_id, account_id=None, profile_url=None, user_id=None, scope_id=None):
+        self._raise_runtime_only_method_disabled("is_sent")
+
+    def try_claim_target(self, group_id, profile_url, account_id, user_id=None, ttl_hours=6, scope_id=None):
+        self._raise_runtime_only_method_disabled("try_claim_target")
+
+    def release_claim(self, group_id, account_id=None, profile_url=None, user_id=None, scope_id=None):
+        self._raise_runtime_only_method_disabled("release_claim")
+
+    def get_cursor(self, group_id, account_id=None, scope_id=None):
+        self._raise_runtime_only_method_disabled("get_cursor")
+
+    def save_cursor(self, group_id, target, account_id=None, scope_id=None):
+        self._raise_runtime_only_method_disabled("save_cursor")
+
+    def count_send_claims(self):
+        self._raise_runtime_only_method_disabled("count_send_claims")

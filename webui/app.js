@@ -51,17 +51,25 @@ const userModalError = document.getElementById("user-modal-error");
 const userModalSave = document.getElementById("user-modal-save");
 const userModalCancel = document.getElementById("user-modal-cancel");
 const userModalToggle = document.getElementById("user-modal-toggle");
+const STATUS_POLL_INTERVAL_MS = 3000;
+const AUX_REFRESH_INTERVAL_MS = 10000;
+const IS_SUB = window.location.pathname.startsWith("/sub");
+const API_PREFIX = IS_SUB ? "/api/sub" : "/api/admin";
 let lastTrend = null;
-let logUserInteracting = false;
+let runtimeLogUserInteracting = false;
 let tableUserInteracting = false;
 let dashboardLabelsReady = false;
 let latestStatusPayload = null;
 let latestAgentRows = [];
 let latestDeviceInfoRows = [];
 let currentDeviceDetail = null;
+let currentPageKey = "task";
+let lastUsersRefreshAt = 0;
+let lastDevicesRefreshAt = 0;
+let lastDeviceInfoRefreshAt = 0;
 
-function isLogSelectionActive() {
-  if (!logOutput) return false;
+function isLogSelectionActive(target) {
+  if (!target) return false;
   const selection = window.getSelection();
   if (!selection || selection.rangeCount === 0) return false;
   const hasText = selection.toString().length > 0;
@@ -69,35 +77,49 @@ function isLogSelectionActive() {
   const anchor = selection.anchorNode;
   const focus = selection.focusNode;
   return (
-    (anchor && logOutput.contains(anchor)) ||
-    (focus && logOutput.contains(focus))
+    (anchor && target.contains(anchor)) ||
+    (focus && target.contains(focus))
   );
 }
 
-if (logOutput) {
+function bindLogInteraction(target, setFlag) {
+  if (!target) return;
   const stopInteracting = () => {
     // Allow copy selection to persist after mouseup.
-    if (!isLogSelectionActive()) logUserInteracting = false;
+    if (!isLogSelectionActive(target)) setFlag(false);
   };
-  logOutput.addEventListener("mousedown", () => {
-    logUserInteracting = true;
+  target.addEventListener("mousedown", () => {
+    setFlag(true);
   });
-  logOutput.addEventListener("mouseup", () => {
+  target.addEventListener("mouseup", () => {
     setTimeout(stopInteracting, 0);
   });
-  logOutput.addEventListener("mouseleave", stopInteracting);
-  logOutput.addEventListener("touchstart", () => {
-    logUserInteracting = true;
-  }, { passive: true });
-  logOutput.addEventListener("touchend", () => {
+  target.addEventListener("mouseleave", stopInteracting);
+  target.addEventListener(
+    "touchstart",
+    () => {
+      setFlag(true);
+    },
+    { passive: true }
+  );
+  target.addEventListener("touchend", () => {
     setTimeout(stopInteracting, 0);
   });
+}
+
+bindLogInteraction(logOutput, (value) => {
+  runtimeLogUserInteracting = value;
+});
+
+function renderLogOutput(target, lines, isUserInteracting) {
+  if (!target) return;
+  if (isUserInteracting || isLogSelectionActive(target)) return;
+  target.textContent = (lines || []).join("\n");
+  target.scrollTop = target.scrollHeight;
 }
 let userModalMode = "add";
 let userModalOriginal = null;
 let userModalStatus = 1;
-const IS_SUB = window.location.pathname.startsWith("/sub");
-const API_PREFIX = IS_SUB ? "/api/sub" : "/api/admin";
 
 const expiryText = document.getElementById("expiry-text");
 const expiryWarning = document.getElementById("expiry-warning");
@@ -139,6 +161,10 @@ function translateErrorMessage(value) {
 
 const fields = {
   templates: document.getElementById("templates"),
+  popupStopTexts: document.getElementById("popup-stop-texts"),
+  permanentSkipTexts: document.getElementById("permanent-skip-texts"),
+  adminPopupStopTexts: document.getElementById("admin-popup-stop-texts"),
+  adminPermanentSkipTexts: document.getElementById("admin-permanent-skip-texts"),
 };
 
 document.getElementById("save-btn").addEventListener("click", saveConfig);
@@ -168,7 +194,7 @@ if (logoutBtn) {
 }
 navItems.forEach((item) => {
   item.addEventListener("click", () => {
-    setActivePage(item.dataset.page, item.dataset.title);
+    void activatePage(item.dataset.page, item.dataset.title);
   });
 });
 if (addUserBtn) {
@@ -200,7 +226,7 @@ if (deviceTableBody) {
 }
 if (deviceDetailBackBtn) {
   deviceDetailBackBtn.addEventListener("click", () => {
-    setActivePage("device", "设备管理", false);
+    void activatePage("device", "设备管理", false);
   });
 }
 if (deviceDetailSaveBtn) {
@@ -249,9 +275,6 @@ tableSelectionRoots.forEach((root) => {
 async function initializeApp() {
   await loadCurrentAccount();
   await loadConfig();
-  await refreshStatus();
-  if (window.statusTimer) clearInterval(window.statusTimer);
-  window.statusTimer = setInterval(refreshStatus, 1500);
   const storedPage = getStoredPage();
   if (storedPage && hasPage(storedPage.key)) {
     setActivePage(storedPage.key, storedPage.title, false);
@@ -265,6 +288,11 @@ async function initializeApp() {
     }
     setActivePage("task", "任务管理", false);
   }
+  await refreshStatus({ forceAux: true, includeWhenHidden: true });
+  if (window.statusTimer) clearInterval(window.statusTimer);
+  window.statusTimer = setInterval(() => {
+    void refreshStatus();
+  }, STATUS_POLL_INTERVAL_MS);
 }
 
 async function loadCurrentAccount() {
@@ -311,9 +339,21 @@ async function loadConfig() {
   if (!response.ok) return;
 
   const messages = response.data.messages || {};
-
+  const restrictionSummary = response.data.restriction_summary || {};
   if (fields.templates) {
     fields.templates.value = (messages.templates || []).join("\n");
+  }
+  if (fields.popupStopTexts) {
+    fields.popupStopTexts.value = (messages.popup_stop_texts || []).join("\n");
+  }
+  if (fields.permanentSkipTexts) {
+    fields.permanentSkipTexts.value = (messages.permanent_skip_texts || []).join("\n");
+  }
+  if (fields.adminPopupStopTexts) {
+    fields.adminPopupStopTexts.value = (restrictionSummary.popup_stop_texts || []).join("\n");
+  }
+  if (fields.adminPermanentSkipTexts) {
+    fields.adminPermanentSkipTexts.value = (restrictionSummary.permanent_skip_texts || []).join("\n");
   }
 
   if (IS_SUB) {
@@ -462,6 +502,7 @@ async function saveConfig() {
 }
 
 async function startTask() {
+  if (!(await ensureTaskActionAllowed(startBtn))) return;
   const saved = await saveConfigSilently();
   if (!saved.ok) return;
   const response = await api("/start", { method: "POST", body: {} });
@@ -473,6 +514,7 @@ async function startTask() {
 }
 
 async function stopTask() {
+  if (!(await ensureTaskActionAllowed(stopBtn))) return;
   const response = await api("/stop", { method: "POST", body: {} });
   if (!response.ok) {
     showAlert(translateErrorMessage(response.data?.error) || "停止失败");
@@ -482,6 +524,7 @@ async function stopTask() {
 }
 
 async function pauseTask() {
+  if (!(await ensureTaskActionAllowed(pauseBtn))) return;
   const response = await api("/pause", { method: "POST", body: {} });
   if (!response.ok) {
     showAlert(translateErrorMessage(response.data?.error) || "暂停失败");
@@ -491,6 +534,7 @@ async function pauseTask() {
 }
 
 async function resumeTask() {
+  if (!(await ensureTaskActionAllowed(resumeBtn))) return;
   const response = await api("/resume", { method: "POST", body: {} });
   if (!response.ok) {
     showAlert(translateErrorMessage(response.data?.error) || "继续失败");
@@ -500,6 +544,7 @@ async function resumeTask() {
 }
 
 async function restartWindow() {
+  if (!(await ensureTaskActionAllowed(restartWindowBtn))) return;
   const windowToken = restartWindowToken.value.trim();
   if (!windowToken) {
     showAlert("请输入需要单独重启的窗口编号");
@@ -520,6 +565,7 @@ async function restartWindow() {
 }
 
 async function collectGroups() {
+  if (!(await ensureTaskActionAllowed(collectBtn))) return;
   const response = await api("/collect-groups", { method: "POST", body: {} });
   if (!response.ok) {
     showAlert(translateErrorMessage(response.data?.error) || "采集失败");
@@ -570,7 +616,50 @@ function ensureDashboardLabels() {
   dashboardLabelsReady = true;
 }
 
-async function refreshStatus() {
+function isAuxRefreshDue(lastRefreshedAt, force = false) {
+  if (force) return true;
+  return Date.now() - Number(lastRefreshedAt || 0) >= AUX_REFRESH_INTERVAL_MS;
+}
+
+function shouldRefreshUsers(force = false) {
+  return !IS_SUB && currentPageKey === "user" && isAuxRefreshDue(lastUsersRefreshAt, force);
+}
+
+function shouldRefreshDevices(force = false) {
+  if (IS_SUB) {
+    return ["task", "device"].includes(currentPageKey) && isAuxRefreshDue(lastDevicesRefreshAt, force);
+  }
+  return currentPageKey === "device" && isAuxRefreshDue(lastDevicesRefreshAt, force);
+}
+
+function shouldRefreshDeviceInfo(force = false) {
+  if (IS_SUB) {
+    return ["task", "device-info"].includes(currentPageKey) && isAuxRefreshDue(lastDeviceInfoRefreshAt, force);
+  }
+  return currentPageKey === "device-info" && isAuxRefreshDue(lastDeviceInfoRefreshAt, force);
+}
+
+async function refreshAuxiliaryData({ force = false } = {}) {
+  const jobs = [];
+  if (shouldRefreshUsers(force)) {
+    jobs.push(refreshUsers());
+  }
+  if (shouldRefreshDevices(force)) {
+    jobs.push(refreshDevices());
+  }
+  if (shouldRefreshDeviceInfo(force)) {
+    jobs.push(refreshDeviceInfo());
+  }
+  if (!jobs.length) {
+    return;
+  }
+  await Promise.all(jobs);
+}
+
+async function refreshStatus({ forceAux = false, includeWhenHidden = false } = {}) {
+  if (!includeWhenHidden && document.visibilityState === "hidden") {
+    return;
+  }
   const response = await api("/status");
   if (!response.ok) {
     latestStatusPayload = null;
@@ -625,24 +714,38 @@ async function refreshStatus() {
     renderTrendChart(dbStats.trend);
   }
 
-  if (logOutput && !logUserInteracting && !isLogSelectionActive()) {
-    logOutput.textContent = (status.logs || []).join("\n");
-    logOutput.scrollTop = logOutput.scrollHeight;
-  }
+  const mergedLogs = [
+    ...(status.control_logs || []),
+    ...(status.logs || []),
+  ];
+  renderLogOutput(logOutput, mergedLogs, runtimeLogUserInteracting);
 
-  await refreshUsers();
-  await refreshDevices();
-  await refreshDeviceInfo();
+  await refreshAuxiliaryData({ force: forceAux });
   applyTaskButtonState();
 }
 
+async function activatePage(pageKey, title, persist = true) {
+  setActivePage(pageKey, title, persist);
+  await refreshStatus({ forceAux: true, includeWhenHidden: true });
+}
+
 async function saveConfigSilently() {
-  const messages = {
-    templates: splitLines(fields.templates ? fields.templates.value : ""),
-  };
-  if (!messages.templates.length) {
-    showAlert("正式打招呼文案不能为空");
-    return { ok: false };
+  const messages = {};
+  if (currentPageKey === "template" && fields.templates) {
+    messages.templates = splitLines(fields.templates.value || "");
+    if (!messages.templates.length) {
+      showAlert("正式打招呼文案不能为空");
+      return { ok: false };
+    }
+  } else if (IS_SUB && currentPageKey === "restriction") {
+    messages.popup_stop_texts = splitLines(
+      fields.popupStopTexts ? fields.popupStopTexts.value : ""
+    );
+    messages.permanent_skip_texts = splitLines(
+      fields.permanentSkipTexts ? fields.permanentSkipTexts.value : ""
+    );
+  } else {
+    return { ok: true, skipped: true };
   }
 
   const response = await api("/config", {
@@ -664,6 +767,7 @@ function splitLines(value) {
 }
 
 function setActivePage(pageKey, title, persist = true) {
+  currentPageKey = pageKey;
   const activeNavPage = pageKey === "device-detail" ? "device" : pageKey;
   navItems.forEach((item) => item.classList.toggle("active", item.dataset.page === activeNavPage));
   pageCards.forEach((card) => card.classList.toggle("active", card.dataset.page === pageKey));
@@ -671,7 +775,8 @@ function setActivePage(pageKey, title, persist = true) {
     pageTitle.textContent = title;
   }
   if (saveBtn) {
-    saveBtn.classList.toggle("hidden", pageKey !== "template");
+    const editable = pageKey === "template" || (IS_SUB && pageKey === "restriction");
+    saveBtn.classList.toggle("hidden", !editable);
   }
   if (persist) {
     try {
@@ -688,9 +793,6 @@ function setActivePage(pageKey, title, persist = true) {
       renderTrendAxis(lastTrend.labels);
       renderTrendChart(lastTrend);
     });
-  }
-  if (pageKey === "device-info") {
-    refreshDeviceInfo();
   }
 }
 
@@ -825,6 +927,7 @@ async function refreshUsers() {
   const response = await api("/users");
   if (!response.ok) return;
   const payload = response.data || {};
+  lastUsersRefreshAt = Date.now();
   renderUserTable(payload.users || []);
 }
 
@@ -838,6 +941,7 @@ async function refreshDevices() {
   const response = await api("/agent/list");
   if (!response.ok) return;
   const payload = response.data || {};
+  lastDevicesRefreshAt = Date.now();
   latestAgentRows = Array.isArray(payload.agents) ? payload.agents : [];
   renderDeviceTable(latestAgentRows);
   applyTaskButtonState();
@@ -851,6 +955,7 @@ async function refreshDeviceInfo() {
   const response = await api("/device-info");
   if (!response.ok) return;
   const payload = response.data || {};
+  lastDeviceInfoRefreshAt = Date.now();
   latestDeviceInfoRows = Array.isArray(payload.configs) ? payload.configs : [];
   renderDeviceInfoTable(latestDeviceInfoRows);
   applyTaskButtonState();
@@ -866,18 +971,41 @@ function setButtonDisabled(button, disabled, reason = "") {
   }
 }
 
+function setTaskActionButtonState(button, blocked, reason = "") {
+  if (!button) return;
+  const normalizedReason = String(reason || "").trim();
+  button.disabled = false;
+  button.dataset.blocked = blocked ? "1" : "0";
+  button.dataset.blockReason = blocked ? normalizedReason : "";
+  button.classList.toggle("is-blocked", !!blocked);
+  button.setAttribute("aria-disabled", blocked ? "true" : "false");
+  if (normalizedReason) {
+    button.title = normalizedReason;
+  } else {
+    button.removeAttribute("title");
+  }
+}
+
+async function ensureTaskActionAllowed(button) {
+  if (!button) return false;
+  if (button.dataset.blocked !== "1") return true;
+  const reason = String(button.dataset.blockReason || "").trim() || "当前操作暂不可执行";
+  await showAlert(reason);
+  return false;
+}
+
 function applyTaskButtonState() {
   if (!IS_SUB) {
     return;
   }
   const status = latestStatusPayload;
   if (!status) {
-    setButtonDisabled(startBtn, true, "状态同步中");
-    setButtonDisabled(stopBtn, true, "状态同步中");
-    setButtonDisabled(pauseBtn, true, "状态同步中");
-    setButtonDisabled(resumeBtn, true, "状态同步中");
-    setButtonDisabled(collectBtn, true, "状态同步中");
-    setButtonDisabled(restartWindowBtn, true, "状态同步中");
+    setTaskActionButtonState(startBtn, true, "状态同步中");
+    setTaskActionButtonState(stopBtn, true, "状态同步中");
+    setTaskActionButtonState(pauseBtn, true, "状态同步中");
+    setTaskActionButtonState(resumeBtn, true, "状态同步中");
+    setTaskActionButtonState(collectBtn, true, "状态同步中");
+    setTaskActionButtonState(restartWindowBtn, true, "状态同步中");
     return;
   }
 
@@ -921,14 +1049,14 @@ function applyTaskButtonState() {
             : taskPending
               ? "任务排队中"
               : "");
-  setButtonDisabled(startBtn, !startReady || isBusy || collectBusy, startReason);
-  setButtonDisabled(stopBtn, !isBusy, isBusy ? "" : "当前没有运行中的任务");
-  setButtonDisabled(
+  setTaskActionButtonState(startBtn, !startReady || isBusy || collectBusy, startReason);
+  setTaskActionButtonState(stopBtn, !isBusy, isBusy ? "" : "当前没有运行中的任务");
+  setTaskActionButtonState(
     pauseBtn,
     !taskRunning || taskPaused,
     taskPaused ? "任务已暂停" : (taskRunning ? "" : "当前没有运行中的任务")
   );
-  setButtonDisabled(
+  setTaskActionButtonState(
     resumeBtn,
     !taskPaused,
     taskPaused ? "" : (taskRunning ? "任务未暂停" : "当前没有运行中的任务")
@@ -946,10 +1074,10 @@ function applyTaskButtonState() {
             : collectPending
               ? "采集排队中"
               : "");
-  setButtonDisabled(collectBtn, !startReady || isBusy || collectBusy, collectReason);
+  setTaskActionButtonState(collectBtn, !startReady || isBusy || collectBusy, collectReason);
   const windowToken = String(restartWindowToken?.value || "").trim();
   const restartReason = !windowToken ? "请输入窗口编号" : startReason;
-  setButtonDisabled(restartWindowBtn, !windowToken || !startReady || collectBusy, restartReason);
+  setTaskActionButtonState(restartWindowBtn, !windowToken || !startReady || collectBusy, restartReason);
 }
 
 function renderDeviceInfoTable(configs) {
@@ -1505,6 +1633,12 @@ function renderCopyCell(value, options = {}) {
 
 window.addEventListener("resize", () => {
   if (lastTrend) renderTrendChart(lastTrend);
+});
+
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") {
+    void refreshStatus({ forceAux: true, includeWhenHidden: true });
+  }
 });
 
 async function api(url, options = {}) {

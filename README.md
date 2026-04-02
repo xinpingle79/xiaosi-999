@@ -38,10 +38,13 @@ worker 只从服务器拉取统一任务队列，不再读取独立的本地 wor
 
 ### 服务端配置
 `config/server.yaml`
+- `database.*`：服务端共享数据库唯一权威来源，当前正式要求为 MySQL 8
 - `web_ui.host` / `web_ui.port`：服务端监听
 - `admin_account.*`：管理员账号
 - `agent_security.*`：token 有效期、心跳与设备限制
 - `runtime_dir`：运行时目录（可选）
+- 服务端共享状态（用户、会话、设备、任务、统计）走 MySQL 8
+- 客户端本地运行态（断点、占位、运行时缓存）继续走本地 SQLite
 - 服务端不再维护 `send_interval_seconds`，发送频率只认客户端本地配置
 
 ### 客户端配置
@@ -66,9 +69,9 @@ worker 只从服务器拉取统一任务队列，不再读取独立的本地 wor
 
 ## 日志位置
 程序运行后会自动创建 `runtime` 目录：
-- `runtime/logs/server.log`
+- `runtime/logs/ui.log`
 - `runtime/logs/worker.log`
-- `runtime/logs/main.log`
+- `runtime/logs/runtime_*.log`
 
 ## 交付包边界
 交付包应只包含运行所需源码与配置模板，以下内容不进入交付包：
@@ -85,7 +88,7 @@ worker 只从服务器拉取统一任务队列，不再读取独立的本地 wor
 
 ## 敏感配置填写
 请在部署时手动填写以下字段，不要把真实值提交到源码基线：
-- `config/server.yaml`：`admin_account.password`、`api_token`
+- `config/server.yaml`：`database.password`、`admin_account.password`、`api_token`
 - `config/client.yaml`：`agent_token`、`api_token`
 
 ## 干净打包链
