@@ -2,6 +2,7 @@ from playwright.sync_api import sync_playwright
 
 from core.browser_manager import BrowserManager
 from core.scraper import Scraper
+from utils.helpers import ENV_STOP_FLAG
 from utils.logger import log
 
 
@@ -72,6 +73,7 @@ def collect_groups_for_machine(browser_settings, max_scrolls=8, log_callback=Non
     total_groups = 0
     collected_window_count = 0
     failed_window_count = 0
+    stopped = False
     _emit_collect_log(
         log_callback,
         f"[采集] 已识别 {len(target_profiles)} 个窗口，开始逐窗口采集已加入小组。",
@@ -105,10 +107,13 @@ def collect_groups_for_machine(browser_settings, max_scrolls=8, log_callback=Non
                     continue
 
                 page = session.get("page")
-                scraper = Scraper(page, window_label=window_label)
-                groups = _normalize_window_groups(
-                    scraper.collect_joined_groups(max_scrolls=max_scrolls)
+                scraper = Scraper(page, window_label=window_label, stop_env=ENV_STOP_FLAG)
+                collect_result = scraper.collect_joined_groups(
+                    max_scrolls=max_scrolls,
+                    return_meta=True,
                 )
+                groups = _normalize_window_groups(collect_result.get("groups") or [])
+                stopped = bool(collect_result.get("stopped"))
                 total_groups += len(groups)
                 collected_window_count += 1
                 windows.append(
@@ -122,6 +127,12 @@ def collect_groups_for_machine(browser_settings, max_scrolls=8, log_callback=Non
                     log_callback,
                     f"[采集] {window_label} 采集完成，共获取 {len(groups)} 个小组。",
                 )
+                if stopped:
+                    _emit_collect_log(
+                        log_callback,
+                        f"[采集] {window_label} 检测到停止指令，结束本轮采集并保留已获取结果。",
+                    )
+                    break
             except Exception as exc:
                 failed_window_count += 1
                 windows.append(
@@ -135,6 +146,8 @@ def collect_groups_for_machine(browser_settings, max_scrolls=8, log_callback=Non
                 _emit_collect_log(log_callback, f"[采集] {window_label} 采集失败: {exc}")
             finally:
                 session = None
+            if stopped:
+                break
 
     _emit_collect_log(
         log_callback,
@@ -146,4 +159,5 @@ def collect_groups_for_machine(browser_settings, max_scrolls=8, log_callback=Non
         "collected_window_count": collected_window_count,
         "failed_window_count": failed_window_count,
         "total_groups": total_groups,
+        "stopped": stopped,
     }

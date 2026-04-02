@@ -494,7 +494,11 @@ class TaskManager:
                         f"排队 {age_seconds:.0f} 秒仍未被真正接手（{trigger_label}） ==="
                     )
             elif status == "running":
-                if age_seconds < STALE_RUNNING_SECONDS:
+                collect_poll_recovery = (
+                    action == "collect_groups"
+                    and str(trigger or "").strip() == "agent_task_poll"
+                )
+                if age_seconds < STALE_RUNNING_SECONDS and not collect_poll_recovery:
                     continue
                 if action == "start":
                     later_stop = self._find_later_terminal_machine_action(
@@ -514,6 +518,32 @@ class TaskManager:
                         stale_error = "stale_running_cleanup"
                         cleanup_message = (
                             f"=== 检测到陈旧运行任务#{task_id}，已自动清理：执行端 {machine_id} "
+                            f"持续 {age_seconds:.0f} 秒无状态更新且执行端无心跳（{trigger_label}） ==="
+                        )
+                elif action == "collect_groups":
+                    later_collect = self._find_later_terminal_machine_action(
+                        db,
+                        machine_id,
+                        task_id,
+                        action="collect_groups",
+                        window_token=None,
+                    )
+                    if later_collect:
+                        stale_error = "stale_running_cleanup"
+                        cleanup_message = (
+                            f"=== 检测到陈旧采集任务#{task_id}，已自动清理：执行端 {machine_id} "
+                            f"后续采集任务#{later_collect['id']} 已结束（{trigger_label}） ==="
+                        )
+                    elif collect_poll_recovery:
+                        stale_error = "stale_running_cleanup"
+                        cleanup_message = (
+                            f"=== 检测到陈旧采集任务#{task_id}，已自动清理：执行端 {machine_id} "
+                            f"已重新进入取任务轮询，旧采集任务不再活跃（{trigger_label}） ==="
+                        )
+                    elif not agent_online:
+                        stale_error = "stale_running_cleanup"
+                        cleanup_message = (
+                            f"=== 检测到陈旧采集任务#{task_id}，已自动清理：执行端 {machine_id} "
                             f"持续 {age_seconds:.0f} 秒无状态更新且执行端无心跳（{trigger_label}） ==="
                         )
                 elif action in {"stop", "pause", "resume"}:
@@ -982,8 +1012,14 @@ class TaskManager:
             return False, "总后台不参与任务操作，请在子后台执行"
         with self._lock:
             state = self._get_owner_runtime_state(owner_name)
-            if not (state["task_running"] or state["task_pending"] or state["task_paused"]):
-                return False, "当前没有可停止的运行任务"
+            if not (
+                state["task_running"]
+                or state["task_pending"]
+                or state["task_paused"]
+                or state["collect_running"]
+                or state["collect_pending"]
+            ):
+                return False, "当前没有可停止的运行/采集任务"
             return self._enqueue_owner_device_actions(
                 "stop", owner_name, allow_disabled=True
             )
@@ -3458,8 +3494,8 @@ def handle_client_action(payload, action):
                 "message": f"当前状态不允许启动：{_translate_client_start_block_reason(status_info.get('start_block_reason'))}",
             }
     elif action == "stop":
-        if not (task_running or task_pending or task_paused):
-            return {"ok": True, "result": "blocked", "message": "当前没有可停止的运行任务"}
+        if not (task_running or task_pending or task_paused or collect_running or collect_pending):
+            return {"ok": True, "result": "blocked", "message": "当前没有可停止的运行/采集任务"}
     elif action == "pause":
         if task_paused:
             return {"ok": True, "result": "blocked", "message": "当前任务已处于暂停状态"}

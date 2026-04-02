@@ -7,6 +7,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import uuid
 from pathlib import Path
 
@@ -705,6 +706,9 @@ class Worker:
         self.cfg = cfg
         self.main_process = None
         self.single_processes = {}
+        self.collect_thread = None
+        self.collect_task_id = None
+        self.collect_owner = ""
         self.lock = threading.Lock()
 
     def _emit_local_log(self, owner, line):
@@ -732,6 +736,21 @@ class Worker:
         normalized_line = str(line or "").rstrip("\r\n")
         if not normalized_line or not self._should_forward_server_log(normalized_line):
             return
+        _post_agent_json(
+            self.cfg,
+            f"{self.cfg['server_url']}/api/agent/log",
+            {
+                "owner": owner or "",
+                "lines": [normalized_line],
+            },
+            timeout=5,
+        )
+
+    def _emit_collect_log(self, owner, line):
+        normalized_line = str(line or "").rstrip("\r\n")
+        if not normalized_line:
+            return
+        self._emit_local_log(owner, normalized_line)
         _post_agent_json(
             self.cfg,
             f"{self.cfg['server_url']}/api/agent/log",
@@ -791,6 +810,7 @@ class Worker:
             )
 
     def _cleanup_finished_processes_locked(self):
+        self._cleanup_collect_thread_locked()
         if self.main_process and self.main_process.poll() is not None:
             self.main_process = None
         dead_tokens = [
@@ -798,6 +818,18 @@ class Worker:
         ]
         for token in dead_tokens:
             self.single_processes.pop(token, None)
+
+    def _cleanup_collect_thread_locked(self):
+        thread = self.collect_thread
+        if thread and not thread.is_alive():
+            self.collect_thread = None
+            self.collect_task_id = None
+            self.collect_owner = ""
+
+    def _has_active_collect_task_locked(self):
+        self._cleanup_collect_thread_locked()
+        thread = self.collect_thread
+        return bool(thread and thread.is_alive())
 
     def _build_env(self, owner, payload):
         env = os.environ.copy()
@@ -1023,8 +1055,6 @@ class Worker:
         return build_browser_settings(runtime_config)
 
     def _handle_collect_groups(self, owner, payload, task_id):
-        from core.group_collector import collect_groups_for_machine
-
         owner = str(owner or self.cfg.get("owner") or "").strip()
         if not owner:
             _post_agent_json(
@@ -1034,14 +1064,21 @@ class Worker:
             )
             return
 
-        with self.lock:
-            if self._has_active_runtime_processes_locked():
-                _post_agent_json(
-                    self.cfg,
-                    f"{self.cfg['server_url']}/api/agent/report",
-                    {"task_id": task_id, "status": "failed", "error": "busy_running_task"},
-                )
-                return
+        try:
+            from core.group_collector import collect_groups_for_machine
+        except Exception as exc:
+            self._emit_collect_log(owner, f"[采集] 初始化失败：{exc}")
+            traceback.print_exc()
+            _post_agent_json(
+                self.cfg,
+                f"{self.cfg['server_url']}/api/agent/report",
+                {
+                    "task_id": task_id,
+                    "status": "failed",
+                    "error": "collect_import_failed",
+                },
+            )
+            return
 
         browser_settings = self._build_collect_browser_settings(payload)
         bit_api = str(browser_settings.get("bit_api") or "").strip()
@@ -1064,13 +1101,49 @@ class Worker:
         except Exception:
             max_scrolls = 8
 
-        self._emit_local_log(owner, "[采集] 已收到群组采集任务，开始准备窗口采集。")
-        result = collect_groups_for_machine(
-            browser_settings=browser_settings,
-            max_scrolls=max_scrolls,
-        )
+        stop_flag = _stop_flag_path(owner)
+        pause_flag = _pause_flag_path(owner)
+        stop_flag.parent.mkdir(parents=True, exist_ok=True)
+        if stop_flag.exists():
+            stop_flag.unlink()
+        if pause_flag.exists():
+            pause_flag.unlink()
+        previous_stop_env = os.environ.get("FB_RPA_STOP_FLAG")
+        previous_pause_env = os.environ.get("FB_RPA_PAUSE_FLAG")
+        os.environ["FB_RPA_STOP_FLAG"] = str(stop_flag)
+        os.environ["FB_RPA_PAUSE_FLAG"] = str(pause_flag)
+        self._emit_collect_log(owner, "[采集] 已收到群组采集任务，开始准备窗口采集。")
+        try:
+            result = collect_groups_for_machine(
+                browser_settings=browser_settings,
+                max_scrolls=max_scrolls,
+                log_callback=lambda message: self._emit_collect_log(owner, message),
+            )
+        except Exception as exc:
+            self._emit_collect_log(owner, f"[采集] 执行失败：{exc}")
+            traceback.print_exc()
+            _post_agent_json(
+                self.cfg,
+                f"{self.cfg['server_url']}/api/agent/report",
+                {
+                    "task_id": task_id,
+                    "status": "failed",
+                    "error": "collect_runtime_failed",
+                },
+            )
+            return
+        finally:
+            if previous_stop_env is None:
+                os.environ.pop("FB_RPA_STOP_FLAG", None)
+            else:
+                os.environ["FB_RPA_STOP_FLAG"] = previous_stop_env
+            if previous_pause_env is None:
+                os.environ.pop("FB_RPA_PAUSE_FLAG", None)
+            else:
+                os.environ["FB_RPA_PAUSE_FLAG"] = previous_pause_env
         windows = list(result.get("windows") or [])
         if int(result.get("profile_count") or 0) <= 0:
+            self._emit_collect_log(owner, "[采集] 未获取到任何可用窗口，任务结束。")
             _post_agent_json(
                 self.cfg,
                 f"{self.cfg['server_url']}/api/agent/report",
@@ -1078,29 +1151,84 @@ class Worker:
             )
             return
 
-        status_code, collect_result = _post_agent_json(
-            self.cfg,
-            f"{self.cfg['server_url']}/api/agent/collect-report",
-            {
-                "owner": owner,
-                "machine_id": self.cfg.get("machine_id") or "",
-                "windows": windows,
-            },
-            timeout=60,
-        )
-        if status_code != 200 or not isinstance(collect_result, dict) or not collect_result.get("ok"):
-            self._emit_local_log(owner, "[采集] 采集结果上报失败。")
+        if windows:
+            status_code, collect_result = _post_agent_json(
+                self.cfg,
+                f"{self.cfg['server_url']}/api/agent/collect-report",
+                {
+                    "owner": owner,
+                    "machine_id": self.cfg.get("machine_id") or "",
+                    "windows": windows,
+                },
+                timeout=60,
+            )
+            if status_code != 200 or not isinstance(collect_result, dict) or not collect_result.get("ok"):
+                self._emit_collect_log(owner, "[采集] 采集结果上报失败。")
+                _post_agent_json(
+                    self.cfg,
+                    f"{self.cfg['server_url']}/api/agent/report",
+                    {"task_id": task_id, "status": "failed", "error": "collect_report_failed"},
+                )
+                return
+        if result.get("stopped"):
+            self._emit_collect_log(owner, "[采集] 已根据停止指令提前结束，本轮已获取结果已上报。")
             _post_agent_json(
                 self.cfg,
                 f"{self.cfg['server_url']}/api/agent/report",
-                {"task_id": task_id, "status": "failed", "error": "collect_report_failed"},
+                {"task_id": task_id, "status": "failed", "error": "collect_stopped"},
             )
             return
+        self._emit_collect_log(
+            owner,
+            (
+                f"[采集] 已完成：窗口 {int(result.get('collected_window_count') or 0)} 个，"
+                f"失败窗口 {int(result.get('failed_window_count') or 0)} 个，"
+                f"群组 {int(result.get('total_groups') or 0)} 个。"
+            ),
+        )
         _post_agent_json(
             self.cfg,
             f"{self.cfg['server_url']}/api/agent/report",
             {"task_id": task_id, "status": "done"},
         )
+
+    def _run_collect_task(self, owner, payload, task_id):
+        try:
+            self._handle_collect_groups(owner, payload, task_id)
+        finally:
+            with self.lock:
+                if self.collect_task_id == task_id:
+                    self.collect_thread = None
+                    self.collect_task_id = None
+                    self.collect_owner = ""
+
+    def _start_collect_task(self, owner, payload, task_id):
+        owner = str(owner or self.cfg.get("owner") or "").strip()
+        with self.lock:
+            self._cleanup_finished_processes_locked()
+            if self._has_active_collect_task_locked():
+                _post_agent_json(
+                    self.cfg,
+                    f"{self.cfg['server_url']}/api/agent/report",
+                    {"task_id": task_id, "status": "failed", "error": "busy_collect_task"},
+                )
+                return
+            if self._has_active_runtime_processes_locked():
+                _post_agent_json(
+                    self.cfg,
+                    f"{self.cfg['server_url']}/api/agent/report",
+                    {"task_id": task_id, "status": "failed", "error": "busy_running_task"},
+                )
+                return
+            thread = threading.Thread(
+                target=self._run_collect_task,
+                args=(owner, dict(payload or {}), task_id),
+                daemon=True,
+            )
+            self.collect_thread = thread
+            self.collect_task_id = task_id
+            self.collect_owner = owner
+        thread.start()
 
     def handle_task(self, task):
         task_id = task.get("id")
@@ -1183,7 +1311,7 @@ class Worker:
             return
 
         if action == "collect_groups":
-            self._handle_collect_groups(owner, payload, task_id)
+            self._start_collect_task(owner, payload, task_id)
             return
 
         _post_agent_json(

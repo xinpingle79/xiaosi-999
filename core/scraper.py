@@ -2,8 +2,12 @@ import random
 import time
 from urllib.parse import parse_qs, urljoin, urlparse
 
-from utils.helpers import run_pause_aware_action, wait_if_runtime_paused
+from utils.helpers import run_pause_aware_action, runtime_flag_active, wait_if_runtime_paused
 from utils.logger import log
+
+
+class CollectStopRequested(RuntimeError):
+    pass
 
 
 class Scraper:
@@ -570,10 +574,11 @@ class Scraper:
         "you",
     }
 
-    def __init__(self, page, window_label=None):
+    def __init__(self, page, window_label=None, stop_env=None):
         self.page = page
         self._current_user_id = None
         self.window_label = (window_label or "").strip()
+        self.stop_env = str(stop_env or "").strip()
         self._last_scope_snapshot = None
         self._last_members_ready_snapshot = None
         self._last_members_ready_stable_rounds = 0
@@ -600,6 +605,13 @@ class Scraper:
 
     def _prefix(self):
         return f"[{self.window_label}] " if self.window_label else ""
+
+    def _stop_requested(self):
+        return bool(self.stop_env and runtime_flag_active(self.stop_env))
+
+    def _raise_if_stop_requested(self):
+        if self._stop_requested():
+            raise CollectStopRequested("collect_stop_requested")
 
     def _set_last_scope_status(self, confirmed, reason="", label=""):
         self._last_scope_status = {
@@ -1123,11 +1135,13 @@ class Scraper:
 
         paused_seconds, _ = wait_if_runtime_paused(
             pause_env=self.ENV_PAUSE_FLAG,
-            stop_env=None,
+            stop_env=self.stop_env or None,
             poll_seconds=0.1,
             on_pause=_on_pause,
             on_resume=_on_resume,
         )
+        if self._stop_requested():
+            raise CollectStopRequested("collect_stop_requested")
         return paused_seconds
 
     def _run_pause_aware_action(self, action, timeout_ms, slice_ms=320, retry_interval=0.05):
@@ -1143,16 +1157,21 @@ class Scraper:
             if pause_logged:
                 log.info("▶️ 已继续，恢复执行。")
 
-        return run_pause_aware_action(
-            action,
-            timeout_ms=timeout_ms,
-            pause_env=self.ENV_PAUSE_FLAG,
-            stop_env=None,
-            slice_ms=slice_ms,
-            retry_interval=retry_interval,
-            on_pause=_on_pause,
-            on_resume=_on_resume,
-        )
+        try:
+            return run_pause_aware_action(
+                action,
+                timeout_ms=timeout_ms,
+                pause_env=self.ENV_PAUSE_FLAG,
+                stop_env=self.stop_env or None,
+                slice_ms=slice_ms,
+                retry_interval=retry_interval,
+                on_pause=_on_pause,
+                on_resume=_on_resume,
+            )
+        except TimeoutError as exc:
+            if str(exc) == "pause_aware_action_stopped" and self.stop_env:
+                raise CollectStopRequested("collect_stop_requested") from exc
+            raise
 
     def _goto_pause_aware(self, url, timeout_ms=30000, settle_timeout_ms=3000):
         target_url = str(url or "").strip()
@@ -1211,6 +1230,7 @@ class Scraper:
         duration = max(0.0, float(seconds or 0.0))
         if duration <= 0:
             return
+        self._raise_if_stop_requested()
         deadline = time.time() + duration
         while time.time() < deadline:
             paused_seconds = self._wait_if_paused()
@@ -1231,6 +1251,18 @@ class Scraper:
         if self._is_checkpoint_surface(self.page.url):
             log.warning(f"{self._prefix()}接管页面后命中 Facebook checkpoint，停止进入小组流程，交由上层统一处理。")
             return False
+        if self._is_joined_groups_listing_ready():
+            log.info(f"{self._prefix()}当前已位于“你的小组”列表，沿用当前页面继续采集。")
+            return True
+        if self._has_groups_surface_ready():
+            log.info(f"{self._prefix()}当前已位于小组页面，沿用当前页面继续进入列表。")
+            return True
+        if self._is_groups_surface(self.page.url):
+            log.info(f"{self._prefix()}当前已在小组域页面，先等待当前页面稳定后再继续。")
+            if self._wait_for_groups_surface(timeout=10.0, step_name="小组首页"):
+                return True
+            if self._open_groups_surface_by_direct_navigation():
+                return True
         if self._open_home_surface_for_groups_entry():
             click_info = self._click_groups_entry()
             if click_info and self._wait_for_groups_surface(timeout=12.0, step_name="小组首页"):
@@ -1275,13 +1307,7 @@ class Scraper:
             return False
         return self._stabilize_joined_groups_listing(timeout=stabilize_timeout, step_name=step_name)
 
-    def collect_joined_groups(self, max_scrolls=8, allowed_group_ids=None):
-        if not self.open_groups_feed():
-            return []
-        if not self._open_joined_groups_listing():
-            return []
-        self._scroll_joined_groups_container(to_top=True)
-
+    def collect_joined_groups(self, max_scrolls=8, allowed_group_ids=None, return_meta=False):
         groups = []
         seen_group_ids = set()
         normalized_allowed_group_ids = {
@@ -1294,62 +1320,78 @@ class Scraper:
         recovery_attempts = 0
         max_recovery_attempts = 2
         unlimited = not max_scrolls or int(max_scrolls) <= 0
+        stopped = False
 
-        while unlimited or round_idx < int(max_scrolls):
-            batch = self._joined_groups_snapshot()
-            if not batch.get("ready"):
-                self._wait_for_groups_list_ready(
-                    timeout=self.JOINED_GROUPS_STABILIZE_TIMEOUT_SECONDS,
-                    step_name="已加入小组列表",
-                )
+        try:
+            self._raise_if_stop_requested()
+            if not self.open_groups_feed():
+                return {"groups": [], "stopped": False} if return_meta else []
+            if not self._open_joined_groups_listing():
+                return {"groups": [], "stopped": False} if return_meta else []
+            self._scroll_joined_groups_container(to_top=True)
+
+            while unlimited or round_idx < int(max_scrolls):
+                self._raise_if_stop_requested()
                 batch = self._joined_groups_snapshot()
-            items = list(batch.get("items") or [])
-            added = 0
-            for item in items:
-                group_url = self._extract_group_root_url(item.get("href"))
-                group_id = self._extract_group_id(group_url)
-                if not group_id or group_id in seen_group_ids:
-                    continue
-                seen_group_ids.add(group_id)
-                groups.append(
-                    {
-                        "group_id": group_id,
-                        "group_name": str(item.get("text") or "").strip(),
-                        "group_url": group_url,
-                    }
-                )
-                added += 1
+                if not batch.get("ready"):
+                    self._wait_for_groups_list_ready(
+                        timeout=self.JOINED_GROUPS_STABILIZE_TIMEOUT_SECONDS,
+                        step_name="已加入小组列表",
+                    )
+                    batch = self._joined_groups_snapshot()
+                items = list(batch.get("items") or [])
+                added = 0
+                for item in items:
+                    group_url = self._extract_group_root_url(item.get("href"))
+                    group_id = self._extract_group_id(group_url)
+                    if not group_id or group_id in seen_group_ids:
+                        continue
+                    seen_group_ids.add(group_id)
+                    groups.append(
+                        {
+                            "group_id": group_id,
+                            "group_name": str(item.get("text") or "").strip(),
+                            "group_url": group_url,
+                        }
+                    )
+                    added += 1
 
-            log.info(
-                f"正在采集已加入小组 (轮次: {round_idx + 1}{'' if unlimited else '/' + str(max_scrolls)})，"
-                f"本轮新增 {added} 个，累计 {len(groups)} 个"
-            )
-            if normalized_allowed_group_ids and normalized_allowed_group_ids.issubset(seen_group_ids):
-                log.info(f"{self._prefix()}白名单群已全部命中，提前结束已加入小组采集。")
-                break
-
-            idle_rounds = idle_rounds + 1 if added == 0 else 0
-            list_ready = bool(items) or self._has_groups_list_ready()
-            if added == 0 and idle_rounds >= 2 and not list_ready and recovery_attempts < max_recovery_attempts:
-                recovery_attempts += 1
                 log.info(
-                    f"{self._prefix()}已加入小组列表连续为空且列表未稳定，"
-                    f"尝试重新进入“你的小组”恢复列表 ({recovery_attempts}/{max_recovery_attempts})。"
+                    f"正在采集已加入小组 (轮次: {round_idx + 1}{'' if unlimited else '/' + str(max_scrolls)})，"
+                    f"本轮新增 {added} 个，累计 {len(groups)} 个"
                 )
-                if self._open_joined_groups_listing():
-                    self._scroll_joined_groups_container(to_top=True)
-                    idle_rounds = 0
-                    round_idx += 1
-                    continue
-            moved = self._scroll_joined_groups_container()
-            if moved is None:
-                moved = self.scroll_page()
-            if not moved and idle_rounds >= 2:
-                break
-            if idle_rounds >= 5:
-                break
-            round_idx += 1
+                if normalized_allowed_group_ids and normalized_allowed_group_ids.issubset(seen_group_ids):
+                    log.info(f"{self._prefix()}白名单群已全部命中，提前结束已加入小组采集。")
+                    break
 
+                idle_rounds = idle_rounds + 1 if added == 0 else 0
+                list_ready = bool(items) or self._has_groups_list_ready()
+                if added == 0 and idle_rounds >= 2 and not list_ready and recovery_attempts < max_recovery_attempts:
+                    recovery_attempts += 1
+                    log.info(
+                        f"{self._prefix()}已加入小组列表连续为空且列表未稳定，"
+                        f"尝试重新进入“你的小组”恢复列表 ({recovery_attempts}/{max_recovery_attempts})。"
+                    )
+                    if self._open_joined_groups_listing():
+                        self._scroll_joined_groups_container(to_top=True)
+                        idle_rounds = 0
+                        round_idx += 1
+                        continue
+                self._raise_if_stop_requested()
+                moved = self._scroll_joined_groups_container()
+                if moved is None:
+                    moved = self.scroll_page()
+                if not moved and idle_rounds >= 2:
+                    break
+                if idle_rounds >= 5:
+                    break
+                round_idx += 1
+        except CollectStopRequested:
+            stopped = True
+            log.warning(f"{self._prefix()}检测到停止指令，结束当前小组采集并保留已获取结果。")
+
+        if return_meta:
+            return {"groups": groups, "stopped": stopped}
         return groups
 
     def collect_joined_group_urls(self, max_scrolls=8, allowed_group_ids=None):
