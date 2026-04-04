@@ -874,21 +874,59 @@ button[aria-disabled="true"] {
   width: 170px;
 }
 
-.sub-app .device-card .data-table .col-window-token {
-  width: 140px;
-  min-width: 140px;
+.sub-app .card[data-page="device"] .data-table .col-window-token {
+  width: 263px;
+  min-width: 263px;
 }
 
-.sub-app .device-card .data-table .col-window-token .mini-inline-input {
-  width: 120px;
+.sub-app .card[data-page="device"] .data-table th:nth-child(2),
+.sub-app .card[data-page="device"] .data-table td:nth-child(2) {
+  width: calc(295px - 2ch);
+  min-width: calc(295px - 2ch);
+  max-width: calc(295px - 2ch);
 }
 
-.sub-app .device-card .data-table .col-device-status {
-  width: 73px;
-  min-width: 73px;
+.sub-app .card[data-page="device"] .data-table th:nth-child(3),
+.sub-app .card[data-page="device"] .data-table td:nth-child(3) {
+  width: calc(108px - 3ch);
+  min-width: calc(108px - 3ch);
+  max-width: calc(108px - 3ch);
 }
 
-.sub-app .device-card .data-table .col-actions {
+.sub-app .card[data-page="device"] .data-table th:nth-child(4),
+.sub-app .card[data-page="device"] .data-table td:nth-child(4) {
+  width: calc(108px - 3ch);
+  min-width: calc(108px - 3ch);
+  max-width: calc(108px - 3ch);
+}
+
+.sub-app .card[data-page="device"] .data-table th:nth-child(5),
+.sub-app .card[data-page="device"] .data-table td:nth-child(5) {
+  width: calc(195px - 2ch);
+  min-width: calc(195px - 2ch);
+  max-width: calc(195px - 2ch);
+}
+
+.sub-app .card[data-page="device"] .data-table th:nth-child(6),
+.sub-app .card[data-page="device"] .data-table td:nth-child(6) {
+  width: calc(269px + 12ch);
+  min-width: calc(269px + 12ch);
+  max-width: calc(269px + 12ch);
+}
+
+.sub-app .card[data-page="device"] .data-table .col-window-token .mini-inline-input {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.sub-app .card[data-page="device"] .data-table .col-device-status {
+  width: calc(73px - 2ch);
+  min-width: calc(73px - 2ch);
+  max-width: calc(73px - 2ch);
+}
+
+.sub-app .card[data-page="device"] .data-table .col-actions {
   min-width: 220px;
   width: 220px;
 }

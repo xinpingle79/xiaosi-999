@@ -543,6 +543,21 @@ def _log_window_finish_reason(summary, label, continue_other_windows=False):
 def run_bitbrowser_batch(config, msgs, browser_settings):
     bm = BrowserManager(browser_settings)
     profiles = sort_bitbrowser_profiles(bm.list_bitbrowser_profiles())
+    selected_window_groups = _load_selected_window_groups()
+    configured_window_tokens = []
+    if isinstance(selected_window_groups, dict) and selected_window_groups:
+        configured_window_tokens = [
+            str(raw_window_token or "").strip()
+            for raw_window_token in selected_window_groups.keys()
+            if str(raw_window_token or "").strip()
+        ]
+    configured_window_token_set = set(configured_window_tokens)
+    if configured_window_token_set:
+        profiles = [
+            profile
+            for profile in profiles
+            if str(resolve_window_token(profile) or "").strip() in configured_window_token_set
+        ]
     startup_gate_max_wait_seconds = 5.0
     startup_gate_early_release_seconds = 2.8
     startup_gate_poll_seconds = 0.2
@@ -550,13 +565,28 @@ def run_bitbrowser_batch(config, msgs, browser_settings):
     if max_windows > 0:
         profiles = profiles[:max_windows]
     if not profiles:
-        log.error("未获取到任何可用的比特浏览器窗口，任务结束。")
+        if configured_window_token_set:
+            log.error(
+                "当前配置窗口未匹配到任何可用的比特浏览器窗口，任务结束。"
+            )
+        else:
+            log.error("未获取到任何可用的比特浏览器窗口，任务结束。")
         return
 
-    log.info(
-        f"已自动识别 {len(profiles)} 个比特浏览器窗口，将顺序接入：前一窗口优先完成群组接入，"
-        f"若已完成目标小组定位将提前放行，最多等待 {int(startup_gate_max_wait_seconds)} 秒后继续下一窗口，并发执行。"
+    configured_window_text = ".".join(
+        str(resolve_window_token(profile) or "").strip()
+        for profile in profiles
+        if str(resolve_window_token(profile) or "").strip()
     )
+    if configured_window_text:
+        log.info(
+            f"已识别 {len(profiles)} 个窗口，"
+            f"{configured_window_text}窗口 开始逐窗口进行运行。"
+        )
+    else:
+        log.info(
+            f"已自动识别 {len(profiles)} 个窗口，开始逐窗口进行运行。"
+        )
     total_sent = 0
     finished_groups = 0
     total_skipped_groups = 0
@@ -1156,6 +1186,9 @@ def collect_target_groups(scraper, task_cfg, window_token="", account_label=""):
     if collect_error == "facebook_not_logged_in":
         log.warning(f"{account_prefix}当前窗口未登录 Facebook，停止正式运行。")
         return _build_group_collection_result([], "facebook_not_logged_in")
+    if collect_error == "account_restricted":
+        log.warning(f"{account_prefix}当前窗口命中 Facebook checkpoint/风控页，停止正式运行。")
+        return _build_group_collection_result([], "account_restricted")
     group_urls = [
         str(item.get("group_url") or "").strip()
         for item in list((collect_result or {}).get("groups") or [])

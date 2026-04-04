@@ -74,9 +74,16 @@ def collect_groups_for_machine(browser_settings, max_scrolls=8, log_callback=Non
     collected_window_count = 0
     failed_window_count = 0
     stopped = False
+    target_window_tokens = []
+    for profile in target_profiles:
+        token = str(resolve_window_token(profile) or "").strip()
+        if token:
+            target_window_tokens.append(token)
+    target_window_text = ".".join(target_window_tokens)
     _emit_collect_log(
         log_callback,
-        f"[采集] 已识别 {len(target_profiles)} 个窗口，开始逐窗口采集已加入小组。",
+        f"[采集] 已识别 {len(target_profiles)} 个窗口，"
+        f"{target_window_text + '窗口 ' if target_window_text else ''}开始逐窗口采集已加入小组。",
     )
 
     with sync_playwright() as playwright:
@@ -108,27 +115,34 @@ def collect_groups_for_machine(browser_settings, max_scrolls=8, log_callback=Non
 
                 page = session.get("page")
                 scraper = Scraper(page, window_label=window_label, stop_env=ENV_STOP_FLAG)
-                if scraper._is_login_surface():
+                initial_block_reason = scraper._get_collection_block_reason()
+                if initial_block_reason:
                     failed_window_count += 1
                     windows.append(
                         {
                             "window_token": window_token or str(session.get("account_id") or "").strip(),
                             "window_name": window_name,
                             "groups": [],
-                            "error": "facebook_not_logged_in",
+                            "error": initial_block_reason,
                         }
                     )
-                    _emit_collect_log(
-                        log_callback,
-                        f"[采集] {window_label} 未登录 Facebook，已停止当前窗口采集并跳过，不影响其他窗口。",
-                    )
+                    if initial_block_reason == "account_restricted":
+                        _emit_collect_log(
+                            log_callback,
+                            f"[采集] {window_label} 命中 Facebook checkpoint/风控页，已停止当前窗口采集并跳过，不影响其他窗口。",
+                        )
+                    else:
+                        _emit_collect_log(
+                            log_callback,
+                            f"[采集] {window_label} 未登录 Facebook，已停止当前窗口采集并跳过，不影响其他窗口。",
+                        )
                     continue
                 collect_result = scraper.collect_joined_groups(
                     max_scrolls=max_scrolls,
                     return_meta=True,
                 )
                 collect_error = str((collect_result or {}).get("error") or "").strip()
-                if collect_error == "facebook_not_logged_in":
+                if collect_error in {"facebook_not_logged_in", "account_restricted"}:
                     failed_window_count += 1
                     windows.append(
                         {
@@ -138,10 +152,16 @@ def collect_groups_for_machine(browser_settings, max_scrolls=8, log_callback=Non
                             "error": collect_error,
                         }
                     )
-                    _emit_collect_log(
-                        log_callback,
-                        f"[采集] {window_label} 进入群组采集链时识别到未登录，已停止当前窗口采集并跳过，不影响其他窗口。",
-                    )
+                    if collect_error == "account_restricted":
+                        _emit_collect_log(
+                            log_callback,
+                            f"[采集] {window_label} 进入群组采集链时识别到 Facebook checkpoint/风控页，已停止当前窗口采集并跳过，不影响其他窗口。",
+                        )
+                    else:
+                        _emit_collect_log(
+                            log_callback,
+                            f"[采集] {window_label} 进入群组采集链时识别到未登录，已停止当前窗口采集并跳过，不影响其他窗口。",
+                        )
                     continue
                 groups = _normalize_window_groups(collect_result.get("groups") or [])
                 stopped = bool(collect_result.get("stopped"))

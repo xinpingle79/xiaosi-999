@@ -69,6 +69,8 @@ let currentPageKey = "task";
 let lastUsersRefreshAt = 0;
 let lastDevicesRefreshAt = 0;
 let lastDeviceInfoRefreshAt = 0;
+let lastDeviceWindowTokenEditAt = 0;
+const deviceWindowTokenDrafts = new Map();
 const GROUP_ACTION_LABELS = new Set([
   "查看小组",
   "进入小组",
@@ -118,6 +120,53 @@ function bindLogInteraction(target, setFlag) {
   target.addEventListener("touchend", () => {
     setTimeout(stopInteracting, 0);
   });
+}
+
+function parseWindowTokenList(value) {
+  const text = String(value || "").trim();
+  if (!text) return [];
+  const parts = text.split(/[、,，/\s]+/u);
+  const tokens = [];
+  const seen = new Set();
+  parts.forEach((part) => {
+    const token = String(part || "").trim();
+    if (!token || seen.has(token)) return;
+    seen.add(token);
+    tokens.push(token);
+  });
+  return tokens;
+}
+
+function normalizeWindowTokenList(value) {
+  const tokens = parseWindowTokenList(value);
+  if (!tokens.length) return "";
+  return `${tokens.join("/")}/`;
+}
+
+function isEditingDeviceWindowToken() {
+  const activeElement = document.activeElement;
+  if (!activeElement) return false;
+  return Boolean(
+    activeElement.matches?.('input[data-role="device-window-token"]') &&
+      deviceTableBody?.contains(activeElement)
+  );
+}
+
+function hasRecentDeviceWindowTokenEdit() {
+  return Date.now() - lastDeviceWindowTokenEditAt < 2500;
+}
+
+function rememberDeviceWindowTokenDraft(machineId, value) {
+  const normalizedMachineId = String(machineId || "").trim();
+  if (!normalizedMachineId) return;
+  deviceWindowTokenDrafts.set(normalizedMachineId, String(value || ""));
+  lastDeviceWindowTokenEditAt = Date.now();
+}
+
+function forgetDeviceWindowTokenDraft(machineId) {
+  const normalizedMachineId = String(machineId || "").trim();
+  if (!normalizedMachineId) return;
+  deviceWindowTokenDrafts.delete(normalizedMachineId);
 }
 
 bindLogInteraction(logOutput, (value) => {
@@ -239,6 +288,15 @@ if (userTableBody) {
 }
 if (deviceTableBody) {
   deviceTableBody.addEventListener("click", handleDeviceTableClick);
+  deviceTableBody.addEventListener("input", (event) => {
+    const input = event.target.closest('input[data-role="device-window-token"]');
+    if (!input) return;
+    const row = input.closest("tr");
+    const saveButton = row ? row.querySelector('button[data-action="save-window-token"]') : null;
+    const machineId = String(saveButton?.dataset.machineId || "").trim();
+    if (!machineId) return;
+    rememberDeviceWindowTokenDraft(machineId, input.value);
+  });
 }
 if (deviceDetailBackBtn) {
   deviceDetailBackBtn.addEventListener("click", () => {
@@ -961,7 +1019,12 @@ async function refreshDevices() {
   if (!deviceTableBody) {
     return;
   }
-  if (tableUserInteracting || isTableSelectionActive()) {
+  if (
+    tableUserInteracting ||
+    isTableSelectionActive() ||
+    isEditingDeviceWindowToken() ||
+    hasRecentDeviceWindowTokenEdit()
+  ) {
     return;
   }
   const response = await api("/agent/list");
@@ -1182,7 +1245,7 @@ function renderDeviceTable(agents) {
   if (!rows.length) {
     deviceTableBody.innerHTML = `
       <tr class="empty-row">
-        <td colspan="${IS_SUB ? 9 : 8}">暂无数据</td>
+        <td colspan="${IS_SUB ? 8 : 8}">暂无数据</td>
       </tr>
     `;
     return;
@@ -1196,7 +1259,12 @@ function renderDeviceTable(agents) {
       const isDisabled = status === 0;
       const statusText = isDisabled ? "禁用" : "启用";
       const toggleLabel = isDisabled ? "启用" : "禁用";
-      const preferredWindowToken = String(agent.preferred_window_token || "").trim();
+      const machineId = String(agent.machine_id || "").trim();
+      const draftWindowToken = deviceWindowTokenDrafts.get(machineId);
+      const preferredWindowToken =
+        draftWindowToken !== undefined
+          ? String(draftWindowToken)
+          : normalizeWindowTokenList(agent.preferred_window_token || "");
       const detailButton = `
             <button
               class="action-btn"
@@ -1227,14 +1295,13 @@ function renderDeviceTable(agents) {
             <td class="copy-cell">${renderCopyCell(agent.owner || "-", { mono: false })}</td>
             <td>${onlineText}</td>
             <td>${escapeHtml(lastSeenText)}</td>
-            <td>${escapeHtml(agent.client_version || "-")}</td>
             <td class="col-window-token">
               <input
                 type="text"
                 class="mini-inline-input"
                 data-role="device-window-token"
                 value="${escapeHtml(preferredWindowToken)}"
-                placeholder="默认全部"
+                placeholder="默认全部 / 例 1/3/5/"
               />
             </td>
             <td class="col-device-status">${statusText}</td>
@@ -1487,7 +1554,11 @@ async function handleDeviceTableClick(event) {
   if (action === "save-window-token") {
     const row = button.closest("tr");
     const input = row ? row.querySelector('input[data-role="device-window-token"]') : null;
-    const preferredWindowToken = input ? input.value.trim() : "";
+    const preferredWindowToken = normalizeWindowTokenList(input ? input.value : "");
+    if (input) {
+      input.value = preferredWindowToken;
+    }
+    rememberDeviceWindowTokenDraft(machineId, preferredWindowToken);
     const response = await api("/agent/window-token", {
       method: "POST",
       body: { machine_id: machineId, preferred_window_token: preferredWindowToken },
@@ -1496,6 +1567,7 @@ async function handleDeviceTableClick(event) {
       showAlert(translateErrorMessage(response.data?.error) || "操作失败");
       return;
     }
+    forgetDeviceWindowTokenDraft(machineId);
     await refreshDevices();
     return;
   }
@@ -1610,6 +1682,9 @@ function resolveWindowCollectStatus(windowItem) {
   if (status === "facebook_not_logged_in") {
     return "未登录 Facebook，当前窗口采集已跳过";
   }
+  if (status === "account_restricted") {
+    return "命中 Facebook checkpoint/风控页，当前窗口采集已跳过";
+  }
   if (status === "session_open_failed") {
     return "连接浏览器失败，当前窗口采集未执行";
   }
@@ -1630,7 +1705,7 @@ function getDevicePreferredWindowToken(owner, machineId) {
     if (!normalizedOwner) return true;
     return itemOwner === normalizedOwner;
   });
-  return String(matched?.preferred_window_token || "").trim();
+  return normalizeWindowTokenList(matched?.preferred_window_token || "");
 }
 
 function renderDeviceDetail(detail) {
@@ -1639,12 +1714,14 @@ function renderDeviceDetail(detail) {
   const allWindows = Array.isArray(detail?.windows) ? detail.windows : [];
   const owner = String(device.owner || detail?.owner || "").trim();
   const machineId = String(device.machine_id || detail?.machine_id || "").trim();
-  const preferredWindowToken =
-    String(device.preferred_window_token || "").trim() ||
+  const preferredWindowTokenText =
+    normalizeWindowTokenList(device.preferred_window_token || "") ||
     getDevicePreferredWindowToken(owner, machineId);
-  const windows = preferredWindowToken
-    ? allWindows.filter(
-        (windowItem) => String(windowItem?.window_token || "").trim() === preferredWindowToken
+  const preferredWindowTokens = parseWindowTokenList(preferredWindowTokenText);
+  const preferredWindowTokenSet = new Set(preferredWindowTokens);
+  const windows = preferredWindowTokens.length
+    ? allWindows.filter((windowItem) =>
+        preferredWindowTokenSet.has(String(windowItem?.window_token || "").trim())
       )
     : allWindows;
   currentDeviceDetailVisibleWindowTokens = windows
@@ -1655,7 +1732,7 @@ function renderDeviceDetail(detail) {
       `归属账号：${owner || "-"}`,
       `设备ID：${machineId || "-"}`,
       `配置名称：${device.name || "-"}`,
-      `窗口号：${preferredWindowToken || "全部"}`,
+      `窗口号：${preferredWindowTokenText || "全部"}`,
       `在线状态：${device.online ? "在线" : "离线"}`,
       `最后心跳：${device.last_seen ? formatTimestamp(device.last_seen) : "-"}`,
     ];
@@ -1719,8 +1796,8 @@ function renderDeviceDetail(detail) {
   });
   if (!rows.length) {
     setDeviceDetailEmpty(
-      preferredWindowToken
-        ? `当前设备在窗口 ${preferredWindowToken} 暂无采集结果`
+      preferredWindowTokenText
+        ? `当前设备在窗口 ${preferredWindowTokenText} 暂无采集结果`
         : "当前设备暂无窗口采集结果"
     );
     return;

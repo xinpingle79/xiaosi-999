@@ -160,11 +160,68 @@ class BrowserManager:
             and not current_url.startswith("about:")
         )
 
+    def _is_login_surface(self, page):
+        if page is None:
+            return False
+        try:
+            current_url = str(page.url or "").strip().lower()
+            if "facebook.com/login" in current_url or "facebook.com/login.php" in current_url:
+                return True
+        except Exception:
+            pass
+        try:
+            return bool(
+                page.evaluate(
+                    """() => {
+                        const normalize = (value) => (value || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+                        const visible = (el) => {
+                            if (!el) return false;
+                            const rect = el.getBoundingClientRect();
+                            if (!rect.width || !rect.height) return false;
+                            const style = window.getComputedStyle(el);
+                            if (!style) return false;
+                            if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+                            return true;
+                        };
+                        const text = normalize((document.body && document.body.innerText) || '');
+                        const passwordInput = Array.from(document.querySelectorAll('input[type="password"], input[name="pass"]'))
+                            .find((el) => visible(el));
+                        const emailInput = Array.from(document.querySelectorAll('input'))
+                            .find((el) => {
+                                if (!visible(el)) return false;
+                                const type = normalize(el.getAttribute('type') || '');
+                                const name = normalize(el.getAttribute('name') || '');
+                                const autocomplete = normalize(el.getAttribute('autocomplete') || '');
+                                const placeholder = normalize(el.getAttribute('placeholder') || '');
+                                return (
+                                    type === 'email'
+                                    || name === 'email'
+                                    || autocomplete === 'username'
+                                    || placeholder.includes('email')
+                                    || placeholder.includes('phone')
+                                    || placeholder.includes('มือถือ')
+                                    || placeholder.includes('อีเมล')
+                                );
+                            });
+                        const createAccountHint =
+                            text.includes('create new account')
+                            || text.includes('sign up')
+                            || text.includes('สมัครใช้งาน')
+                            || text.includes('สร้างบัญชีใหม่');
+                        return !!passwordInput && (!!emailInput || createAccountHint);
+                    }"""
+                )
+            )
+        except Exception:
+            return False
+
     def _has_real_facebook_surface(self, page):
         if page is None:
             return False
         try:
             if self._is_checkpoint_surface(page.url):
+                return False
+            if self._is_login_surface(page):
                 return False
             return bool(
                 page.evaluate(

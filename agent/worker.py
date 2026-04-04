@@ -49,7 +49,11 @@ LEGACY_PERMANENT_SKIP_RULE_GROUP_KEYS = (
 SERVER_KEY_LOG_SUBSTRINGS = (
     "已自动识别 ",
     "个比特浏览器窗口，将顺序接入",
+    "个窗口，",
+    "窗口 开始逐窗口进行运行。",
+    "开始逐窗口进行运行。",
     "未获取到任何可用的比特浏览器窗口，任务结束。",
+    "当前配置窗口未匹配到任何可用的比特浏览器窗口，任务结束。",
     "检测到 Facebook checkpoint 账号异常页",
     "温馨提示：",
     "已成功接入 BitBrowser 会话，开始按小组顺序执行成员私聊...",
@@ -1309,8 +1313,21 @@ class Worker:
         return build_browser_settings(runtime_config)
 
     def _resolve_collect_profiles(self, browser_settings, payload):
-        window_token = str((payload or {}).get("window_token") or "").strip()
-        if not window_token:
+        raw_window_tokens = (payload or {}).get("window_tokens")
+        window_tokens = []
+        if isinstance(raw_window_tokens, (list, tuple)):
+            seen = set()
+            for item in raw_window_tokens:
+                token = str(item or "").strip()
+                if not token or token in seen:
+                    continue
+                seen.add(token)
+                window_tokens.append(token)
+        if not window_tokens:
+            window_token = str((payload or {}).get("window_token") or "").strip()
+            if window_token:
+                window_tokens = [window_token]
+        if not window_tokens:
             return None
         from core.browser_manager import BrowserManager
         from main import build_profile_index, resolve_restart_profile, sort_bitbrowser_profiles
@@ -1318,10 +1335,18 @@ class Worker:
         bm = BrowserManager(browser_settings)
         profiles = sort_bitbrowser_profiles(bm.list_bitbrowser_profiles())
         profile_index = build_profile_index(profiles)
-        profile = resolve_restart_profile(window_token, profile_index, bm)
-        if not profile:
-            return []
-        return [profile]
+        resolved_profiles = []
+        seen_profile_ids = set()
+        for token in window_tokens:
+            profile = resolve_restart_profile(token, profile_index, bm)
+            if not profile:
+                continue
+            profile_id = str(profile.get("id") or profile.get("browser_id") or token).strip()
+            if profile_id in seen_profile_ids:
+                continue
+            seen_profile_ids.add(profile_id)
+            resolved_profiles.append(profile)
+        return resolved_profiles
 
     def _handle_collect_groups(self, owner, payload, task_id):
         owner = str(owner or self.cfg.get("owner") or "").strip()
@@ -1385,10 +1410,12 @@ class Worker:
         try:
             target_profiles = self._resolve_collect_profiles(browser_settings, payload)
             target_window_token = str((payload or {}).get("window_token") or "").strip()
-            if target_window_token and target_profiles == []:
+            target_window_tokens = list((payload or {}).get("window_tokens") or [])
+            if target_profiles == [] and (target_window_token or target_window_tokens):
                 self._emit_collect_log(
                     owner,
-                    f"[采集] 未识别到需要采集的窗口: {target_window_token}",
+                    f"[采集] 未识别到需要采集的窗口: "
+                    f"{target_window_token or '、'.join(str(item or '').strip() for item in target_window_tokens if str(item or '').strip())}",
                 )
                 _post_agent_json(
                     self.cfg,

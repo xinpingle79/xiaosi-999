@@ -623,6 +623,19 @@ class Scraper:
     def get_last_collection_block_reason(self):
         return str(self._last_collection_block_reason or "").strip()
 
+    def _get_collection_block_reason(self, page=None):
+        target_page = page or self.page
+        if target_page is None:
+            return ""
+        try:
+            if self._is_checkpoint_surface(target_page.url):
+                return "account_restricted"
+        except Exception:
+            pass
+        if self._is_login_surface(target_page):
+            return "facebook_not_logged_in"
+        return ""
+
     def _is_login_surface(self, page=None):
         target_page = page or self.page
         if target_page is None:
@@ -1493,6 +1506,14 @@ class Scraper:
             )
         except Exception as exc:
             navigation_error = exc
+        block_reason = self._get_collection_block_reason(self.page)
+        if block_reason:
+            self._set_last_collection_block_reason(block_reason)
+            if block_reason == "account_restricted":
+                log.warning(f"{self._prefix()}{step_name}直达后识别到 Facebook checkpoint，停止当前窗口的小组采集。")
+            else:
+                log.warning(f"{self._prefix()}{step_name}直达后识别到 Facebook 登录页，停止当前窗口的小组采集。")
+            return False, navigation_error
         ready = self._wait_for_groups_surface_stable(
             timeout=6.0 if require_joined else 5.0,
             stable_rounds=2,
@@ -1518,26 +1539,32 @@ class Scraper:
 
     def open_groups_feed(self):
         self._set_last_collection_block_reason("")
-        if self._is_login_surface(self.page):
-            self._set_last_collection_block_reason("facebook_not_logged_in")
-            log.warning(f"{self._prefix()}当前页面命中 Facebook 登录页，停止当前窗口的小组采集。")
-            return False
-        if self._is_checkpoint_surface(self.page.url):
-            log.warning(f"{self._prefix()}当前页面命中 Facebook checkpoint，停止进入小组流程，交由上层统一处理。")
+        block_reason = self._get_collection_block_reason(self.page)
+        if block_reason:
+            self._set_last_collection_block_reason(block_reason)
+            if block_reason == "account_restricted":
+                log.warning(f"{self._prefix()}当前页面命中 Facebook checkpoint，停止当前窗口的小组采集。")
+            else:
+                log.warning(f"{self._prefix()}当前页面命中 Facebook 登录页，停止当前窗口的小组采集。")
             return False
         if not self._adopt_existing_facebook_page():
-            if self._is_login_surface(self.page):
-                self._set_last_collection_block_reason("facebook_not_logged_in")
-                log.warning(f"{self._prefix()}未登录 Facebook，无法接管有效页面，停止当前窗口的小组采集。")
+            block_reason = self._get_collection_block_reason(self.page)
+            if block_reason:
+                self._set_last_collection_block_reason(block_reason)
+                if block_reason == "account_restricted":
+                    log.warning(f"{self._prefix()}命中 Facebook checkpoint，无法接管有效页面，停止当前窗口的小组采集。")
+                else:
+                    log.warning(f"{self._prefix()}未登录 Facebook，无法接管有效页面，停止当前窗口的小组采集。")
                 return False
             log.warning(f"{self._prefix()}未找到可复用的 Facebook 页面，无法按手动路径进入小组。")
             return False
-        if self._is_login_surface(self.page):
-            self._set_last_collection_block_reason("facebook_not_logged_in")
-            log.warning(f"{self._prefix()}接管页面后识别到 Facebook 登录页，停止当前窗口的小组采集。")
-            return False
-        if self._is_checkpoint_surface(self.page.url):
-            log.warning(f"{self._prefix()}接管页面后命中 Facebook checkpoint，停止进入小组流程，交由上层统一处理。")
+        block_reason = self._get_collection_block_reason(self.page)
+        if block_reason:
+            self._set_last_collection_block_reason(block_reason)
+            if block_reason == "account_restricted":
+                log.warning(f"{self._prefix()}接管页面后命中 Facebook checkpoint，停止当前窗口的小组采集。")
+            else:
+                log.warning(f"{self._prefix()}接管页面后识别到 Facebook 登录页，停止当前窗口的小组采集。")
             return False
         if self._is_joined_groups_listing_ready():
             log.info(f"{self._prefix()}当前已位于“你的小组”列表，沿用当前页面继续采集。")
@@ -2357,9 +2384,13 @@ class Scraper:
 
     def _open_joined_groups_listing(self):
         try:
-            if self._is_login_surface(self.page):
-                self._set_last_collection_block_reason("facebook_not_logged_in")
-                log.warning(f"{self._prefix()}当前页面为 Facebook 登录页，停止当前窗口的小组采集。")
+            block_reason = self._get_collection_block_reason(self.page)
+            if block_reason:
+                self._set_last_collection_block_reason(block_reason)
+                if block_reason == "account_restricted":
+                    log.warning(f"{self._prefix()}当前页面为 Facebook checkpoint，停止当前窗口的小组采集。")
+                else:
+                    log.warning(f"{self._prefix()}当前页面为 Facebook 登录页，停止当前窗口的小组采集。")
                 return False
             if self._is_joined_groups_listing_ready():
                 return self._stabilize_joined_groups_listing(step_name="已加入小组列表")
@@ -2415,9 +2446,13 @@ class Scraper:
                     require_joined=True,
                     step_name="已加入小组列表",
                 )
-            if self._is_login_surface(self.page):
-                self._set_last_collection_block_reason("facebook_not_logged_in")
-                log.warning(f"{self._prefix()}进入“你的小组”链路时识别到 Facebook 登录页，停止当前窗口的小组采集。")
+            block_reason = self._get_collection_block_reason(self.page)
+            if block_reason:
+                self._set_last_collection_block_reason(block_reason)
+                if block_reason == "account_restricted":
+                    log.warning(f"{self._prefix()}进入“你的小组”链路时识别到 Facebook checkpoint，停止当前窗口的小组采集。")
+                else:
+                    log.warning(f"{self._prefix()}进入“你的小组”链路时识别到 Facebook 登录页，停止当前窗口的小组采集。")
                 return False
             if self._warm_up_joined_groups_listing():
                 return True
@@ -2485,6 +2520,8 @@ class Scraper:
                 seen = set()
                 best_page = None
                 best_score = -1
+                blocked_page = None
+                blocked_reason = ""
                 for candidate in candidate_pages:
                     marker = id(candidate)
                     if marker in seen:
@@ -2495,6 +2532,11 @@ class Scraper:
                             continue
                     except Exception:
                         continue
+                    current_block_reason = self._get_collection_block_reason(candidate)
+                    if current_block_reason:
+                        if blocked_page is None or current_block_reason == "account_restricted":
+                            blocked_page = candidate
+                            blocked_reason = current_block_reason
                     score = self._score_runtime_page_candidate(candidate)
                     if score > best_score:
                         best_score = score
@@ -2510,9 +2552,29 @@ class Scraper:
                     if switched:
                         log.info(f"{self._prefix()}已接管现成 Facebook 页面: {self.page.url}")
                     return True
+                if blocked_page is not None and blocked_reason:
+                    self.page = blocked_page
+                    self._set_last_collection_block_reason(blocked_reason)
+                    try:
+                        self.page.bring_to_front()
+                    except Exception:
+                        pass
+                    if blocked_reason == "account_restricted":
+                        log.warning(f"{self._prefix()}已识别到现成 Facebook checkpoint 页面，停止当前窗口的小组采集。")
+                    else:
+                        log.warning(f"{self._prefix()}已识别到现成 Facebook 登录页，停止当前窗口的小组采集。")
+                    return False
                 self._pause_aware_sleep(0.4)
             log.info(f"{self._prefix()}未发现现成 Facebook 页面，先进入 Facebook 首页。")
             self._goto_pause_aware("https://www.facebook.com/", timeout_ms=30000, settle_timeout_ms=3000)
+            block_reason = self._get_collection_block_reason(self.page)
+            if block_reason:
+                self._set_last_collection_block_reason(block_reason)
+                if block_reason == "account_restricted":
+                    log.warning(f"{self._prefix()}进入 Facebook 首页后识别到 checkpoint，停止当前窗口的小组采集。")
+                else:
+                    log.warning(f"{self._prefix()}进入 Facebook 首页后识别到登录页，停止当前窗口的小组采集。")
+                return False
             self._wait_for_condition(
                 "Facebook首页",
                 "等待 Facebook 首页真实内容出现",
@@ -2520,6 +2582,10 @@ class Scraper:
                 timeout=12.0,
                 interval=0.4,
             )
+            block_reason = self._get_collection_block_reason(self.page)
+            if block_reason:
+                self._set_last_collection_block_reason(block_reason)
+                return False
             return self._score_runtime_page_candidate(self.page) >= 300
         except Exception:
             return False

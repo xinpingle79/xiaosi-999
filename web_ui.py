@@ -4,6 +4,7 @@ import copy
 import json
 import mimetypes
 import os
+import re
 import secrets
 import uuid
 import sys
@@ -67,6 +68,28 @@ LEGACY_PERMANENT_SKIP_RULE_GROUP_KEYS = (
     "messenger_login_required",
     "account_cannot_message",
 )
+
+
+def _parse_window_token_list(value):
+    text = str(value or "").strip()
+    if not text:
+        return []
+    tokens = []
+    seen = set()
+    for raw in re.split(r"[、,，/\s]+", text):
+        token = str(raw or "").strip()
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        tokens.append(token)
+    return tokens
+
+
+def _format_window_token_list(value):
+    tokens = _parse_window_token_list(value)
+    if not tokens:
+        return ""
+    return "/".join(tokens) + "/"
 
 
 def _clone_runtime_read_cache_value(value):
@@ -667,22 +690,28 @@ class TaskManager:
             "device_config_id": (cfg or {}).get("id"),
         }
         if action in {"start", "restart_window", "collect_groups"} and machine_id:
-            effective_window_token = str(window_token or "").strip()
-            if action == "start" and not effective_window_token:
-                effective_window_token = str((cfg or {}).get("preferred_window_token") or "").strip()
-            if action == "collect_groups" and not effective_window_token:
-                effective_window_token = str((cfg or {}).get("preferred_window_token") or "").strip()
-            if effective_window_token:
-                payload["window_token"] = effective_window_token
+            explicit_window_token = str(window_token or "").strip()
+            if explicit_window_token:
+                effective_window_tokens = [explicit_window_token]
+            elif action in {"start", "collect_groups"}:
+                effective_window_tokens = _parse_window_token_list(
+                    (cfg or {}).get("preferred_window_token")
+                )
+            else:
+                effective_window_tokens = []
+            if len(effective_window_tokens) == 1:
+                payload["window_token"] = effective_window_tokens[0]
+            elif len(effective_window_tokens) > 1:
+                payload["window_tokens"] = effective_window_tokens
             if action in FORMAL_RUNTIME_ACTIONS:
                 selected_window_groups = db.list_selected_window_groups(owner_name, machine_id)
-                if effective_window_token:
-                    current_window_groups = list(
-                        selected_window_groups.get(effective_window_token, [])
-                    )
-                    payload["selected_window_groups"] = {
-                        effective_window_token: current_window_groups
-                    }
+                if effective_window_tokens:
+                    projected_window_groups = {}
+                    for token in effective_window_tokens:
+                        projected_window_groups[token] = list(
+                            selected_window_groups.get(token, [])
+                        )
+                    payload["selected_window_groups"] = projected_window_groups
                 elif action == "restart_window":
                     selected_window_groups = {}
                     payload["selected_window_groups"] = selected_window_groups
@@ -3799,7 +3828,9 @@ def handle_agent_list(owner=""):
                     "owner": row.get("owner") or "",
                     "status": int(1 if row.get("status", None) is None else row.get("status")),
                     "client_version": row.get("client_version") or "",
-                    "preferred_window_token": str(cfg.get("preferred_window_token") or "").strip(),
+                    "preferred_window_token": _format_window_token_list(
+                        cfg.get("preferred_window_token")
+                    ),
                 }
             )
         return {"ok": True, "agents": agents}
@@ -3907,7 +3938,9 @@ def handle_device_detail(owner="", machine_id=""):
             "machine_id": machine_id,
             "bit_api": str((cfg or {}).get("bit_api") or "").strip(),
             "api_token": str((cfg or {}).get("api_token") or "").strip(),
-            "preferred_window_token": str((cfg or {}).get("preferred_window_token") or "").strip(),
+            "preferred_window_token": _format_window_token_list(
+                (cfg or {}).get("preferred_window_token")
+            ),
             "status": int(1 if (cfg or {}).get("status", None) is None else (cfg or {}).get("status")),
             "online": online,
             "last_seen": last_seen,
@@ -3943,7 +3976,7 @@ def handle_device_group_selection_save(payload):
 def handle_device_preferred_window_token_save(payload):
     owner = str(payload.get("owner") or "").strip()
     machine_id = str(payload.get("machine_id") or "").strip()
-    preferred_window_token = str(payload.get("preferred_window_token") or "").strip()
+    preferred_window_token = _format_window_token_list(payload.get("preferred_window_token"))
     if not machine_id:
         return {"ok": False, "error": "missing_machine_id"}
     db = Database()
@@ -4173,6 +4206,8 @@ def handle_agent_collect_report(payload):
             collect_error = str(item.get("error") or "").strip()
             if collect_error == "facebook_not_logged_in":
                 last_collect_message = "未登录 Facebook，当前窗口采集已跳过"
+            elif collect_error == "account_restricted":
+                last_collect_message = "命中 Facebook checkpoint/风控页，当前窗口采集已跳过"
             elif collect_error == "session_open_failed":
                 last_collect_message = "连接浏览器失败，当前窗口采集未执行"
             elif collect_error:
