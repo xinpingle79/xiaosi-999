@@ -162,6 +162,10 @@ def _collect_task_payload_path(owner, task_id=None):
     )
 
 
+def _worker_instance_path():
+    return _runtime_path("data", "worker.instance.json")
+
+
 def _runtime_messages_path():
     return _runtime_path("data", "runtime_messages.yaml")
 
@@ -222,6 +226,62 @@ def _default_machine_id():
     hostname = socket.gethostname()
     node = uuid.getnode()
     return f"{hostname}-{node:x}"
+
+
+def _pid_is_running(pid):
+    try:
+        normalized = int(pid)
+    except Exception:
+        return False
+    if normalized <= 0:
+        return False
+    try:
+        os.kill(normalized, 0)
+    except OSError:
+        return False
+    except Exception:
+        return False
+    return True
+
+
+def _acquire_worker_instance(cfg):
+    path = _worker_instance_path()
+    current_pid = os.getpid()
+    existing = _load_json(path)
+    existing_pid = 0
+    try:
+        existing_pid = int((existing or {}).get("pid") or 0)
+    except Exception:
+        existing_pid = 0
+    if existing_pid and existing_pid != current_pid and _pid_is_running(existing_pid):
+        return False, existing_pid
+    _save_json(
+        path,
+        {
+            "pid": current_pid,
+            "owner": str((cfg or {}).get("owner") or "").strip(),
+            "machine_id": str((cfg or {}).get("machine_id") or "").strip(),
+            "updated_at": time.time(),
+        },
+    )
+    return True, None
+
+
+def _release_worker_instance():
+    path = _worker_instance_path()
+    existing = _load_json(path)
+    existing_pid = 0
+    try:
+        existing_pid = int((existing or {}).get("pid") or 0)
+    except Exception:
+        existing_pid = 0
+    current_pid = os.getpid()
+    if existing_pid and existing_pid != current_pid:
+        return
+    try:
+        path.unlink(missing_ok=True)
+    except Exception:
+        pass
 
 
 def _load_client_config(config_path=None):
@@ -714,7 +774,9 @@ class Worker:
     def __init__(self, cfg):
         self.cfg = cfg
         self.main_process = None
+        self.main_task_id = None
         self.single_processes = {}
+        self.single_task_ids = {}
         self.collect_process = None
         self.collect_task_id = None
         self.collect_owner = ""
@@ -806,6 +868,7 @@ class Worker:
             with self.lock:
                 if self.main_process is process:
                     self.main_process = None
+                    self.main_task_id = None
                 stale_tokens = [
                     token
                     for token, current in self.single_processes.items()
@@ -813,6 +876,7 @@ class Worker:
                 ]
                 for token in stale_tokens:
                     self.single_processes.pop(token, None)
+                    self.single_task_ids.pop(token, None)
             _post_agent_json(
                 self.cfg,
                 f"{self.cfg['server_url']}/api/agent/report",
@@ -823,11 +887,13 @@ class Worker:
         self._cleanup_collect_process_locked()
         if self.main_process and self.main_process.poll() is not None:
             self.main_process = None
+            self.main_task_id = None
         dead_tokens = [
             token for token, process in self.single_processes.items() if process.poll() is not None
         ]
         for token in dead_tokens:
             self.single_processes.pop(token, None)
+            self.single_task_ids.pop(token, None)
 
     def _cleanup_collect_process_locked(self):
         process = self.collect_process
@@ -842,6 +908,45 @@ class Worker:
                     Path(payload_file).unlink(missing_ok=True)
                 except Exception:
                     pass
+
+    def _post_task_report(self, task_id, status, error=None, exit_code=None):
+        if not task_id:
+            return
+        payload = {
+            "task_id": task_id,
+            "status": str(status or "").strip() or "done",
+        }
+        normalized_error = str(error or "").strip()
+        if normalized_error:
+            payload["error"] = normalized_error
+        if exit_code is not None:
+            payload["exit_code"] = exit_code
+        _post_agent_json(
+            self.cfg,
+            f"{self.cfg['server_url']}/api/agent/report",
+            payload,
+        )
+
+    def _report_active_runtime_tasks_stopped(self):
+        with self.lock:
+            self._cleanup_finished_processes_locked()
+            active_main_task_id = None
+            if self.main_process and self.main_process.poll() is None:
+                active_main_task_id = self.main_task_id
+            active_single_task_ids = []
+            for token, process in list(self.single_processes.items()):
+                if process and process.poll() is None:
+                    active_single_task_ids.append(self.single_task_ids.get(token))
+            active_collect_task_id = None
+            if self.collect_process and self.collect_process.poll() is None:
+                active_collect_task_id = self.collect_task_id
+        if active_main_task_id:
+            self._post_task_report(active_main_task_id, "failed", error="task_stopped")
+        for task_id in active_single_task_ids:
+            if task_id:
+                self._post_task_report(task_id, "failed", error="task_stopped")
+        if active_collect_task_id:
+            self._post_task_report(active_collect_task_id, "failed", error="collect_stopped")
 
     def _has_active_collect_task_locked(self):
         self._cleanup_collect_process_locked()
@@ -1054,6 +1159,49 @@ class Worker:
         startupinfo.wShowWindow = 0
         return startupinfo
 
+    def _terminate_process_quickly(self, process, graceful_seconds=1.2, terminate_wait=2.5, kill_wait=1.5):
+        if process is None:
+            return
+        try:
+            if process.poll() is not None:
+                return
+        except Exception:
+            return
+        graceful_deadline = time.time() + max(0.0, float(graceful_seconds or 0.0))
+        while time.time() < graceful_deadline:
+            try:
+                if process.poll() is not None:
+                    return
+            except Exception:
+                return
+            time.sleep(0.2)
+        try:
+            if process.poll() is None:
+                process.terminate()
+        except Exception:
+            pass
+        terminate_deadline = time.time() + max(0.0, float(terminate_wait or 0.0))
+        while time.time() < terminate_deadline:
+            try:
+                if process.poll() is not None:
+                    return
+            except Exception:
+                return
+            time.sleep(0.2)
+        try:
+            if process.poll() is None:
+                process.kill()
+        except Exception:
+            pass
+        kill_deadline = time.time() + max(0.0, float(kill_wait or 0.0))
+        while time.time() < kill_deadline:
+            try:
+                if process.poll() is not None:
+                    return
+            except Exception:
+                return
+            time.sleep(0.2)
+
     def _stop_process(self, owner):
         stop_flag = _stop_flag_path(owner)
         stop_flag.parent.mkdir(parents=True, exist_ok=True)
@@ -1061,6 +1209,7 @@ class Worker:
         pause_flag = _pause_flag_path(owner)
         if pause_flag.exists():
             pause_flag.unlink()
+        self._report_active_runtime_tasks_stopped()
         with self.lock:
             self._cleanup_finished_processes_locked()
             targets = []
@@ -1072,45 +1221,9 @@ class Worker:
             collect_process = None
             if self.collect_process and self.collect_process.poll() is None:
                 collect_process = self.collect_process
-        time.sleep(2)
         for process in targets:
-            try:
-                if process.poll() is None:
-                    process.terminate()
-            except Exception:
-                pass
-        deadline = time.time() + 8
-        for process in targets:
-            while time.time() < deadline:
-                if process.poll() is not None:
-                    break
-                time.sleep(0.2)
-            if process.poll() is None:
-                try:
-                    process.kill()
-                except Exception:
-                    pass
-        if collect_process and collect_process.poll() is None:
-            deadline = time.time() + 8
-            while time.time() < deadline:
-                if collect_process.poll() is not None:
-                    break
-                time.sleep(0.2)
-            if collect_process.poll() is None:
-                try:
-                    collect_process.terminate()
-                except Exception:
-                    pass
-                kill_deadline = time.time() + 5
-                while time.time() < kill_deadline:
-                    if collect_process.poll() is not None:
-                        break
-                    time.sleep(0.2)
-                if collect_process.poll() is None:
-                    try:
-                        collect_process.kill()
-                    except Exception:
-                        pass
+            self._terminate_process_quickly(process, graceful_seconds=0.35, terminate_wait=1.8, kill_wait=1.0)
+        self._terminate_process_quickly(collect_process, graceful_seconds=0.8, terminate_wait=2.0, kill_wait=1.2)
         with self.lock:
             self._cleanup_finished_processes_locked()
 
@@ -1123,6 +1236,17 @@ class Worker:
             pause_flag.unlink()
         with self.lock:
             self._cleanup_finished_processes_locked()
+            collect_task_id = None
+            if (
+                self.collect_process
+                and self.collect_process.poll() is None
+                and str(self.collect_owner or "").strip() == str(owner or "").strip()
+            ):
+                collect_task_id = self.collect_task_id
+        if collect_task_id:
+            self._post_task_report(collect_task_id, "failed", error="collect_stopped")
+        with self.lock:
+            self._cleanup_finished_processes_locked()
             process = None
             if (
                 self.collect_process
@@ -1132,26 +1256,7 @@ class Worker:
                 process = self.collect_process
         if not process:
             return
-        graceful_deadline = time.time() + 8
-        while time.time() < graceful_deadline:
-            if process.poll() is not None:
-                break
-            time.sleep(0.2)
-        if process.poll() is None:
-            try:
-                process.terminate()
-            except Exception:
-                pass
-            kill_deadline = time.time() + 5
-            while time.time() < kill_deadline:
-                if process.poll() is not None:
-                    break
-                time.sleep(0.2)
-            if process.poll() is None:
-                try:
-                    process.kill()
-                except Exception:
-                    pass
+        self._terminate_process_quickly(process, graceful_seconds=0.8, terminate_wait=2.0, kill_wait=1.2)
         with self.lock:
             self._cleanup_finished_processes_locked()
 
@@ -1202,6 +1307,21 @@ class Worker:
         if api_token:
             runtime_config["api_token"] = api_token
         return build_browser_settings(runtime_config)
+
+    def _resolve_collect_profiles(self, browser_settings, payload):
+        window_token = str((payload or {}).get("window_token") or "").strip()
+        if not window_token:
+            return None
+        from core.browser_manager import BrowserManager
+        from main import build_profile_index, resolve_restart_profile, sort_bitbrowser_profiles
+
+        bm = BrowserManager(browser_settings)
+        profiles = sort_bitbrowser_profiles(bm.list_bitbrowser_profiles())
+        profile_index = build_profile_index(profiles)
+        profile = resolve_restart_profile(window_token, profile_index, bm)
+        if not profile:
+            return []
+        return [profile]
 
     def _handle_collect_groups(self, owner, payload, task_id):
         owner = str(owner or self.cfg.get("owner") or "").strip()
@@ -1263,10 +1383,24 @@ class Worker:
         os.environ["FB_RPA_PAUSE_FLAG"] = str(pause_flag)
         self._emit_collect_log(owner, "[采集] 已收到群组采集任务，开始准备窗口采集。")
         try:
+            target_profiles = self._resolve_collect_profiles(browser_settings, payload)
+            target_window_token = str((payload or {}).get("window_token") or "").strip()
+            if target_window_token and target_profiles == []:
+                self._emit_collect_log(
+                    owner,
+                    f"[采集] 未识别到需要采集的窗口: {target_window_token}",
+                )
+                _post_agent_json(
+                    self.cfg,
+                    f"{self.cfg['server_url']}/api/agent/report",
+                    {"task_id": task_id, "status": "failed", "error": "collect_window_not_found"},
+                )
+                return
             result = collect_groups_for_machine(
                 browser_settings=browser_settings,
                 max_scrolls=max_scrolls,
                 log_callback=lambda message: self._emit_collect_log(owner, message),
+                profiles=target_profiles,
             )
         except Exception as exc:
             self._emit_collect_log(owner, f"[采集] 执行失败：{exc}")
@@ -1384,6 +1518,7 @@ class Worker:
         payload = task.get("payload") or {}
 
         if action == "start":
+            token = str(window_token or (payload or {}).get("window_token") or "").strip()
             with self.lock:
                 self._cleanup_finished_processes_locked()
                 if self.main_process and self.main_process.poll() is None:
@@ -1393,10 +1528,11 @@ class Worker:
                         {"task_id": task_id, "status": "failed", "error": "already_running"},
                     )
                     return
-                process = self._launch_process(owner, None, payload, task_id)
+                process = self._launch_process(owner, token or None, payload, task_id)
                 if not process:
                     return
                 self.main_process = process
+                self.main_task_id = task_id
             return
 
         if action == "restart_window":
@@ -1427,6 +1563,7 @@ class Worker:
                 if not process:
                     return
                 self.single_processes[token] = process
+                self.single_task_ids[token] = task_id
             return
 
         if action == "pause":
@@ -1520,6 +1657,11 @@ def main():
                     pass
         return
 
+    acquired, existing_pid = _acquire_worker_instance(cfg)
+    if not acquired:
+        print(f"检测到已有 worker 进程运行 (PID {existing_pid})，当前实例退出。", flush=True)
+        return
+
     stop_event = threading.Event()
     worker = Worker(cfg)
 
@@ -1584,6 +1726,7 @@ def main():
     finally:
         stop_event.set()
         worker.shutdown(cfg.get("owner"))
+        _release_worker_instance()
 
 
 if __name__ == "__main__":

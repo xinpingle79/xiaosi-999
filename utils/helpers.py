@@ -533,6 +533,7 @@ class _SQLiteDatabaseBase:
             "machine_id",
             "bit_api",
             "api_token",
+            "preferred_window_token",
             "status",
             "created_at",
             "updated_at",
@@ -547,6 +548,8 @@ class _SQLiteDatabaseBase:
                 self.conn.execute("ALTER TABLE device_configs ADD COLUMN bit_api TEXT")
             elif column == "api_token":
                 self.conn.execute("ALTER TABLE device_configs ADD COLUMN api_token TEXT")
+            elif column == "preferred_window_token":
+                self.conn.execute("ALTER TABLE device_configs ADD COLUMN preferred_window_token TEXT")
             elif column == "status":
                 self.conn.execute("ALTER TABLE device_configs ADD COLUMN status INTEGER")
             elif column == "created_at":
@@ -565,6 +568,7 @@ class _SQLiteDatabaseBase:
                 machine_id TEXT,
                 bit_api TEXT,
                 api_token TEXT,
+                preferred_window_token TEXT,
                 status INTEGER DEFAULT 1,
                 created_at DATETIME,
                 updated_at DATETIME
@@ -1469,7 +1473,7 @@ class _SQLiteDatabaseBase:
             return []
         rows = self.conn.execute(
             """
-            SELECT id, owner, name, machine_id, bit_api, api_token, status, created_at, updated_at
+            SELECT id, owner, name, machine_id, bit_api, api_token, preferred_window_token, status, created_at, updated_at
             FROM device_configs
             WHERE owner = ?
             ORDER BY id ASC
@@ -1481,7 +1485,7 @@ class _SQLiteDatabaseBase:
     def list_all_device_configs(self):
         rows = self.conn.execute(
             """
-            SELECT id, owner, name, machine_id, bit_api, api_token, status, created_at, updated_at
+            SELECT id, owner, name, machine_id, bit_api, api_token, preferred_window_token, status, created_at, updated_at
             FROM device_configs
             ORDER BY owner ASC, id ASC
             """
@@ -1516,6 +1520,23 @@ class _SQLiteDatabaseBase:
             WHERE id = ? AND owner = ?
             """,
             (name, machine_id, bit_api, api_token, int(status), now, int(config_id), owner),
+        )
+        self.conn.commit()
+        return self.conn.total_changes > 0
+
+    def update_device_preferred_window_token(self, config_id, owner, preferred_window_token=""):
+        owner = (owner or "").strip()
+        if not owner:
+            return False
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        normalized_token = str(preferred_window_token or "").strip() or None
+        self.conn.execute(
+            """
+            UPDATE device_configs
+            SET preferred_window_token = ?, updated_at = ?
+            WHERE id = ? AND owner = ?
+            """,
+            (normalized_token, now, int(config_id), owner),
         )
         self.conn.commit()
         return self.conn.total_changes > 0
@@ -2877,6 +2898,16 @@ class ServerDatabase(_SQLiteDatabaseBase):
         for statement in alter_statements:
             self._mysql_conn.execute(statement)
 
+    def _migrate_mysql_device_configs(self):
+        columns = self._fetch_mysql_table_columns("device_configs")
+        alter_statements = []
+        if "preferred_window_token" not in columns:
+            alter_statements.append(
+                "ALTER TABLE device_configs ADD COLUMN preferred_window_token VARCHAR(191) NULL AFTER api_token"
+            )
+        for statement in alter_statements:
+            self._mysql_conn.execute(statement)
+
     def _ensure_server_schema(self):
         if self._schema_ready:
             return
@@ -2956,6 +2987,7 @@ class ServerDatabase(_SQLiteDatabaseBase):
                     machine_id VARCHAR(191) NULL,
                     bit_api VARCHAR(255) NULL,
                     api_token VARCHAR(255) NULL,
+                    preferred_window_token VARCHAR(191) NULL,
                     status TINYINT NOT NULL DEFAULT 1,
                     created_at DATETIME NULL,
                     updated_at DATETIME NULL,
@@ -3015,6 +3047,7 @@ class ServerDatabase(_SQLiteDatabaseBase):
             for statement in statements:
                 self._mysql_conn.execute(statement)
             self._migrate_mysql_message_templates()
+            self._migrate_mysql_device_configs()
             self._mysql_conn.commit()
             self._import_legacy_sqlite_server_data()
         except Exception:
@@ -3549,6 +3582,14 @@ class ServerDatabase(_SQLiteDatabaseBase):
             bit_api,
             api_token,
             status=status,
+        )
+
+    def update_device_preferred_window_token(self, config_id, owner, preferred_window_token=""):
+        return self._call_base_service_method(
+            "update_device_preferred_window_token",
+            config_id,
+            owner,
+            preferred_window_token=preferred_window_token,
         )
 
     def delete_device_config(self, config_id, owner):

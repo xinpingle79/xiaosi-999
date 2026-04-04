@@ -874,6 +874,25 @@ button[aria-disabled="true"] {
   width: 170px;
 }
 
+.sub-app .device-card .data-table .col-window-token {
+  width: 140px;
+  min-width: 140px;
+}
+
+.sub-app .device-card .data-table .col-window-token .mini-inline-input {
+  width: 120px;
+}
+
+.sub-app .device-card .data-table .col-device-status {
+  width: 73px;
+  min-width: 73px;
+}
+
+.sub-app .device-card .data-table .col-actions {
+  min-width: 220px;
+  width: 220px;
+}
+
 .device-card .data-table td.copy-cell {
   white-space: nowrap;
   overflow: hidden;
@@ -1472,6 +1491,48 @@ body {
   height: 32px;
   padding: 0 12px;
   font-size: 13px;
+}
+
+.device-detail-card .data-table th:nth-child(2),
+.device-detail-card .data-table td:nth-child(2) {
+  width: 8ch;
+  min-width: 8ch;
+  max-width: 8ch;
+}
+
+.device-detail-card .data-table th:nth-child(3),
+.device-detail-card .data-table td:nth-child(3) {
+  width: 9ch;
+  min-width: 9ch;
+  max-width: 9ch;
+}
+
+.device-detail-card .data-table th:nth-child(4),
+.device-detail-card .data-table td:nth-child(4) {
+  width: 30ch;
+  min-width: 30ch;
+  max-width: 30ch;
+}
+
+.device-detail-card .data-table th:nth-child(5),
+.device-detail-card .data-table td:nth-child(5) {
+  width: 47ch;
+  min-width: 47ch;
+  max-width: 47ch;
+}
+
+.device-detail-card .data-table th:nth-child(6),
+.device-detail-card .data-table td:nth-child(6) {
+  width: 13ch;
+  min-width: 13ch;
+  max-width: 13ch;
+}
+
+.device-detail-card .data-table th:nth-child(7),
+.device-detail-card .data-table td:nth-child(7) {
+  width: 6ch;
+  min-width: 6ch;
+  max-width: 6ch;
 }
 
 .hidden {

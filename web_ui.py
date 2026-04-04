@@ -56,6 +56,9 @@ USER_LIST_CACHE_TTL_SECONDS = 10.0
 RUNTIME_READ_CACHE_LOCK = threading.Lock()
 DB_STATS_CACHE = {}
 USER_LIST_CACHE = {}
+FORMAL_RUNTIME_ACTIONS = ("start", "restart_window")
+COLLECT_ACTIONS = ("collect_groups",)
+CONTROL_ACTIONS = ("stop", "pause", "resume", "stop_collect")
 LEGACY_POPUP_STOP_RULE_GROUP_KEYS = (
     "stranger_limit",
     "message_request_limit",
@@ -383,19 +386,33 @@ class TaskManager:
             return None, "执行端离线"
         return agent, None
 
-    def _find_existing_machine_action_task(self, db, owner_name, machine_id, action):
+    def _find_existing_machine_action_task(
+        self,
+        db,
+        owner_name,
+        machine_id,
+        action,
+        window_token=None,
+    ):
+        clauses = [
+            "owner = ?",
+            "assigned_machine_id = ?",
+            "action = ?",
+            "status IN ('pending', 'running')",
+        ]
+        params = [owner_name, machine_id, action]
+        if str(action or "").strip() == "restart_window":
+            clauses.append("ifnull(window_token, '') = ?")
+            params.append(str(window_token or "").strip())
         row = db.fetch_one(
-            """
+            f"""
             SELECT id, status
             FROM agent_tasks
-            WHERE owner = ?
-              AND assigned_machine_id = ?
-              AND action = ?
-              AND status IN ('pending', 'running')
+            WHERE {' AND '.join(clauses)}
             ORDER BY id DESC
             LIMIT 1
             """,
-            (owner_name, machine_id, action),
+            tuple(params),
         )
         if not row:
             return None
@@ -649,19 +666,28 @@ class TaskManager:
             "api_token": api_token,
             "device_config_id": (cfg or {}).get("id"),
         }
-        if action in {"start", "restart_window"} and machine_id:
-            selected_window_groups = db.list_selected_window_groups(owner_name, machine_id)
-            if action == "restart_window":
-                normalized_window_token = str(window_token or "").strip()
-                if normalized_window_token:
-                    selected_window_groups = {
-                        normalized_window_token: list(
-                            selected_window_groups.get(normalized_window_token, [])
-                        )
+        if action in {"start", "restart_window", "collect_groups"} and machine_id:
+            effective_window_token = str(window_token or "").strip()
+            if action == "start" and not effective_window_token:
+                effective_window_token = str((cfg or {}).get("preferred_window_token") or "").strip()
+            if action == "collect_groups" and not effective_window_token:
+                effective_window_token = str((cfg or {}).get("preferred_window_token") or "").strip()
+            if effective_window_token:
+                payload["window_token"] = effective_window_token
+            if action in FORMAL_RUNTIME_ACTIONS:
+                selected_window_groups = db.list_selected_window_groups(owner_name, machine_id)
+                if effective_window_token:
+                    current_window_groups = list(
+                        selected_window_groups.get(effective_window_token, [])
+                    )
+                    payload["selected_window_groups"] = {
+                        effective_window_token: current_window_groups
                     }
-                else:
+                elif action == "restart_window":
                     selected_window_groups = {}
-            payload["selected_window_groups"] = selected_window_groups
+                    payload["selected_window_groups"] = selected_window_groups
+                else:
+                    payload["selected_window_groups"] = selected_window_groups
         return payload, None
 
     def _enqueue_owner_device_actions(
@@ -729,6 +755,7 @@ class TaskManager:
                         owner_name,
                         machine_id,
                         action,
+                        window_token=window_token,
                     )
                     if existing_task:
                         self._append_control_log(
@@ -757,7 +784,11 @@ class TaskManager:
                     task_id = db.enqueue_agent_task(
                         owner_name,
                         action,
-                        window_token=window_token,
+                        window_token=(
+                            str((payload or {}).get("window_token") or "").strip()
+                            or str(window_token or "").strip()
+                            or None
+                        ),
                         machine_id=machine_id,
                         payload=payload,
                     )
@@ -845,7 +876,11 @@ class TaskManager:
             task_id = db.enqueue_agent_task(
                 owner_name,
                 action,
-                window_token=window_token,
+                window_token=(
+                    str((payload or {}).get("window_token") or "").strip()
+                    or str(window_token or "").strip()
+                    or None
+                ),
                 machine_id=machine_id,
                 payload=payload,
             )
@@ -939,6 +974,7 @@ class TaskManager:
                         owner_name,
                         machine_id,
                         action,
+                        window_token=window_token,
                     )
                     if existing_task:
                         self._append_control_log(
@@ -955,7 +991,11 @@ class TaskManager:
                     task_id = db.enqueue_agent_task(
                         owner_name,
                         action,
-                        window_token=window_token,
+                        window_token=(
+                            str((payload or {}).get("window_token") or "").strip()
+                            or str(window_token or "").strip()
+                            or None
+                        ),
                         machine_id=machine_id,
                         payload=payload,
                     )
@@ -1010,9 +1050,39 @@ class TaskManager:
                 or state["collect_pending"]
             ):
                 return False, "当前没有可停止的运行/采集任务"
-            return self._enqueue_owner_device_actions(
-                "stop", owner_name, allow_disabled=True
-            )
+            db = Database()
+            try:
+                cancelled_start_rows = self._cancel_pending_start_tasks_locked(db, owner_name)
+                cancelled_collect_rows = self._cancel_pending_collect_tasks_locked(db, owner_name)
+            finally:
+                db.close()
+            for row in cancelled_start_rows:
+                machine_id = str(row.get("assigned_machine_id") or "").strip()
+                task_id = row.get("id")
+                window_token = str(row.get("window_token") or "").strip()
+                action = str(row.get("action") or "").strip()
+                window_label = f" 窗口{window_token}" if window_token else ""
+                action_label = "单窗口启动任务" if action == "restart_window" else "启动任务"
+                self._append_control_log(
+                    f"=== 已取消排队中的{action_label}#{task_id}：执行端 {machine_id or '-'}{window_label} ===",
+                    owner=owner_name,
+                    machine_id=machine_id or None,
+                    already_locked=True,
+                )
+            for row in cancelled_collect_rows:
+                machine_id = str(row.get("assigned_machine_id") or "").strip()
+                task_id = row.get("id")
+                self._append_control_log(
+                    f"=== 已取消排队中的采集任务#{task_id}：执行端 {machine_id or '-'} ===",
+                    owner=owner_name,
+                    machine_id=machine_id or None,
+                    already_locked=True,
+                )
+            if state["task_running"] or state["task_paused"] or state["collect_running"]:
+                return self._enqueue_owner_device_actions(
+                    "stop", owner_name, allow_disabled=True
+                )
+            return True, None
 
     def pause(self, owner=None):
         owner_name = str(owner or "").strip()
@@ -1106,40 +1176,87 @@ class TaskManager:
         db.commit()
         return [dict(row) for row in rows]
 
+    def _cancel_pending_start_tasks_locked(self, db, owner_name):
+        owner_name = str(owner_name or "").strip()
+        if not owner_name:
+            return []
+        rows = db.fetch_all(
+            """
+            SELECT id, assigned_machine_id, window_token, action
+            FROM agent_tasks
+            WHERE owner = ?
+              AND action IN ('start', 'restart_window')
+              AND status = 'pending'
+            ORDER BY id DESC
+            """,
+            (owner_name,),
+        )
+        if not rows:
+            return []
+        now = time.time()
+        task_ids = [int(row["id"]) for row in rows if row and row.get("id") is not None]
+        if not task_ids:
+            return []
+        placeholders = ",".join("?" for _ in task_ids)
+        db.execute_statement(
+            f"""
+            UPDATE agent_tasks
+            SET status = 'failed', error = ?, updated_at = ?
+            WHERE id IN ({placeholders})
+              AND status = 'pending'
+            """,
+            ("task_cancelled", now, *task_ids),
+        )
+        db.commit()
+        return [dict(row) for row in rows]
+
     def stop_collect(self, owner=None):
         owner_name = str(owner or "").strip()
         if not owner_name:
             return False, "总后台不参与任务操作，请在子后台执行"
         with self._lock:
-            state = self._get_owner_runtime_state(owner_name)
-            if not (state["collect_running"] or state["collect_pending"]):
-                return False, "当前没有可停止的采集任务"
-            db = Database()
-            try:
-                cancelled_rows = self._cancel_pending_collect_tasks_locked(db, owner_name)
-            finally:
-                db.close()
-            for row in cancelled_rows:
-                machine_id = str(row.get("assigned_machine_id") or "").strip()
-                task_id = row.get("id")
-                self._append_control_log(
-                    f"=== 已取消排队中的采集任务#{task_id}：执行端 {machine_id or '-'} ===",
-                    owner=owner_name,
-                    machine_id=machine_id or None,
-                    already_locked=True,
-                )
-            if state["collect_running"]:
-                self._append_control_log(
-                    "=== 停止采集指令已下发 ===",
-                    owner=owner_name,
-                    already_locked=True,
-                )
-                return self._enqueue_owner_device_actions(
-                    "stop_collect",
-                    owner_name,
-                    allow_disabled=True,
-                )
-            return True, None
+            logged_cancelled_task_ids = set()
+            deadline = time.time() + 1.6
+            while True:
+                db = Database()
+                try:
+                    cancelled_rows = self._cancel_pending_collect_tasks_locked(db, owner_name)
+                    state = self._load_owner_runtime_state(db, owner=owner_name)
+                finally:
+                    db.close()
+                for row in cancelled_rows:
+                    task_id = row.get("id")
+                    if task_id in logged_cancelled_task_ids:
+                        continue
+                    logged_cancelled_task_ids.add(task_id)
+                    machine_id = str(row.get("assigned_machine_id") or "").strip()
+                    self._append_control_log(
+                        f"=== 已取消排队中的采集任务#{task_id}：执行端 {machine_id or '-'} ===",
+                        owner=owner_name,
+                        machine_id=machine_id or None,
+                        already_locked=True,
+                    )
+                if state["collect_running"]:
+                    self._append_control_log(
+                        "=== 停止采集指令已下发 ===",
+                        owner=owner_name,
+                        already_locked=True,
+                    )
+                    return self._enqueue_owner_device_actions(
+                        "stop_collect",
+                        owner_name,
+                        allow_disabled=True,
+                    )
+                if cancelled_rows:
+                    return True, None
+                if not state["collect_pending"]:
+                    if time.time() >= deadline:
+                        return False, "当前没有可停止的采集任务"
+                    time.sleep(0.2)
+                    continue
+                if time.time() >= deadline:
+                    return False, "当前没有可停止的采集任务"
+                time.sleep(0.2)
 
     def status(self, owner=None):
         with self._lock:
@@ -1225,7 +1342,7 @@ class TaskManager:
             owner=owner,
             machine_id=machine_id,
             statuses=("done",),
-            actions=("start", "pause", "resume", "stop"),
+            actions=FORMAL_RUNTIME_ACTIONS + ("pause", "resume", "stop"),
         )
         return bool(row and str(row.get("action") or "").strip() == "pause")
 
@@ -1850,6 +1967,14 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     return
                 self._send_json(result)
                 return
+            if path == "/agent/window-token":
+                payload = self._read_json()
+                result = handle_device_preferred_window_token_save(payload)
+                if not result.get("ok"):
+                    self._send_json({"error": result.get("error")}, status=HTTPStatus.BAD_REQUEST)
+                    return
+                self._send_json(result)
+                return
             if path in {"/restart-window", "/start", "/stop", "/pause", "/resume", "/stop-collect"}:
                 self._send_json(
                     {"error": "总后台不参与任务操作，请在子后台执行"},
@@ -1931,6 +2056,15 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 payload = self._read_json()
                 payload["owner"] = self._current_username(prefer_sub=True)
                 result = handle_device_group_selection_save(payload)
+                if not result.get("ok"):
+                    self._send_json({"error": result.get("error")}, status=HTTPStatus.BAD_REQUEST)
+                    return
+                self._send_json(result)
+                return
+            if path == "/agent/window-token":
+                payload = self._read_json()
+                payload["owner"] = self._current_username(prefer_sub=True)
+                result = handle_device_preferred_window_token_save(payload)
                 if not result.get("ok"):
                     self._send_json({"error": result.get("error")}, status=HTTPStatus.BAD_REQUEST)
                     return
@@ -2592,16 +2726,17 @@ def _count_distinct_running_start_accounts(db, owner=None):
             db,
             owner=owner_name,
             statuses=("running",),
-            actions=("start",),
+            actions=FORMAL_RUNTIME_ACTIONS,
         ) > 0 else 0
     row = db.fetch_one(
         """
         SELECT COUNT(DISTINCT owner) AS total
         FROM agent_tasks
         WHERE status = 'running'
-          AND action = 'start'
+          AND action IN (?, ?)
           AND COALESCE(owner, '') != ''
-        """
+        """,
+        FORMAL_RUNTIME_ACTIONS,
     )
     return int(row["total"] or 0) if row else 0
 
@@ -2614,25 +2749,25 @@ def _load_runtime_task_counts(owner=None, db=None):
             db,
             owner=owner,
             statuses=("running",),
-            actions=("start",),
+            actions=FORMAL_RUNTIME_ACTIONS,
         )
         pending_tasks = _count_agent_tasks_by_scope(
             db,
             owner=owner,
             statuses=("pending",),
-            actions=("start",),
+            actions=FORMAL_RUNTIME_ACTIONS,
         )
         collect_running_tasks = _count_agent_tasks_by_scope(
             db,
             owner=owner,
             statuses=("running",),
-            actions=("collect_groups",),
+            actions=COLLECT_ACTIONS,
         )
         collect_pending_tasks = _count_agent_tasks_by_scope(
             db,
             owner=owner,
             statuses=("pending",),
-            actions=("collect_groups",),
+            actions=COLLECT_ACTIONS,
         )
         running_accounts = _count_distinct_running_start_accounts(db, owner=owner)
         return {
@@ -3371,31 +3506,31 @@ def _build_client_runtime_snapshot(verified, api_token=""):
             db,
             machine_id=machine_id,
             statuses=("running",),
-            actions=("start",),
+            actions=FORMAL_RUNTIME_ACTIONS,
         )
         pending_count = _count_agent_tasks_by_scope(
             db,
             machine_id=machine_id,
             statuses=("pending",),
-            actions=("start",),
+            actions=FORMAL_RUNTIME_ACTIONS,
         )
         collect_running_count = _count_agent_tasks_by_scope(
             db,
             machine_id=machine_id,
             statuses=("running",),
-            actions=("collect_groups",),
+            actions=COLLECT_ACTIONS,
         )
         collect_pending_count = _count_agent_tasks_by_scope(
             db,
             machine_id=machine_id,
             statuses=("pending",),
-            actions=("collect_groups",),
+            actions=COLLECT_ACTIONS,
         )
         control_task = _load_latest_agent_task_by_scope(
             db,
             machine_id=machine_id,
             statuses=("pending", "running"),
-            actions=("stop", "pause", "resume", "restart_window"),
+            actions=("stop", "pause", "resume"),
         )
         control_action_name = str((control_task or {}).get("action") or "").strip()
         control_action_pending = bool(control_action_name)
@@ -3640,21 +3775,31 @@ def handle_agent_list(owner=""):
     now = time.time()
     db = Database()
     try:
-        agents = []
         owner = (owner or "").strip()
+        config_map = {}
+        configs = db.list_device_configs(owner) if owner else db.list_all_device_configs()
+        for cfg in configs:
+            machine_id = str(cfg.get("machine_id") or "").strip()
+            if not machine_id:
+                continue
+            config_map[machine_id] = cfg
+        agents = []
         for row in db.list_agents():
             if owner and str(row.get("owner") or "").strip() != owner:
                 continue
             last_seen = float(row.get("last_seen") or 0)
             online = (now - last_seen) <= ttl if last_seen else False
+            machine_id = str(row.get("machine_id") or "").strip()
+            cfg = config_map.get(machine_id) or {}
             agents.append(
                 {
-                    "machine_id": row.get("machine_id") or "",
+                    "machine_id": machine_id,
                     "last_seen": last_seen,
                     "online": online,
                     "owner": row.get("owner") or "",
                     "status": int(1 if row.get("status", None) is None else row.get("status")),
                     "client_version": row.get("client_version") or "",
+                    "preferred_window_token": str(cfg.get("preferred_window_token") or "").strip(),
                 }
             )
         return {"ok": True, "agents": agents}
@@ -3762,6 +3907,7 @@ def handle_device_detail(owner="", machine_id=""):
             "machine_id": machine_id,
             "bit_api": str((cfg or {}).get("bit_api") or "").strip(),
             "api_token": str((cfg or {}).get("api_token") or "").strip(),
+            "preferred_window_token": str((cfg or {}).get("preferred_window_token") or "").strip(),
             "status": int(1 if (cfg or {}).get("status", None) is None else (cfg or {}).get("status")),
             "online": online,
             "last_seen": last_seen,
@@ -3789,6 +3935,27 @@ def handle_device_group_selection_save(payload):
         if not resolved_owner:
             return {"ok": False, "error": "device_not_found"}
         db.save_window_group_selections(resolved_owner, machine_id, selections)
+        return {"ok": True}
+    finally:
+        db.close()
+
+
+def handle_device_preferred_window_token_save(payload):
+    owner = str(payload.get("owner") or "").strip()
+    machine_id = str(payload.get("machine_id") or "").strip()
+    preferred_window_token = str(payload.get("preferred_window_token") or "").strip()
+    if not machine_id:
+        return {"ok": False, "error": "missing_machine_id"}
+    db = Database()
+    try:
+        resolved_owner, cfg = _resolve_device_detail_owner(db, machine_id, owner=owner)
+        if not resolved_owner or not cfg:
+            return {"ok": False, "error": "device_not_found"}
+        db.update_device_preferred_window_token(
+            cfg.get("id"),
+            resolved_owner,
+            preferred_window_token=preferred_window_token,
+        )
         return {"ok": True}
     finally:
         db.close()
@@ -3911,37 +4078,63 @@ def handle_agent_report(payload):
     try:
         task_row = db.fetch_one(
             """
-            SELECT id, owner, assigned_machine_id, action, status
+            SELECT id, owner, assigned_machine_id, action, status, error
             FROM agent_tasks
             WHERE id = ?
             LIMIT 1
             """,
             (task_id,),
         )
-        db.update_agent_task(task_id, status, error=error, exit_code=exit_code)
         action = str((task_row or {}).get("action") or "").strip()
         owner = str((task_row or {}).get("owner") or (agent or {}).get("owner") or "").strip()
         machine_id = str((task_row or {}).get("assigned_machine_id") or payload.get("machine_id") or "").strip()
-        if action == "stop_collect" and status == "done" and owner and machine_id:
-            running_collect = db.fetch_one(
+        current_status = str((task_row or {}).get("status") or "").strip()
+        current_error = str((task_row or {}).get("error") or "").strip()
+        preserve_stopped_state = (
+            action in {"start", "restart_window", "collect_groups"}
+            and current_status == "failed"
+            and current_error in {"task_stopped", "collect_stopped"}
+            and status == "done"
+        )
+        if not preserve_stopped_state:
+            db.update_agent_task(task_id, status, error=error, exit_code=exit_code)
+        if action == "stop" and status == "done" and owner and machine_id:
+            stop_time = time.time()
+            db.execute_statement(
                 """
-                SELECT id
-                FROM agent_tasks
+                UPDATE agent_tasks
+                SET status = 'failed', error = ?, updated_at = ?
+                WHERE owner = ?
+                  AND assigned_machine_id = ?
+                  AND action IN ('start', 'restart_window')
+                  AND status IN ('pending', 'running')
+                """,
+                ("task_stopped", stop_time, owner, machine_id),
+            )
+            db.execute_statement(
+                """
+                UPDATE agent_tasks
+                SET status = 'failed', error = ?, updated_at = ?
                 WHERE owner = ?
                   AND assigned_machine_id = ?
                   AND action = 'collect_groups'
-                  AND status = 'running'
-                ORDER BY id DESC
-                LIMIT 1
+                  AND status IN ('pending', 'running')
                 """,
-                (owner, machine_id),
+                ("collect_stopped", stop_time, owner, machine_id),
             )
-            if running_collect and running_collect.get("id") is not None:
-                db.update_agent_task(
-                    running_collect.get("id"),
-                    "failed",
-                    error="collect_stopped",
-                )
+        if action == "stop_collect" and status == "done" and owner and machine_id:
+            db.execute_statement(
+                """
+                UPDATE agent_tasks
+                SET status = 'failed', error = ?, updated_at = ?
+                WHERE owner = ?
+                  AND assigned_machine_id = ?
+                  AND action = 'collect_groups'
+                  AND status IN ('pending', 'running')
+                """,
+                ("collect_stopped", time.time(), owner, machine_id),
+            )
+        db.commit()
     finally:
         db.close()
     return {"ok": True}
@@ -3977,6 +4170,15 @@ def handle_agent_collect_report(payload):
                 groups = []
             if not isinstance(groups, list):
                 groups = []
+            collect_error = str(item.get("error") or "").strip()
+            if collect_error == "facebook_not_logged_in":
+                last_collect_message = "未登录 Facebook，当前窗口采集已跳过"
+            elif collect_error == "session_open_failed":
+                last_collect_message = "连接浏览器失败，当前窗口采集未执行"
+            elif collect_error:
+                last_collect_message = f"采集失败：{collect_error}"
+            else:
+                last_collect_message = ""
             result = db.replace_window_group_collections(
                 owner=owner,
                 machine_id=machine_id,
@@ -3984,6 +4186,8 @@ def handle_agent_collect_report(payload):
                 groups=groups,
                 collected_at=collected_at,
                 window_name=window_name,
+                last_collect_status=collect_error or "",
+                last_collect_message=last_collect_message,
             )
             summaries.append(result)
     finally:

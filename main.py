@@ -464,11 +464,13 @@ def _build_window_summary(account_id, reason, messages_sent=0, finished_groups=0
     }
 
 
-def _build_group_collection_result(group_urls=None, reason=""):
-    return {
+def _build_group_collection_result(group_urls=None, reason="", **extra):
+    result = {
         "group_urls": list(group_urls or []),
         "reason": str(reason or "").strip(),
     }
+    result.update(extra)
+    return result
 
 
 def _limit_target_groups_for_single_run(group_urls=None, account_prefix=""):
@@ -508,6 +510,8 @@ def _log_window_finish_reason(summary, label, continue_other_windows=False):
         log.error(f"[{label}] 当前窗口正式发送文案为空，未能启动发送任务。")
     elif reason == "no_groups":
         log.error(f"[{label}] 当前窗口未能收集到任何已加入小组，流程已结束。")
+    elif reason == "facebook_not_logged_in":
+        log.warning(f"[{label}] 当前窗口未登录 Facebook，已停止当前窗口运行。")
     elif reason == "window_selection_empty":
         log.info(f"[{label}] 当前窗口未配置任何已选群，已跳过正式运行。")
     elif reason == "window_whitelist_miss":
@@ -825,6 +829,8 @@ def run_single_session(
                     collection_reason = str(group_collection.get("reason") or "").strip() or "no_groups"
                     if collection_reason == "no_groups":
                         log.error(f"[{alert_account_id}] 未能收集到任何已加入小组，流程结束。")
+                    elif collection_reason == "facebook_not_logged_in":
+                        log.warning(f"[{alert_account_id}] 当前窗口未登录 Facebook，本轮停止正式运行。")
                     elif collection_reason == "window_selection_empty":
                         log.info(f"[{alert_account_id}] 当前窗口未配置任何已选群，本轮不启动正式运行。")
                     elif collection_reason == "window_whitelist_miss":
@@ -1141,10 +1147,20 @@ def collect_target_groups(scraper, task_cfg, window_token="", account_label=""):
         )
 
     current_group_root = scraper.get_current_group_root_url() if scraper.is_group_members_page() else None
-    group_urls = scraper.collect_joined_group_urls(
+    collect_result = scraper.collect_joined_groups(
         max_scrolls=task_cfg.get("group_list_scroll_times", 8),
         allowed_group_ids=allowed_group_ids or None,
+        return_meta=True,
     )
+    collect_error = str((collect_result or {}).get("error") or "").strip()
+    if collect_error == "facebook_not_logged_in":
+        log.warning(f"{account_prefix}当前窗口未登录 Facebook，停止正式运行。")
+        return _build_group_collection_result([], "facebook_not_logged_in")
+    group_urls = [
+        str(item.get("group_url") or "").strip()
+        for item in list((collect_result or {}).get("groups") or [])
+        if str(item.get("group_url") or "").strip()
+    ]
 
     current_group_id = _extract_group_id(current_group_root)
     should_preserve_current_group = bool(

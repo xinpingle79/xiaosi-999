@@ -287,9 +287,11 @@ class Scraper:
         "모두 보기",
         "Посмотреть все",
     )
-    JOINED_GROUPS_ENTER_TIMEOUT_SECONDS = 4.5
-    JOINED_GROUPS_STABILIZE_TIMEOUT_SECONDS = 3.0
-    JOINED_GROUPS_QUICK_STABILIZE_TIMEOUT_SECONDS = 2.2
+    JOINED_GROUPS_ENTER_TIMEOUT_SECONDS = 9.0
+    JOINED_GROUPS_STABILIZE_TIMEOUT_SECONDS = 6.0
+    JOINED_GROUPS_QUICK_STABILIZE_TIMEOUT_SECONDS = 4.0
+    GROUPS_DIRECT_NAV_TIMEOUT_MS = 15000
+    GROUPS_DIRECT_NAV_SETTLE_TIMEOUT_MS = 2000
     JOINED_GROUP_SECTION_LABELS = (
         "你加入的小组",
         "已加入的小组",
@@ -367,6 +369,7 @@ class Scraper:
     )
     JOINED_GROUP_SKIP_LABELS = set(
         SEE_ALL_LABELS
+        + GROUP_OPEN_ACTION_LABELS
         + (
             "新建小组",
             "Create new group",
@@ -579,6 +582,7 @@ class Scraper:
         self._current_user_id = None
         self.window_label = (window_label or "").strip()
         self.stop_env = str(stop_env or "").strip()
+        self._last_collection_block_reason = ""
         self._last_scope_snapshot = None
         self._last_members_ready_snapshot = None
         self._last_members_ready_stable_rounds = 0
@@ -612,6 +616,86 @@ class Scraper:
     def _raise_if_stop_requested(self):
         if self._stop_requested():
             raise CollectStopRequested("collect_stop_requested")
+
+    def _set_last_collection_block_reason(self, reason=""):
+        self._last_collection_block_reason = str(reason or "").strip()
+
+    def get_last_collection_block_reason(self):
+        return str(self._last_collection_block_reason or "").strip()
+
+    def _is_login_surface(self, page=None):
+        target_page = page or self.page
+        if target_page is None:
+            return False
+        try:
+            current_url = str(target_page.url or "").strip().lower()
+            if "facebook.com/login" in current_url or "facebook.com/login.php" in current_url:
+                return True
+        except Exception:
+            pass
+        try:
+            return bool(
+                target_page.evaluate(
+                    """() => {
+                        const normalize = (value) => (value || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+                        const visible = (el) => {
+                            if (!el) return false;
+                            const rect = el.getBoundingClientRect();
+                            if (!rect.width || !rect.height) return false;
+                            const style = window.getComputedStyle(el);
+                            if (!style) return false;
+                            if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+                            return true;
+                        };
+                        const text = normalize((document.body && document.body.innerText) || '');
+                        const emailInput = Array.from(document.querySelectorAll('input'))
+                            .find((el) => {
+                                if (!visible(el)) return false;
+                                const type = normalize(el.getAttribute('type') || '');
+                                const name = normalize(el.getAttribute('name') || '');
+                                const autocomplete = normalize(el.getAttribute('autocomplete') || '');
+                                const placeholder = normalize(el.getAttribute('placeholder') || '');
+                                return (
+                                    type === 'email'
+                                    || name === 'email'
+                                    || autocomplete === 'username'
+                                    || placeholder.includes('email')
+                                    || placeholder.includes('phone')
+                                    || placeholder.includes('มือถือ')
+                                    || placeholder.includes('อีเมล')
+                                );
+                            });
+                        const passwordInput = Array.from(document.querySelectorAll('input[type="password"], input[name="pass"]'))
+                            .find((el) => visible(el));
+                        const loginButton = Array.from(document.querySelectorAll('button, input[type="submit"], [role="button"], a'))
+                            .find((el) => {
+                                if (!visible(el)) return false;
+                                const label = normalize(
+                                    el.innerText
+                                    || el.getAttribute('value')
+                                    || el.getAttribute('aria-label')
+                                    || el.getAttribute('title')
+                                    || ''
+                                );
+                                return (
+                                    label === 'log in'
+                                    || label === 'login'
+                                    || label === 'เข้าสู่ระบบ'
+                                    || label.includes('log in')
+                                    || label.includes('เข้าสู่ระบบ')
+                                );
+                            });
+                        const createAccountHint =
+                            text.includes('create new account')
+                            || text.includes('sign up')
+                            || text.includes('สมัครใช้งาน')
+                            || text.includes('สร้างบัญชีใหม่');
+                        return !!passwordInput && (!!emailInput || !!loginButton || createAccountHint);
+                    }"""
+                )
+            )
+        except Exception:
+            return False
 
     def _set_last_scope_status(self, confirmed, reason="", label=""):
         self._last_scope_status = {
@@ -718,6 +802,10 @@ class Scraper:
                 or ("ok" if confirmed else "newcomers_scope_unconfirmed")
             ).strip()
             label = str((current_scope or {}).get("label") or "").strip()
+            scope_container = str((current_scope or {}).get("containerSelector") or "").strip()
+            scope_link_count = max(0, int((current_scope or {}).get("linkCount") or 0))
+            section_top = float((current_scope or {}).get("sectionTop") or 0)
+            section_bottom = float((current_scope or {}).get("sectionBottom") or 0)
             return {
                 "scope": current_scope if isinstance(current_scope, dict) else {},
                 "confirmed": confirmed,
@@ -725,7 +813,11 @@ class Scraper:
                 "label": label,
                 "fingerprint": str(members_snapshot.get("fingerprint") or "").strip() or None,
                 "visible_count": max(0, int(members_snapshot.get("visibleCount") or 0)),
+                "loading_indicators": max(0, int(members_snapshot.get("loadingIndicators") or 0)),
                 "page_y": float(page_y or 0),
+                "scope_fingerprint": f"{scope_container}|{label}|{scope_link_count}",
+                "section_top": section_top,
+                "section_bottom": section_bottom,
             }
         except Exception:
             return {
@@ -735,7 +827,11 @@ class Scraper:
                 "label": "",
                 "fingerprint": None,
                 "visible_count": 0,
+                "loading_indicators": 0,
                 "page_y": 0.0,
+                "scope_fingerprint": "",
+                "section_top": 0.0,
+                "section_bottom": 0.0,
             }
 
     def _newcomers_search_has_progress(self, previous, current):
@@ -749,9 +845,44 @@ class Scraper:
             return True
         if str(previous.get("fingerprint") or "") != str(current.get("fingerprint") or ""):
             return True
+        if str(previous.get("scope_fingerprint") or "") != str(current.get("scope_fingerprint") or ""):
+            return True
         if int(previous.get("visible_count") or 0) != int(current.get("visible_count") or 0):
             return True
+        if int(previous.get("loading_indicators") or 0) != int(current.get("loading_indicators") or 0):
+            return True
+        if abs(float(current.get("section_top") or 0) - float(previous.get("section_top") or 0)) > 8:
+            return True
+        if abs(float(current.get("section_bottom") or 0) - float(previous.get("section_bottom") or 0)) > 8:
+            return True
         return abs(float(current.get("page_y") or 0) - float(previous.get("page_y") or 0)) > 5
+
+    def _wait_for_newcomers_scope_stable(self, timeout=2.4, stable_rounds=2, interval=0.16):
+        timeout = max(0.4, float(timeout or 0.4))
+        stable_rounds = max(1, int(stable_rounds or 1))
+        interval = max(0.08, float(interval or 0.08))
+        end_time = time.time() + timeout
+        previous = None
+        stable = 0
+        best_confirmed = None
+        while time.time() < end_time:
+            paused_seconds = self._wait_if_paused()
+            if paused_seconds:
+                end_time += paused_seconds
+            snapshot = self._capture_newcomers_search_snapshot()
+            if snapshot.get("confirmed") and int(snapshot.get("loading_indicators") or 0) == 0:
+                best_confirmed = snapshot
+                if previous and not self._newcomers_search_has_progress(previous, snapshot):
+                    stable += 1
+                else:
+                    stable = 0
+                if stable >= stable_rounds - 1:
+                    return snapshot
+            else:
+                stable = 0
+            previous = snapshot
+            self._pause_aware_sleep(interval)
+        return best_confirmed
 
     def _set_sequence_anchor_hint(self, anchor_user_id="", anchor_at_tail=False, anchor_abs_top=None):
         self._sequence_anchor_hint = {
@@ -793,6 +924,20 @@ class Scraper:
                 """(payload) => {
                     const labels = payload.labels || [];
                     const normalize = (value) => (value || '').replace(/\\s+/g, ' ').trim();
+                    const visible = (el) => {
+                        if (!el) return false;
+                        const rect = el.getBoundingClientRect();
+                        if (!rect.width || !rect.height) return false;
+                        const style = window.getComputedStyle(el);
+                        if (!style) return false;
+                        if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
+                            return false;
+                        }
+                        if (rect.bottom < 0 || rect.right < 0 || rect.top > window.innerHeight || rect.left > window.innerWidth) {
+                            return false;
+                        }
+                        return true;
+                    };
                     const cssPath = (el) => {
                         if (!el || !(el instanceof Element)) return null;
                         const parts = [];
@@ -837,7 +982,7 @@ class Scraper:
                         }
                         const candidates = [];
                         for (const el of deduped) {
-                            if (el.offsetParent === null) continue;
+                            if (!visible(el)) continue;
                             const text = normalize(el.innerText || (el.getAttribute && el.getAttribute('aria-label')));
                             if (!text) continue;
                             const matchedLabel = labels.find((label) => matchesLabel(text, label));
@@ -898,7 +1043,7 @@ class Scraper:
                             }
                             const links = Array.from(node.querySelectorAll('a[href*="/groups/"][href*="/user/"]'))
                                 .filter((link) => {
-                                    if (link.offsetParent === null) return false;
+                                    if (!visible(link)) return false;
                                     const href = link.getAttribute('href') || '';
                                     if (!groupUserRe.test(href)) return false;
                                     const linkRect = link.getBoundingClientRect();
@@ -973,6 +1118,35 @@ class Scraper:
                     const blacklist = payload.blacklist || [];
                     const exactSkips = new Set(payload.skipLabels || []);
                     const normalize = (value) => (value || '').replace(/\\s+/g, ' ').trim();
+                    const getVisibleRect = (el) => {
+                        if (!el) return null;
+                        const inspect = (node) => {
+                            if (!node || !(node instanceof Element)) return null;
+                            const rect = node.getBoundingClientRect();
+                            if (!rect.width || !rect.height) return null;
+                            const style = window.getComputedStyle(node);
+                            if (!style) return null;
+                            if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
+                                return null;
+                            }
+                            if (rect.bottom < -16 || rect.right < -16 || rect.top > window.innerHeight + 160) {
+                                return null;
+                            }
+                            return rect;
+                        };
+                        let bestRect = inspect(el);
+                        if (bestRect) return bestRect;
+                        if (!(el instanceof Element) || !el.querySelectorAll) return null;
+                        for (const node of Array.from(el.querySelectorAll('*')).slice(0, 24)) {
+                            const rect = inspect(node);
+                            if (!rect) continue;
+                            if (!bestRect || rect.width * rect.height > bestRect.width * bestRect.height) {
+                                bestRect = rect;
+                            }
+                        }
+                        return bestRect;
+                    };
+                    const visible = (el) => !!getVisibleRect(el);
                     const matchesLabel = (text, label) => {
                         if (!text || !label) return false;
                         if (text === label) return true;
@@ -986,107 +1160,168 @@ class Scraper:
                             `${label} -`,
                         ].some((prefix) => text.startsWith(prefix));
                     };
-                    const isValidGroupLink = (href) => {
+                    const resolveGroupRoot = (href) => {
                         try {
                             const url = new URL(href, location.origin);
                             const parts = url.pathname.split('/').filter(Boolean);
-                            return parts.length === 2 && parts[0] === 'groups' && !blacklist.includes(parts[1]);
+                            if (parts.length < 2 || parts[0] !== 'groups' || blacklist.includes(parts[1])) {
+                                return '';
+                            }
+                            if (parts.length >= 4 && parts[2] === 'user') {
+                                return '';
+                            }
+                            return `${location.origin}/groups/${parts[1]}`;
                         } catch {
-                            return false;
+                            return '';
                         }
                     };
-
-                    const collectFromContainer = (container) => {
+                    const extractFallbackText = (groupRoot) => {
+                        try {
+                            const fallback = decodeURIComponent(String(groupRoot || '').split('/').filter(Boolean).pop() || '');
+                            return normalize(fallback.replace(/[-_]+/g, ' '));
+                        } catch {
+                            return String(groupRoot || '').trim();
+                        }
+                    };
+                    const pickCardContainer = (anchor, rootContainer) => {
+                        let node = anchor;
+                        let best = rootContainer;
+                        for (let depth = 0; depth < 7 && node; depth += 1) {
+                            if (!(node instanceof Element) || !rootContainer.contains(node)) break;
+                            const rect = getVisibleRect(node);
+                            if (!rect) {
+                                node = node.parentElement;
+                                continue;
+                            }
+                            if (rect.width >= 220 && rect.height >= 90) {
+                                best = node;
+                                if (rect.width <= 920 && rect.height <= 520) break;
+                            }
+                            node = node.parentElement;
+                        }
+                        return best || rootContainer;
+                    };
+                    const extractGroupText = (anchor, groupRoot, card) => {
+                        const candidates = [];
+                        const register = (node, weight = 0) => {
+                            if (!node) return;
+                            const rect = getVisibleRect(node);
+                            if (!rect) return;
+                            const text = normalize(
+                                node.innerText
+                                || (node.getAttribute && (node.getAttribute('aria-label') || node.getAttribute('title')))
+                                || ''
+                            );
+                            if (!text || text.length < 2 || exactSkips.has(text)) return;
+                            candidates.push({
+                                text,
+                                weight,
+                                top: rect.top,
+                                left: rect.left,
+                                length: text.length,
+                            });
+                        };
+                        if (anchor) register(anchor, 260);
+                        if (card) {
+                            for (const node of Array.from(card.querySelectorAll('a[href], h1, h2, h3, h4, [role="heading"], [aria-level], span, div')).slice(0, 120)) {
+                                if (!visible(node)) continue;
+                                const sameAnchor = node.closest && node.closest('a[href]');
+                                if (sameAnchor) {
+                                    const root = resolveGroupRoot(sameAnchor.getAttribute('href') || '');
+                                    if (root && root === groupRoot) {
+                                        register(node, node.matches && node.matches('a[href]') ? 240 : 210);
+                                        continue;
+                                    }
+                                }
+                                if (node.matches && node.matches('h1, h2, h3, h4, [role="heading"], [aria-level]')) {
+                                    register(node, 190);
+                                    continue;
+                                }
+                                register(node, 120);
+                            }
+                        }
+                        candidates.sort((a, b) => {
+                            const scoreA = a.weight - Math.min(a.length, 160) * 0.35;
+                            const scoreB = b.weight - Math.min(b.length, 160) * 0.35;
+                            return scoreB - scoreA || a.top - b.top || a.left - b.left;
+                        });
+                        return candidates.length ? candidates[0].text : extractFallbackText(groupRoot);
+                    };
+                    const collectMainGroups = (container) => {
+                        if (!container || !visible(container)) return [];
                         const items = [];
                         const seen = new Set();
                         for (const a of Array.from(container.querySelectorAll('a[href*="/groups/"]'))) {
-                            if (a.offsetParent === null) continue;
                             const href = a.getAttribute('href') || '';
-                            if (!isValidGroupLink(href)) continue;
-                            const rect = a.getBoundingClientRect();
-                            if (!rect.width || !rect.height) continue;
-                            const text = normalize(a.innerText || (a.getAttribute && a.getAttribute('aria-label')));
-                            if (!text || text.length < 2 || exactSkips.has(text)) continue;
-                            const full = new URL(href, location.origin).href;
-                            if (seen.has(full)) continue;
-                            seen.add(full);
-                            items.push({ href: full, text, top: rect.top, left: rect.left });
+                            const groupRoot = resolveGroupRoot(href);
+                            if (!groupRoot) continue;
+                            const rect = getVisibleRect(a);
+                            if (!rect) continue;
+                            if (seen.has(groupRoot)) continue;
+                            const card = pickCardContainer(a, container);
+                            const text = extractGroupText(a, groupRoot, card);
+                            seen.add(groupRoot);
+                            items.push({
+                                href: groupRoot,
+                                text,
+                                top: rect.top,
+                                left: rect.left,
+                            });
                         }
                         items.sort((a, b) => a.top - b.top || a.left - b.left);
                         return items;
                     };
-
-                    const labelNodes = Array.from(
-                        document.querySelectorAll('h1, h2, h3, h4, [role="heading"], [aria-level], div, span')
-                    );
-                    for (const el of labelNodes) {
-                        if (el.offsetParent === null) continue;
-                        const text = normalize(el.innerText);
-                        const matched = labels.find((label) => matchesLabel(text, label));
-                        if (!matched) continue;
-                        if (text.length > matched.length + 80) continue;
-                        let node = el;
-                        const candidates = [];
-                        for (let depth = 0; depth < 7 && node; depth += 1) {
-                            const items = collectFromContainer(node);
-                            if (items.length) {
-                                const rect = node.getBoundingClientRect();
-                                if (rect.width >= 220 && rect.height >= 120) {
-                                    candidates.push({ rect, items });
-                                }
-                            }
-                            node = node.parentElement;
-                        }
-                        if (candidates.length) {
-                            candidates.sort((a, b) => (a.rect.width * a.rect.height) - (b.rect.width * b.rect.height));
-                            return {
-                                ready: true,
-                                source: 'labeled_section',
-                                items: candidates[0].items,
-                            };
-                        }
-                    }
-
                     const path = location.pathname || '';
                     const onGroupsSurface = path === '/groups' || path === '/groups/' || path.startsWith('/groups/feed') || path.startsWith('/groups/joins');
-                    const joinedSectionHints = labels.some((label) => {
-                        return Array.from(document.querySelectorAll('h1, h2, h3, h4, [role="heading"], [aria-level], div, span'))
-                            .some((el) => {
-                                if (el.offsetParent === null) return false;
-                                const text = normalize(el.innerText);
-                                return matchesLabel(text, label);
-                            });
-                    });
-                    const minimumItems = path.startsWith('/groups/joins') || joinedSectionHints ? 1 : 2;
-
-                    const containerCandidates = Array.from(document.querySelectorAll('main, [role="main"], div, section, ul, aside'))
-                        .map((el) => {
-                            if (el.offsetParent === null) return null;
-                            const rect = el.getBoundingClientRect();
-                            if (!rect.width || !rect.height) return null;
-                            if (rect.left > window.innerWidth * 0.72) return null;
-                            if (rect.top > window.innerHeight * 0.82) return null;
-                            if (rect.width < 220 || rect.height < 120) return null;
-                            const items = collectFromContainer(el);
-                            if (items.length < minimumItems) return null;
-                            const inMain = (el.matches && el.matches('main, [role="main"]')) || !!(el.closest && el.closest('main, [role="main"]'));
-                            return { rect, items, inMain };
-                        })
-                        .filter(Boolean);
-                    if (!containerCandidates.length || !onGroupsSurface) {
-                        return { ready: false, source: 'not_found', items: [] };
+                    const main = document.querySelector('main, [role="main"]');
+                    if (!onGroupsSurface || !main || !visible(main)) {
+                        return { ready: false, source: 'not_groups_surface', items: [], empty: false, fingerprint: '' };
                     }
-                    containerCandidates.sort((a, b) => {
-                        const countDiff = b.items.length - a.items.length;
-                        if (countDiff !== 0) return countDiff;
-                        const mainDiff = Number(b.inMain) - Number(a.inMain);
-                        if (mainDiff !== 0) return mainDiff;
-                        return (a.rect.width * a.rect.height) - (b.rect.width * b.rect.height);
-                    });
+
+                    const mainItems = collectMainGroups(main);
+                    if (mainItems.length >= 1) {
+                        return {
+                            ready: true,
+                            source: 'main_group_roots',
+                            items: mainItems,
+                            empty: false,
+                            fingerprint: mainItems.map((item) => item.href).slice(0, 16).join('|'),
+                        };
+                    }
+
+                    const mainText = normalize((main && main.innerText) || document.body.innerText || '');
+                    const visibleMainLinkCount = Array.from(main.querySelectorAll('a[href]'))
+                        .filter((el) => visible(el))
+                        .length;
+                    const headings = Array.from(main.querySelectorAll('h1, h2, h3, h4, [role="heading"], [aria-level], span, div'))
+                        .filter((el) => visible(el))
+                        .map((el) => normalize(el.innerText || ''))
+                        .filter(Boolean);
+                    const joinedSectionHint = headings.some((text) => labels.some((label) => matchesLabel(text, label)));
+                    const loadingIndicators = Array.from(
+                        document.querySelectorAll(
+                            '[role="progressbar"], [aria-busy="true"], [data-visualcompletion="loading-state"]'
+                        )
+                    ).filter((el) => visible(el)).length;
+                    const emptyJoinedSurface =
+                        path.startsWith('/groups/joins') &&
+                        loadingIndicators === 0 &&
+                        mainText.length >= 40 &&
+                        (
+                            joinedSectionHint
+                            || headings.length >= 1
+                            || visibleMainLinkCount >= 1
+                            || (main.children && main.children.length >= 3)
+                        );
+                    if (emptyJoinedSurface) {
+                        return { ready: true, source: 'empty_joined_surface', items: [], empty: true, fingerprint: 'EMPTY' };
+                    }
                     return {
-                        ready: true,
-                        source: 'container_fallback',
-                        items: containerCandidates[0].items,
+                        ready: false,
+                        source: loadingIndicators > 0 ? 'group_roots_loading' : 'group_roots_not_ready',
+                        items: [],
+                        empty: false,
+                        fingerprint: '',
                     };
                 }""",
                 {
@@ -1096,7 +1331,7 @@ class Scraper:
                 },
             )
         except Exception:
-            return {"ready": False, "source": "error", "items": []}
+            return {"ready": False, "source": "error", "items": [], "empty": False, "fingerprint": ""}
 
     def _wait_for_condition(self, step_name, detail, checker, timeout=12.0, interval=0.35):
         timeout = max(0.5, float(timeout or 0.5))
@@ -1234,6 +1469,38 @@ class Scraper:
             retry_interval=0.05,
         )
 
+    def _goto_groups_surface_pause_aware(
+        self,
+        url,
+        timeout_ms=None,
+        require_joined=False,
+        step_name="小组首页",
+    ):
+        target_url = str(url or "").strip()
+        if not target_url:
+            return False, None
+        navigation_error = None
+        try:
+            self._run_pause_aware_action(
+                lambda step_timeout: self.page.goto(
+                    target_url,
+                    wait_until="commit",
+                    timeout=step_timeout,
+                ),
+                timeout_ms=timeout_ms or self.GROUPS_DIRECT_NAV_TIMEOUT_MS,
+                slice_ms=700,
+                retry_interval=0.05,
+            )
+        except Exception as exc:
+            navigation_error = exc
+        ready = self._wait_for_groups_surface_stable(
+            timeout=6.0 if require_joined else 5.0,
+            stable_rounds=2,
+            require_joined=require_joined,
+            step_name=step_name,
+        )
+        return bool(ready), navigation_error
+
     def _pause_aware_sleep(self, seconds):
         duration = max(0.0, float(seconds or 0.0))
         if duration <= 0:
@@ -1250,11 +1517,24 @@ class Scraper:
             time.sleep(min(0.1, remaining))
 
     def open_groups_feed(self):
+        self._set_last_collection_block_reason("")
+        if self._is_login_surface(self.page):
+            self._set_last_collection_block_reason("facebook_not_logged_in")
+            log.warning(f"{self._prefix()}当前页面命中 Facebook 登录页，停止当前窗口的小组采集。")
+            return False
         if self._is_checkpoint_surface(self.page.url):
             log.warning(f"{self._prefix()}当前页面命中 Facebook checkpoint，停止进入小组流程，交由上层统一处理。")
             return False
         if not self._adopt_existing_facebook_page():
+            if self._is_login_surface(self.page):
+                self._set_last_collection_block_reason("facebook_not_logged_in")
+                log.warning(f"{self._prefix()}未登录 Facebook，无法接管有效页面，停止当前窗口的小组采集。")
+                return False
             log.warning(f"{self._prefix()}未找到可复用的 Facebook 页面，无法按手动路径进入小组。")
+            return False
+        if self._is_login_surface(self.page):
+            self._set_last_collection_block_reason("facebook_not_logged_in")
+            log.warning(f"{self._prefix()}接管页面后识别到 Facebook 登录页，停止当前窗口的小组采集。")
             return False
         if self._is_checkpoint_surface(self.page.url):
             log.warning(f"{self._prefix()}接管页面后命中 Facebook checkpoint，停止进入小组流程，交由上层统一处理。")
@@ -1262,37 +1542,111 @@ class Scraper:
         if self._is_joined_groups_listing_ready():
             log.info(f"{self._prefix()}当前已位于“你的小组”列表，沿用当前页面继续采集。")
             return True
-        if self._has_groups_surface_ready():
-            log.info(f"{self._prefix()}当前已位于小组页面，沿用当前页面继续进入列表。")
-            return True
         if self._is_groups_surface(self.page.url):
             log.info(f"{self._prefix()}当前已在小组域页面，先等待当前页面稳定后再继续。")
-            if self._wait_for_groups_surface(timeout=10.0, step_name="小组首页"):
-                return True
-            if self._open_groups_surface_by_direct_navigation():
-                return True
+            ready = self._wait_for_groups_surface_stable(
+                timeout=6.0,
+                stable_rounds=2,
+                require_joined=False,
+                step_name="小组首页",
+            )
+            return bool(ready) or self._is_groups_surface(self.page.url) or self._has_groups_surface_ready()
+        if self._open_groups_surface_by_direct_navigation():
+            return True
         if self._open_home_surface_for_groups_entry():
             click_info = self._click_groups_entry()
-            if click_info and self._wait_for_groups_surface(timeout=12.0, step_name="小组首页"):
+            if click_info and self._wait_for_groups_surface_stable(
+                timeout=8.0,
+                stable_rounds=2,
+                require_joined=False,
+                step_name="小组首页",
+            ):
                 return True
-        try:
-            log.warning(f"{self._prefix()}首页 -> 小组入口链未成功完成，尝试进入小组页兜底恢复。")
-        except Exception:
-            pass
-        if not self._has_groups_surface_ready():
-            if not self._open_groups_surface_by_direct_navigation():
-                log.warning(f"{self._prefix()}未能回到 Facebook 首页，无法按手动路径进入小组。")
-                return False
-        return self._has_groups_surface_ready()
+        log.warning(f"{self._prefix()}首页 -> 小组入口链未成功完成，且直达小组页也未成功，停止继续抖动恢复。")
+        return False
 
     def _stabilize_joined_groups_listing(self, timeout=None, step_name="已加入小组列表"):
         if timeout is None:
             timeout = self.JOINED_GROUPS_STABILIZE_TIMEOUT_SECONDS
-        if not self._is_joined_groups_listing_ready():
-            return False
         self.scroll_to_top()
         self._scroll_joined_groups_container(to_top=True)
-        return self._wait_for_groups_list_ready(timeout=timeout, step_name=step_name)
+        self._warm_up_joined_groups_listing()
+        if not self._is_joined_groups_listing_ready():
+            return False
+        return bool(
+            self._wait_for_joined_groups_snapshot_stable(
+                timeout=timeout,
+                stable_rounds=2,
+                require_items=False,
+                step_name=step_name,
+            )
+        )
+
+    def _wait_for_joined_groups_snapshot_stable(
+        self,
+        timeout=None,
+        stable_rounds=2,
+        require_items=False,
+        step_name="已加入小组列表",
+    ):
+        if timeout is None:
+            timeout = self.JOINED_GROUPS_STABILIZE_TIMEOUT_SECONDS
+        timeout = max(0.5, float(timeout or 0.5))
+        stable_rounds = max(1, int(stable_rounds or 1))
+        end_time = time.time() + timeout
+        last_signature = None
+        stable = 0
+        last_ready_snapshot = None
+        while time.time() < end_time:
+            paused_seconds = self._wait_if_paused()
+            if paused_seconds:
+                end_time += paused_seconds
+            snapshot = self._joined_groups_snapshot() or {}
+            if not snapshot.get("ready"):
+                last_signature = None
+                stable = 0
+                self._pause_aware_sleep(0.15)
+                continue
+            items = list(snapshot.get("items") or [])
+            if require_items and not items:
+                last_signature = None
+                stable = 0
+                self._pause_aware_sleep(0.15)
+                continue
+            signature = (
+                str(snapshot.get("fingerprint") or ""),
+                bool(snapshot.get("empty")),
+                len(items),
+            )
+            if signature == last_signature:
+                stable += 1
+            else:
+                last_signature = signature
+                stable = 0
+            last_ready_snapshot = snapshot
+            if stable >= stable_rounds - 1:
+                return last_ready_snapshot
+            self._pause_aware_sleep(0.15)
+        return last_ready_snapshot if last_ready_snapshot and not require_items else None
+
+    def _warm_up_joined_groups_listing(self):
+        try:
+            self.scroll_to_top()
+            self._scroll_joined_groups_container(to_top=True)
+            self._pause_aware_sleep(0.18)
+            if self._has_groups_list_ready():
+                return True
+            moved = self._scroll_joined_groups_container()
+            if moved is None:
+                moved = self.scroll_page(step_ratio=0.32, min_px=240, smooth=False)
+            if moved:
+                self._pause_aware_sleep(0.24)
+            self._scroll_joined_groups_container(to_top=True)
+            self.scroll_to_top()
+            self._pause_aware_sleep(0.12)
+        except Exception:
+            return False
+        return self._has_groups_list_ready()
 
     def _wait_for_joined_groups_listing_ready(
         self,
@@ -1313,11 +1667,19 @@ class Scraper:
         )
         if not entered:
             return False
-        return self._stabilize_joined_groups_listing(timeout=stabilize_timeout, step_name=step_name)
+        return bool(
+            self._wait_for_joined_groups_snapshot_stable(
+                timeout=stabilize_timeout,
+                stable_rounds=2,
+                require_items=False,
+                step_name=step_name,
+            )
+        )
 
     def collect_joined_groups(self, max_scrolls=8, allowed_group_ids=None, return_meta=False):
         groups = []
         seen_group_ids = set()
+        self._set_last_collection_block_reason("")
         normalized_allowed_group_ids = {
             str(group_id or "").strip()
             for group_id in (allowed_group_ids or [])
@@ -1333,9 +1695,19 @@ class Scraper:
         try:
             self._raise_if_stop_requested()
             if not self.open_groups_feed():
-                return {"groups": [], "stopped": False} if return_meta else []
+                payload = {
+                    "groups": [],
+                    "stopped": False,
+                    "error": self.get_last_collection_block_reason(),
+                }
+                return payload if return_meta else []
             if not self._open_joined_groups_listing():
-                return {"groups": [], "stopped": False} if return_meta else []
+                payload = {
+                    "groups": [],
+                    "stopped": False,
+                    "error": self.get_last_collection_block_reason(),
+                }
+                return payload if return_meta else []
             self._scroll_joined_groups_container(to_top=True)
 
             while unlimited or round_idx < int(max_scrolls):
@@ -1348,6 +1720,22 @@ class Scraper:
                     )
                     batch = self._joined_groups_snapshot()
                 items = list(batch.get("items") or [])
+                empty_ready = bool(batch.get("ready")) and not items and bool(batch.get("empty"))
+                if empty_ready:
+                    log.info(f"{self._prefix()}检测到“你的小组”列表可能为空，开始二次复核。")
+                    self._warm_up_joined_groups_listing()
+                    rechecked = self._wait_for_joined_groups_snapshot_stable(
+                        timeout=self.JOINED_GROUPS_QUICK_STABILIZE_TIMEOUT_SECONDS,
+                        stable_rounds=2,
+                        require_items=False,
+                        step_name="已加入小组列表二次复核",
+                    ) or {}
+                    rechecked_items = list(rechecked.get("items") or [])
+                    if bool(rechecked.get("ready")) and not rechecked_items and bool(rechecked.get("empty")):
+                        log.info(f"{self._prefix()}已确认当前“你的小组”列表为空，结束本轮采集。")
+                        break
+                    batch = rechecked if rechecked else batch
+                    items = rechecked_items
                 added = 0
                 for item in items:
                     group_url = self._extract_group_root_url(item.get("href"))
@@ -1399,7 +1787,11 @@ class Scraper:
             log.warning(f"{self._prefix()}检测到停止指令，结束当前小组采集并保留已获取结果。")
 
         if return_meta:
-            return {"groups": groups, "stopped": stopped}
+            return {
+                "groups": groups,
+                "stopped": stopped,
+                "error": self.get_last_collection_block_reason(),
+            }
         return groups
 
     def collect_joined_group_urls(self, max_scrolls=8, allowed_group_ids=None):
@@ -1500,6 +1892,17 @@ class Scraper:
         initial_stable = self._wait_for_member_list_stable(timeout=2.0)
         if initial_stable:
             log.info(f"{self._prefix()}members 页首屏列表已稳定，开始查找“小组新人”。")
+        initial_scope = self._wait_for_newcomers_scope_stable(timeout=2.0 if initial_stable else 2.8)
+        if initial_scope and initial_scope.get("confirmed"):
+            scope = initial_scope.get("scope") or {}
+            self.page.evaluate(
+                "(y) => window.scrollTo(0, Math.max(0, y - 120))",
+                int(scope.get("sectionTop") or scope.get("headingTop") or 0),
+            )
+            self._wait_for_scroll_stable(timeout=1.8, member_scope=scope)
+            self._set_last_scope_status(True, "ok", scope.get("label"))
+            log.info(f"{self._prefix()}已稳定定位到 {scope.get('label') or '小组新人'} 区块，从这里开始采集。")
+            return True
         last_snapshot = None
         stalled_scroll_rounds = 0
         stagnant_rounds = 0
@@ -1531,7 +1934,11 @@ class Scraper:
             else:
                 stalled_scroll_rounds += 1
 
-            current_snapshot = self._capture_newcomers_search_snapshot()
+            current_snapshot = self._wait_for_newcomers_scope_stable(
+                timeout=1.6 if stable else 2.2,
+                stable_rounds=2,
+                interval=0.16,
+            ) or self._capture_newcomers_search_snapshot()
             current_scope = current_snapshot.get("scope") or {}
             if current_snapshot.get("confirmed"):
                 self.page.evaluate(
@@ -1950,98 +2357,72 @@ class Scraper:
 
     def _open_joined_groups_listing(self):
         try:
+            if self._is_login_surface(self.page):
+                self._set_last_collection_block_reason("facebook_not_logged_in")
+                log.warning(f"{self._prefix()}当前页面为 Facebook 登录页，停止当前窗口的小组采集。")
+                return False
             if self._is_joined_groups_listing_ready():
-                return True
-            if self._stabilize_joined_groups_listing(step_name="已加入小组列表"):
-                return True
-
-            clicked_any = False
-            for _ in range(3):
-                clicked = self.page.evaluate(
-                    """(payload) => {
-                    const sidebarMaxX = Math.min(window.innerWidth * 0.42, 520);
-                    const normalize = (value) => (value || '').trim().replace(/\\s+/g, ' ');
-                    const lower = (value) => normalize(value).toLowerCase();
-                    const joinedLabels = new Set((payload.joinedLabels || []).map(lower).filter(Boolean));
-                    const seeAllLabels = new Set((payload.seeAllLabels || []).map(lower).filter(Boolean));
-                    const cssPath = (el) => {
-                        if (!el || !(el instanceof Element)) return '';
-                        const parts = [];
-                        let node = el;
-                        while (node && node.nodeType === 1 && parts.length < 8) {
-                            let part = node.nodeName.toLowerCase();
-                            let idx = 1;
-                            let sib = node;
-                            while ((sib = sib.previousElementSibling)) {
-                                if (sib.nodeName === node.nodeName) idx += 1;
-                            }
-                            part += `:nth-of-type(${idx})`;
-                            parts.unshift(part);
-                            node = node.parentElement;
-                        }
-                        return parts.join(' > ');
-                    };
-                    let fallback = null;
-                    for (const el of Array.from(document.querySelectorAll('a[href], div[role="link"], span[role="link"]'))) {
-                        const text = normalize(el.innerText || el.getAttribute('aria-label') || '');
-                        const textLower = text.toLowerCase();
-                        if (!text) continue;
-                        const rect = el.getBoundingClientRect();
-                        if (!rect.width || !rect.height) continue;
-                        if (rect.right < 0 || rect.bottom < 0 || rect.top > window.innerHeight) continue;
-                        if (rect.left > sidebarMaxX) continue;
-                        const href = el.getAttribute('href') || '';
-                        if (joinedLabels.has(textLower) && /\\/groups\\/(joins|feed)(\\/|\\?|$)?/i.test(href || '')) {
-                            el.click();
-                            return {
-                                clickedText: text,
-                                clickedSelector: cssPath(el),
-                            };
-                        }
-                        if (seeAllLabels.has(textLower) && !fallback) {
-                            fallback = {
-                                el,
-                                clickedText: text,
-                                clickedSelector: cssPath(el),
-                            };
-                        }
-                    }
-                    if (fallback) {
-                        fallback.el.click();
-                        return {
-                            clickedText: fallback.clickedText,
-                            clickedSelector: fallback.clickedSelector,
-                        };
-                    }
-                    return null;
-                }"""
-                    ,
-                    {
-                        "joinedLabels": list(self.JOINED_GROUP_SECTION_LABELS),
-                        "seeAllLabels": list(self.SEE_ALL_LABELS),
-                    },
-                )
-                if clicked:
-                    clicked_any = True
-                    self._pause_aware_sleep(random.uniform(0.12, 0.28))
-                    if self._wait_for_joined_groups_listing_ready(step_name="已加入小组列表"):
-                        return True
-                elif self._stabilize_joined_groups_listing(
-                    timeout=self.JOINED_GROUPS_QUICK_STABILIZE_TIMEOUT_SECONDS,
+                return self._stabilize_joined_groups_listing(step_name="已加入小组列表")
+            joins_url = "https://www.facebook.com/groups/joins/"
+            navigation_error = None
+            current_url = str(self.page.url or "").strip()
+            if self._is_joined_groups_surface(current_url):
+                log.info(f"{self._prefix()}当前已在“你的小组”链路页面，先等待当前页面稳定后再抓取列表。")
+                self._wait_for_groups_surface_stable(
+                    timeout=4.5,
+                    stable_rounds=2,
+                    require_joined=True,
                     step_name="已加入小组列表",
-                ):
-                    return True
-                self._pause_aware_sleep(0.22)
-
-            should_force_recover = clicked_any or not self._is_joined_groups_listing_ready()
-            if should_force_recover:
-                try:
-                    log.info(f"{self._prefix()}已加入小组列表尚未稳定，尝试直接进入 joins 页面恢复列表。")
-                    self._goto_pause_aware("https://www.facebook.com/groups/joins/", timeout_ms=30000, settle_timeout_ms=3000)
-                    if self._wait_for_joined_groups_listing_ready(step_name="已加入小组列表"):
-                        return True
-                except Exception:
-                    pass
+                )
+            elif self._is_groups_surface(current_url):
+                log.info(f"{self._prefix()}当前仅在小组域页面，等待页面稳定后直接进入“你的小组”页面。")
+                self._wait_for_groups_surface_stable(
+                    timeout=4.0,
+                    stable_rounds=2,
+                    require_joined=False,
+                    step_name="小组首页",
+                )
+                ready_after_navigation, navigation_error = self._goto_groups_surface_pause_aware(
+                    joins_url,
+                    timeout_ms=self.GROUPS_DIRECT_NAV_TIMEOUT_MS,
+                    require_joined=True,
+                    step_name="已加入小组列表",
+                )
+                if not ready_after_navigation and navigation_error:
+                    current_url = str(self.page.url or "").strip()
+                    log.warning(
+                        f"{self._prefix()}从小组域切到“你的小组”页面时出现导航异常，且当前页面未稳定 ready："
+                        f"url={current_url or '-'} error={navigation_error}"
+                    )
+            else:
+                log.info(f"{self._prefix()}正在直接进入“你的小组”页面。")
+                ready_after_navigation, navigation_error = self._goto_groups_surface_pause_aware(
+                    joins_url,
+                    timeout_ms=self.GROUPS_DIRECT_NAV_TIMEOUT_MS,
+                    require_joined=True,
+                    step_name="已加入小组列表",
+                )
+                if not ready_after_navigation and navigation_error:
+                    current_url = str(self.page.url or "").strip()
+                    log.warning(
+                        f"{self._prefix()}直达“你的小组”页面时出现导航异常，且当前页面未稳定 ready："
+                        f"url={current_url or '-'} error={navigation_error}"
+                    )
+            if self._is_joined_groups_surface(self.page.url):
+                self._wait_for_groups_surface_stable(
+                    timeout=4.5,
+                    stable_rounds=2,
+                    require_joined=True,
+                    step_name="已加入小组列表",
+                )
+            if self._is_login_surface(self.page):
+                self._set_last_collection_block_reason("facebook_not_logged_in")
+                log.warning(f"{self._prefix()}进入“你的小组”链路时识别到 Facebook 登录页，停止当前窗口的小组采集。")
+                return False
+            if self._warm_up_joined_groups_listing():
+                return True
+            if self._wait_for_joined_groups_listing_ready(step_name="已加入小组列表"):
+                return True
         except Exception:
             return False
         return self._is_joined_groups_listing_ready()
@@ -2067,6 +2448,8 @@ class Scraper:
             return -1
         if self._is_checkpoint_surface(url):
             return 400
+        if self._is_login_surface(page):
+            return 80
         if self._is_reusable_facebook_url(url) and self._has_real_facebook_surface(page):
             return 300
         if "facebook.com" in lower_url and not lower_url.startswith("about:blank"):
@@ -2158,6 +2541,8 @@ class Scraper:
         target_page = page or self.page
         try:
             if self._is_checkpoint_surface(target_page.url):
+                return False
+            if self._is_login_surface(target_page):
                 return False
             return bool(
                 target_page.evaluate(
@@ -2420,18 +2805,19 @@ class Scraper:
         try:
             log.info(f"{self._prefix()}正在点击目标小组: {group_root}")
             self._scroll_joined_groups_container(to_top=True)
+            self._wait_for_joined_groups_snapshot_stable(
+                timeout=2.4,
+                stable_rounds=2,
+                require_items=True,
+                step_name="已加入小组列表",
+            )
             last_fingerprint = None
             idle_rounds = 0
-            for _ in range(10):
+            for _ in range(6):
                 before_url = self.page.url
                 clicked = self.page.evaluate(
                     """(payload) => {
                     const targetGroupRoot = String(payload?.targetGroupRoot || '').trim().replace(/\\/+$/, '');
-                    const openActionLabels = new Set(
-                        Array.isArray(payload?.openActionLabels)
-                            ? payload.openActionLabels.map((label) => (label || '').trim().toLowerCase()).filter(Boolean)
-                            : []
-                    );
                     const normalize = (value) => (value || '').trim().replace(/\\s+/g, ' ');
                     const visible = (el) => {
                         if (!el) return false;
@@ -2497,23 +2883,6 @@ class Scraper:
                         } catch (e) {}
                         return { type: 'non_group', root: '' };
                     };
-                    const isButtonLike = (el) => {
-                        if (!el) return false;
-                        const tag = (el.tagName || '').toLowerCase();
-                        return tag === 'button' || el.getAttribute('role') === 'button';
-                    };
-                    const scoreJoinedListingControl = (candidate) => {
-                        let score = 0;
-                        if (candidate.inMain) score += 400;
-                        if (candidate.buttonLike) score += 180;
-                        if (candidate.matchesActionText) score += 220;
-                        if (candidate.linksDirectly) score += 180;
-                        if (candidate.rect.width >= 120) score += 40;
-                        if (candidate.rect.height >= 28) score += 20;
-                        if (candidate.rect.top >= 140 && candidate.rect.top <= 520) score += 60;
-                        if (candidate.rect.left >= (mainRect ? mainRect.left + 40 : 320)) score += 40;
-                        return score;
-                    };
                     const path = location.pathname || '';
                     const onJoinedSurface =
                         path === '/groups' ||
@@ -2549,43 +2918,6 @@ class Scraper:
                         }
                         cardCandidates.sort((a, b) => a.rect.top - b.rect.top || a.rect.left - b.rect.left);
                         for (const card of cardCandidates) {
-                            const controls = [];
-                            for (const el of Array.from(card.node.querySelectorAll('a[href], button, [role="button"]'))) {
-                                if (!visible(el)) continue;
-                                const rect = el.getBoundingClientRect();
-                                if (!inMainContent(rect)) continue;
-                                const text = normalize(el.innerText || el.getAttribute('aria-label') || el.getAttribute('title') || '');
-                                const lowerText = text.toLowerCase();
-                                const href = el.getAttribute('href') || '';
-                                const classified = classifyGroupHref(href);
-                                const matchesActionText = Array.from(openActionLabels).some((token) => lowerText === token || lowerText.includes(token));
-                                const linksDirectly = classified.root === targetGroupRoot && classified.type === 'group_root';
-                                if (!matchesActionText && !linksDirectly) continue;
-                                controls.push({
-                                    el,
-                                    rect,
-                                    text,
-                                    lowerText,
-                                    href,
-                                    inMain: true,
-                                    buttonLike: isButtonLike(el),
-                                    matchesActionText,
-                                    linksDirectly,
-                                    clickedSelector: cssPath(el),
-                                });
-                            }
-                            controls.sort((a, b) => scoreJoinedListingControl(b) - scoreJoinedListingControl(a) || a.rect.top - b.rect.top || a.rect.left - b.rect.left);
-                            if (controls.length) {
-                                const bestControl = controls[0];
-                                bestControl.el.click();
-                                return {
-                                    candidateCount: controls.length,
-                                    clickedUrl: bestControl.href ? new URL(bestControl.href, location.origin).href : targetGroupRoot,
-                                    clickedType: bestControl.linksDirectly ? 'group_root' : 'group_open_action',
-                                    clickedText: bestControl.text,
-                                    clickedSelector: bestControl.clickedSelector,
-                                };
-                            }
                             const primaryAnchor = rootAnchors
                                 .map((el) => ({
                                     el,
@@ -2593,9 +2925,10 @@ class Scraper:
                                     text: normalize(el.innerText || el.getAttribute('aria-label') || el.getAttribute('title') || ''),
                                     href: el.getAttribute('href') || '',
                                     selector: cssPath(el),
+                                    hasText: normalize(el.innerText || el.getAttribute('aria-label') || el.getAttribute('title') || '').length >= 2,
                                 }))
                                 .filter((item) => card.node.contains(item.el) && inMainContent(item.rect))
-                                .sort((a, b) => a.rect.top - b.rect.top || a.rect.left - b.rect.left)[0];
+                                .sort((a, b) => Number(b.hasText) - Number(a.hasText) || a.rect.top - b.rect.top || a.rect.left - b.rect.left)[0];
                             if (primaryAnchor) {
                                 primaryAnchor.el.click();
                                 return {
@@ -2649,7 +2982,6 @@ class Scraper:
                 }""",
                     {
                         "targetGroupRoot": group_root,
-                        "openActionLabels": list(self.GROUP_OPEN_ACTION_LABELS),
                     },
                 )
                 if clicked:
@@ -2684,7 +3016,12 @@ class Scraper:
                         self._go_back_pause_aware(timeout_ms=15000)
                     except Exception:
                         pass
-                    self._wait_for_groups_list_ready(timeout=2.0, step_name="已加入小组列表")
+                    self._wait_for_joined_groups_snapshot_stable(
+                        timeout=2.0,
+                        stable_rounds=1,
+                        require_items=True,
+                        step_name="已加入小组列表",
+                    )
                 snapshot = self._joined_groups_snapshot()
                 fingerprint = "|".join(item.get("href") or "" for item in (snapshot.get("items") or [])[:12])
                 idle_rounds = idle_rounds + 1 if fingerprint == last_fingerprint else 0
@@ -2694,7 +3031,12 @@ class Scraper:
                 if not moved and idle_rounds >= 1:
                     break
                 last_fingerprint = fingerprint
-                self._pause_aware_sleep(0.25)
+                self._wait_for_joined_groups_snapshot_stable(
+                    timeout=1.8,
+                    stable_rounds=1,
+                    require_items=True,
+                    step_name="已加入小组列表",
+                )
             return False
         except Exception:
             return False
@@ -2816,15 +3158,10 @@ class Scraper:
             current_group_root = self._extract_group_root_url(current_url)
             if current_url != previous and "/members" in current_url:
                 if not expected_group_root or current_group_root == expected_group_root:
-                    return True
-            snapshot = self._capture_members_page_ready_snapshot()
-            if (not expected_group_root or current_group_root == expected_group_root) and snapshot and (
-                bool(snapshot.get("looksLikeMembers"))
-                or (
-                    bool(snapshot.get("hasHeading"))
-                    and int(snapshot.get("visibleCount") or 0) >= 1
-                )
-            ):
+                    remaining = max(0.4, end_time - time.time())
+                    if self._wait_for_members_page_ready(timeout=min(remaining, 4.0)):
+                        return True
+            if (not expected_group_root or current_group_root == expected_group_root) and self._has_members_page_ready():
                 return True
             self._pause_aware_sleep(interval)
         return False
@@ -2857,7 +3194,142 @@ class Scraper:
     def _is_joined_groups_surface(self, url):
         parsed = urlparse(urljoin("https://www.facebook.com", url or ""))
         path = parsed.path or ""
-        return path.startswith("/groups/joins") or path.startswith("/groups/feed") or path in {"/groups", "/groups/"}
+        return path.startswith("/groups/joins")
+
+    def _capture_groups_surface_snapshot(self):
+        try:
+            return self.page.evaluate(
+                """() => {
+                    const normalize = (value) => (value || '').replace(/\\s+/g, ' ').trim();
+                    const visible = (el) => {
+                        if (!el) return false;
+                        const rect = el.getBoundingClientRect();
+                        if (!rect.width || !rect.height) return false;
+                        const style = window.getComputedStyle(el);
+                        if (!style) return false;
+                        if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+                        if (rect.bottom < 0 || rect.right < 0 || rect.top > window.innerHeight || rect.left > window.innerWidth) return false;
+                        return true;
+                    };
+                    const path = location.pathname || '';
+                    const onGroupsSurface =
+                        path === '/groups' ||
+                        path === '/groups/' ||
+                        path.startsWith('/groups/feed') ||
+                        path.startsWith('/groups/joins');
+                    const onJoinedSurface = path.startsWith('/groups/joins');
+                    const main = document.querySelector('main, [role="main"]');
+                    const mainVisible = !!(main && visible(main));
+                    const mainRect = mainVisible ? main.getBoundingClientRect() : null;
+                    const loadingIndicators = Array.from(
+                        document.querySelectorAll('[role="progressbar"], [aria-busy="true"], [data-visualcompletion="loading-state"]')
+                    ).filter((el) => visible(el)).length;
+                    const isGroupRootHref = (href) => {
+                        const normalizedHref = String(href || '');
+                        if (!normalizedHref) return false;
+                        if (/\\/groups\\/(discover|create)(\\/|\\?|$)/i.test(normalizedHref) || /[?&]category=create/i.test(normalizedHref)) {
+                            return false;
+                        }
+                        if (/\\/members(\\/|\\?|$)/i.test(normalizedHref)) return false;
+                        return /\\/groups\\/[0-9A-Za-z_-]+(\\/|\\?|$)/i.test(normalizedHref);
+                    };
+                    const groupRoots = [];
+                    if (mainVisible) {
+                        const seen = new Set();
+                        for (const el of Array.from(main.querySelectorAll('a[href]'))) {
+                            if (!visible(el)) continue;
+                            const href = (el.getAttribute && (el.getAttribute('href') || '')) || '';
+                            if (!isGroupRootHref(href)) continue;
+                            try {
+                                const url = new URL(href, location.origin);
+                                const parts = url.pathname.split('/').filter(Boolean);
+                                if (parts.length >= 2 && parts[0] === 'groups') {
+                                    const root = `${location.origin}/groups/${parts[1]}`;
+                                    if (!seen.has(root)) {
+                                        seen.add(root);
+                                        groupRoots.push(root);
+                                    }
+                                }
+                            } catch (e) {}
+                        }
+                    }
+                    const headings = mainVisible
+                        ? Array.from(main.querySelectorAll('h1, h2, h3, h4, [role="heading"], [aria-level]'))
+                            .filter((el) => visible(el))
+                            .map((el) => normalize(el.innerText || ''))
+                            .filter(Boolean)
+                        : [];
+                    const mainText = mainVisible ? normalize(main.innerText || '') : '';
+                    const ready =
+                        onGroupsSurface &&
+                        mainVisible &&
+                        loadingIndicators === 0 &&
+                        (
+                            groupRoots.length >= 2 ||
+                            (groupRoots.length >= 1 && mainText.length >= 120) ||
+                            (headings.length >= 2 && mainText.length >= 180)
+                        );
+                    return {
+                        onGroupsSurface,
+                        onJoinedSurface,
+                        mainVisible,
+                        mainHeight: mainRect ? mainRect.height : 0,
+                        loadingIndicators,
+                        groupRootCount: groupRoots.length,
+                        headingCount: headings.length,
+                        mainTextLength: mainText.length,
+                        fingerprint: groupRoots.slice(0, 12).join('|'),
+                        ready,
+                    };
+                }"""
+            )
+        except Exception:
+            return None
+
+    def _wait_for_groups_surface_stable(
+        self,
+        timeout=6.0,
+        stable_rounds=2,
+        require_joined=False,
+        step_name="小组首页",
+    ):
+        timeout = max(0.5, float(timeout or 0.5))
+        stable_rounds = max(1, int(stable_rounds or 1))
+        end_time = time.time() + timeout
+        last_signature = None
+        stable = 0
+        last_ready_snapshot = None
+        while time.time() < end_time:
+            paused_seconds = self._wait_if_paused()
+            if paused_seconds:
+                end_time += paused_seconds
+            snapshot = self._capture_groups_surface_snapshot() or {}
+            if not snapshot.get("ready"):
+                last_signature = None
+                stable = 0
+                self._pause_aware_sleep(0.15)
+                continue
+            if require_joined and not snapshot.get("onJoinedSurface"):
+                last_signature = None
+                stable = 0
+                self._pause_aware_sleep(0.15)
+                continue
+            signature = (
+                bool(snapshot.get("onJoinedSurface")),
+                int(snapshot.get("groupRootCount") or 0),
+                int(snapshot.get("headingCount") or 0),
+                str(snapshot.get("fingerprint") or ""),
+            )
+            if signature == last_signature:
+                stable += 1
+            else:
+                last_signature = signature
+                stable = 0
+            last_ready_snapshot = snapshot
+            if stable >= stable_rounds - 1:
+                return last_ready_snapshot
+            self._pause_aware_sleep(0.15)
+        return last_ready_snapshot
 
     def _is_joined_groups_listing_ready(self):
         if not self._is_groups_surface(self.page.url):
@@ -2865,66 +3337,11 @@ class Scraper:
         return self._has_groups_list_ready()
 
     def _has_groups_surface_ready(self):
-        if self._has_groups_list_ready():
-            return True
         if self._is_checkpoint_surface(self.page.url):
             return False
-        if not self._is_groups_surface(self.page.url):
-            return False
         try:
-            return bool(
-                self.page.evaluate(
-                    """() => {
-                        const normalize = (value) => (value || '').replace(/\\s+/g, ' ').trim();
-                        const visible = (el) => {
-                            if (!el) return false;
-                            const rect = el.getBoundingClientRect();
-                            if (!rect.width || !rect.height) return false;
-                            const style = window.getComputedStyle(el);
-                            if (!style) return false;
-                            if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
-                            if (rect.bottom < 0 || rect.right < 0 || rect.top > window.innerHeight || rect.left > window.innerWidth) return false;
-                            return true;
-                        };
-                        const path = location.pathname || '';
-                        const onGroupsSurface = path === '/groups' || path === '/groups/' || path.startsWith('/groups/feed') || path.startsWith('/groups/joins');
-                        if (!onGroupsSurface) return false;
-                        const main = document.querySelector('main, [role="main"]');
-                        if (!main) return false;
-                        const mainRect = main.getBoundingClientRect();
-                        if (!mainRect.width || mainRect.height < 160) return false;
-                        const isGroupListHref = (href) => {
-                            const normalizedHref = String(href || '');
-                            if (!normalizedHref) return false;
-                            if (/\\/groups\\/(discover|create)(\\/|\\?|$)/i.test(normalizedHref) || /[?&]category=create/i.test(normalizedHref)) {
-                                return false;
-                            }
-                            if (/\\/members(\\/|\\?|$)/i.test(normalizedHref)) return false;
-                            return /\\/groups\\/[0-9A-Za-z_-]+(\\/|\\?|$)/i.test(normalizedHref);
-                        };
-                        const visibleGroupLinks = Array.from(main.querySelectorAll('a[href]'))
-                            .filter((el) => {
-                                if (!visible(el)) return false;
-                                const href = (el.getAttribute && (el.getAttribute('href') || '')) || '';
-                                if (!isGroupListHref(href)) return false;
-                                const text = normalize(el.innerText || (el.getAttribute && (el.getAttribute('aria-label') || el.getAttribute('title'))) || '');
-                                return text.length >= 2;
-                            })
-                            .length;
-                        const visibleHeadings = Array.from(document.querySelectorAll('h1, h2, h3, h4, [role="heading"], [aria-level]'))
-                            .filter((el) => {
-                                if (!visible(el)) return false;
-                                const text = normalize(el.innerText || '');
-                                return text.length >= 2;
-                            })
-                            .length;
-                        const mainText = normalize(main.innerText || document.body.innerText || '');
-                        const richMainText = visibleGroupLinks >= 1 && mainText.length >= 220;
-                        const structuredSurface = visibleGroupLinks >= 1 && visibleHeadings >= 2 && mainText.length >= 120;
-                        return (visibleGroupLinks >= 2 && mainText.length >= 80) || structuredSurface || richMainText;
-                    }"""
-                )
-            )
+            snapshot = self._capture_groups_surface_snapshot() or {}
+            return bool(snapshot.get("ready"))
         except Exception:
             return False
 
@@ -2979,24 +3396,59 @@ class Scraper:
     def _has_groups_list_ready(self):
         try:
             snapshot = self._joined_groups_snapshot()
-            return bool(snapshot.get("ready")) and bool(snapshot.get("items"))
+            return bool(snapshot.get("ready")) and (bool(snapshot.get("items")) or bool(snapshot.get("empty")))
         except Exception:
             return False
 
     def _open_groups_surface_by_direct_navigation(self):
-        direct_urls = (
-            "https://www.facebook.com/groups/feed/",
-            "https://www.facebook.com/groups/",
-        )
-        for direct_url in direct_urls:
-            try:
-                log.warning(f"{self._prefix()}“小组”入口识别失败，尝试直接进入: {direct_url}")
-                self._goto_pause_aware(direct_url, timeout_ms=30000, settle_timeout_ms=3000)
-                self._wait_for_groups_surface(timeout=12.0, step_name="小组首页")
-                if self._has_groups_surface_ready():
-                    return True
-            except Exception:
-                pass
+        joins_url = "https://www.facebook.com/groups/joins/"
+        current_url = str(self.page.url or "").strip()
+        try:
+            if self._is_groups_surface(current_url):
+                log.info(f"{self._prefix()}当前已处于小组域页面，先等待当前页面稳定。")
+                return bool(
+                    self._wait_for_groups_surface_stable(
+                        timeout=5.0,
+                        stable_rounds=2,
+                        require_joined=False,
+                        step_name="小组首页",
+                    )
+                )
+            log.warning(f"{self._prefix()}“小组”入口识别失败，尝试直接进入: {joins_url}")
+            ready_after_navigation, navigation_error = self._goto_groups_surface_pause_aware(
+                joins_url,
+                timeout_ms=self.GROUPS_DIRECT_NAV_TIMEOUT_MS,
+                require_joined=False,
+                step_name="小组首页",
+            )
+            if not ready_after_navigation and navigation_error:
+                current_url = str(self.page.url or "").strip()
+                log.warning(
+                    f"{self._prefix()}直接进入 {joins_url} 时出现导航异常，且当前页面未稳定 ready："
+                    f"url={current_url or '-'} error={navigation_error}"
+                )
+            if ready_after_navigation:
+                return True
+            if self._is_groups_surface(self.page.url):
+                return True
+            feed_url = "https://www.facebook.com/groups/feed/"
+            log.warning(f"{self._prefix()}joins 页面未稳定 ready，尝试回退进入: {feed_url}")
+            ready_after_navigation, navigation_error = self._goto_groups_surface_pause_aware(
+                feed_url,
+                timeout_ms=self.GROUPS_DIRECT_NAV_TIMEOUT_MS,
+                require_joined=False,
+                step_name="小组首页",
+            )
+            if not ready_after_navigation and navigation_error:
+                current_url = str(self.page.url or "").strip()
+                log.warning(
+                    f"{self._prefix()}直接进入 {feed_url} 时出现导航异常，且当前页面未稳定 ready："
+                    f"url={current_url or '-'} error={navigation_error}"
+                )
+            if ready_after_navigation:
+                return True
+        except Exception:
+            pass
         return False
 
     def _has_group_page_ready(self):
@@ -3037,12 +3489,18 @@ class Scraper:
             if not snapshot:
                 self._last_members_ready_stable_rounds = 0
                 return False
-            page_stable = bool(snapshot.get("looksLikeMembers")) and bool(snapshot.get("hasHeading"))
-            list_ready = int(snapshot.get("visibleCount") or 0) >= 3 and bool(snapshot.get("fingerprint"))
+            visible_count = int(snapshot.get("visibleCount") or 0)
+            fingerprint = str(snapshot.get("fingerprint") or "").strip()
+            page_stable = (
+                bool(snapshot.get("looksLikeMembers"))
+                or bool(snapshot.get("hasHeading"))
+                or visible_count >= 2
+            )
+            list_ready = visible_count >= 1 and bool(fingerprint)
             self._set_last_scope_status(False, "scope_pending", "")
             self._set_last_member_list_snapshot(
-                fingerprint=snapshot.get("fingerprint"),
-                visible_count=snapshot.get("visibleCount"),
+                fingerprint=fingerprint,
+                visible_count=visible_count,
                 anchor_found=True,
                 anchor_at_tail=False,
                 scope_confirmed=False,
@@ -3060,6 +3518,10 @@ class Scraper:
                 self._last_members_ready_stable_rounds += 1
             else:
                 self._last_members_ready_stable_rounds = 0
+            if bool(snapshot.get("looksLikeMembers")) and visible_count >= 1:
+                return True
+            if bool(snapshot.get("hasHeading")) and visible_count >= 2:
+                return True
             return self._last_members_ready_stable_rounds >= 1
         except Exception:
             self._last_members_ready_stable_rounds = 0
@@ -3072,20 +3534,35 @@ class Scraper:
                     const headings = payload.headings || [];
                     const normalize = (value) => (value || '').replace(/\\s+/g, ' ').trim();
                     const headingsLower = headings.map((token) => normalize(token).toLowerCase()).filter(Boolean);
+                    const visible = (el) => {
+                        if (!el) return false;
+                        const rect = el.getBoundingClientRect();
+                        if (!rect.width || !rect.height) return false;
+                        const style = window.getComputedStyle(el);
+                        if (!style) return false;
+                        if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+                        if (rect.bottom < 0 || rect.right < 0 || rect.top > window.innerHeight || rect.left > window.innerWidth) return false;
+                        return true;
+                    };
                     const url = location.pathname || '';
                     const looksLikeMembers = url.includes('/members');
+                    const main = document.querySelector('main, [role="main"]');
+                    const mainVisible = !!(main && visible(main));
+                    const loadingIndicators = Array.from(
+                        document.querySelectorAll('[role="progressbar"], [aria-busy="true"], [data-visualcompletion="loading-state"]')
+                    ).filter((el) => visible(el)).length;
                     const hasHeading = Array.from(document.querySelectorAll('h1, h2, h3, span, div'))
                         .some((el) => {
+                            if (!visible(el)) return false;
                             const text = normalize(el.innerText || '');
                             const textLower = text.toLowerCase();
                             return headingsLower.some((token) => textLower === token || textLower.includes(token));
                         });
                     const ids = [];
                     const seen = new Set();
-                    for (const link of Array.from(document.querySelectorAll('a[href*="/groups/"][href*="/user/"]'))) {
-                        const rect = link.getBoundingClientRect();
-                        if (!rect.width || !rect.height) continue;
-                        if (rect.bottom < 0 || rect.top > window.innerHeight) continue;
+                    const root = mainVisible ? main : document;
+                    for (const link of Array.from(root.querySelectorAll('a[href*="/groups/"][href*="/user/"]'))) {
+                        if (!visible(link)) continue;
                         const href = link.getAttribute('href') || '';
                         const match = href.match(/\\/groups\\/[^/]+\\/user\\/(\\d+)\\/?/i);
                         const userId = match && match[1] ? match[1] : href;
@@ -3094,11 +3571,19 @@ class Scraper:
                         ids.push(userId);
                         if (ids.length >= 12) break;
                     }
+                    const ready =
+                        mainVisible &&
+                        loadingIndicators === 0 &&
+                        ids.length >= 1 &&
+                        (looksLikeMembers || hasHeading);
                     return {
                         looksLikeMembers,
+                        mainVisible,
+                        loadingIndicators,
                         hasHeading,
                         visibleCount: ids.length,
                         fingerprint: ids.join('|'),
+                        ready,
                     };
                 }""",
                 {"headings": list(self.MEMBERS_PAGE_HINTS)},
@@ -3110,11 +3595,14 @@ class Scraper:
         if not previous or not current:
             return False
         return (
+            bool(previous.get("mainVisible")) == bool(current.get("mainVisible"))
+            and int(previous.get("loadingIndicators") or 0) == int(current.get("loadingIndicators") or 0)
+            and
             bool(previous.get("looksLikeMembers")) == bool(current.get("looksLikeMembers"))
             and bool(previous.get("hasHeading")) == bool(current.get("hasHeading"))
             and int(previous.get("visibleCount") or 0) == int(current.get("visibleCount") or 0)
             and str(previous.get("fingerprint") or "") == str(current.get("fingerprint") or "")
-            and int(current.get("visibleCount") or 0) >= 3
+            and bool(current.get("ready"))
         )
 
     def _wait_for_member_list_stable(self, timeout=1.6, stable_rounds=2, interval=0.12):
@@ -3133,8 +3621,7 @@ class Scraper:
                 stable = 0
                 self._pause_aware_sleep(interval)
                 continue
-            page_stable = bool(snapshot.get("looksLikeMembers")) and bool(snapshot.get("hasHeading"))
-            list_stable = int(snapshot.get("visibleCount") or 0) >= 3 and bool(snapshot.get("fingerprint"))
+            page_stable = bool(snapshot.get("ready"))
             self._set_last_scope_status(False, "scope_pending", "")
             self._set_last_member_list_snapshot(
                 fingerprint=snapshot.get("fingerprint"),
@@ -3145,7 +3632,7 @@ class Scraper:
                 scope_reason="scope_pending",
                 scope_label="",
             )
-            if not page_stable or not list_stable:
+            if not page_stable:
                 previous = snapshot
                 stable = 0
                 self._pause_aware_sleep(interval)

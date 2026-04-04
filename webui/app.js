@@ -64,10 +64,22 @@ let latestStatusPayload = null;
 let latestAgentRows = [];
 let latestDeviceInfoRows = [];
 let currentDeviceDetail = null;
+let currentDeviceDetailVisibleWindowTokens = [];
 let currentPageKey = "task";
 let lastUsersRefreshAt = 0;
 let lastDevicesRefreshAt = 0;
 let lastDeviceInfoRefreshAt = 0;
+const GROUP_ACTION_LABELS = new Set([
+  "查看小组",
+  "进入小组",
+  "进入群组",
+  "打开小组",
+  "前往小组",
+  "view group",
+  "open group",
+  "go to group",
+  "see group",
+]);
 
 function isLogSelectionActive(target) {
   if (!target) return false;
@@ -1170,7 +1182,7 @@ function renderDeviceTable(agents) {
   if (!rows.length) {
     deviceTableBody.innerHTML = `
       <tr class="empty-row">
-        <td colspan="8">暂无数据</td>
+        <td colspan="${IS_SUB ? 9 : 8}">暂无数据</td>
       </tr>
     `;
     return;
@@ -1184,6 +1196,7 @@ function renderDeviceTable(agents) {
       const isDisabled = status === 0;
       const statusText = isDisabled ? "禁用" : "启用";
       const toggleLabel = isDisabled ? "启用" : "禁用";
+      const preferredWindowToken = String(agent.preferred_window_token || "").trim();
       const detailButton = `
             <button
               class="action-btn"
@@ -1199,6 +1212,46 @@ function renderDeviceTable(agents) {
               data-machine-id="${escapeHtml(agent.machine_id || "")}"
             >解绑</button>
           `;
+      const saveWindowButton = `
+            <button
+              class="action-btn"
+              data-action="save-window-token"
+              data-machine-id="${escapeHtml(agent.machine_id || "")}"
+            >保存</button>
+          `;
+      if (IS_SUB) {
+        return `
+          <tr class="${isDisabled ? "is-disabled" : ""}">
+            <td class="col-index">${index + 1}</td>
+            <td class="copy-cell">${renderCopyCell(agent.machine_id || "-")}</td>
+            <td class="copy-cell">${renderCopyCell(agent.owner || "-", { mono: false })}</td>
+            <td>${onlineText}</td>
+            <td>${escapeHtml(lastSeenText)}</td>
+            <td>${escapeHtml(agent.client_version || "-")}</td>
+            <td class="col-window-token">
+              <input
+                type="text"
+                class="mini-inline-input"
+                data-role="device-window-token"
+                value="${escapeHtml(preferredWindowToken)}"
+                placeholder="默认全部"
+              />
+            </td>
+            <td class="col-device-status">${statusText}</td>
+            <td class="col-actions">
+              ${detailButton}
+              ${saveWindowButton}
+              <button
+                class="action-btn ${isDisabled ? "" : "danger"}"
+                data-action="toggle-device"
+                data-machine-id="${escapeHtml(agent.machine_id || "")}"
+                data-disabled="${isDisabled ? "1" : "0"}"
+              >${toggleLabel}</button>
+              ${unbindButton}
+            </td>
+          </tr>
+        `;
+      }
       return `
         <tr class="${isDisabled ? "is-disabled" : ""}">
           <td class="col-index">${index + 1}</td>
@@ -1431,6 +1484,21 @@ async function handleDeviceTableClick(event) {
   const action = button.dataset.action;
   const machineId = button.dataset.machineId || "";
   if (!machineId) return;
+  if (action === "save-window-token") {
+    const row = button.closest("tr");
+    const input = row ? row.querySelector('input[data-role="device-window-token"]') : null;
+    const preferredWindowToken = input ? input.value.trim() : "";
+    const response = await api("/agent/window-token", {
+      method: "POST",
+      body: { machine_id: machineId, preferred_window_token: preferredWindowToken },
+    });
+    if (!response.ok) {
+      showAlert(translateErrorMessage(response.data?.error) || "操作失败");
+      return;
+    }
+    await refreshDevices();
+    return;
+  }
   if (action === "device-detail") {
     const owner = button.dataset.owner || "";
     await loadDeviceDetail(machineId, owner);
@@ -1490,17 +1558,104 @@ function normalizeCollectedGroupName(value) {
     .trim();
 }
 
+function isGenericCollectedGroupName(value) {
+  const normalized = String(value || "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .toLowerCase();
+  return !!normalized && GROUP_ACTION_LABELS.has(normalized);
+}
+
+function deriveCollectedGroupNameFromUrl(groupUrl, groupId = "") {
+  const normalizedUrl = String(groupUrl || "").trim();
+  const normalizedGroupId = String(groupId || "").trim();
+  if (!normalizedUrl && !normalizedGroupId) return "";
+  let slug = "";
+  if (normalizedUrl) {
+    try {
+      const url = new URL(normalizedUrl);
+      const parts = url.pathname.split("/").filter(Boolean);
+      if (parts.length >= 2 && parts[0] === "groups") {
+        slug = decodeURIComponent(parts[1] || "");
+      }
+    } catch (_error) {
+      slug = "";
+    }
+  }
+  slug = String(slug || "").trim();
+  if (slug) {
+    if (/^\d+$/.test(slug)) {
+      return `群组 ${slug}`;
+    }
+    return slug.replace(/[-_]+/g, " ").trim();
+  }
+  if (normalizedGroupId) {
+    return /^\d+$/.test(normalizedGroupId) ? `群组 ${normalizedGroupId}` : normalizedGroupId;
+  }
+  return "";
+}
+
+function resolveCollectedGroupName(group) {
+  const normalizedName = normalizeCollectedGroupName(group?.group_name);
+  if (normalizedName && !isGenericCollectedGroupName(normalizedName)) {
+    return normalizedName;
+  }
+  return deriveCollectedGroupNameFromUrl(group?.group_url, group?.group_id) || normalizedName;
+}
+
+function resolveWindowCollectStatus(windowItem) {
+  const status = String(windowItem?.last_collect_status || "").trim();
+  const message = String(windowItem?.last_collect_message || "").trim();
+  if (message) return message;
+  if (status === "facebook_not_logged_in") {
+    return "未登录 Facebook，当前窗口采集已跳过";
+  }
+  if (status === "session_open_failed") {
+    return "连接浏览器失败，当前窗口采集未执行";
+  }
+  if (status) {
+    return `采集失败：${status}`;
+  }
+  return "当前窗口暂无群组采集结果";
+}
+
+function getDevicePreferredWindowToken(owner, machineId) {
+  const normalizedOwner = String(owner || "").trim();
+  const normalizedMachineId = String(machineId || "").trim();
+  if (!normalizedMachineId) return "";
+  const matched = latestAgentRows.find((item) => {
+    const itemMachineId = String(item?.machine_id || "").trim();
+    const itemOwner = String(item?.owner || "").trim();
+    if (!itemMachineId || itemMachineId !== normalizedMachineId) return false;
+    if (!normalizedOwner) return true;
+    return itemOwner === normalizedOwner;
+  });
+  return String(matched?.preferred_window_token || "").trim();
+}
+
 function renderDeviceDetail(detail) {
   currentDeviceDetail = detail || null;
   const device = detail?.device || {};
-  const windows = Array.isArray(detail?.windows) ? detail.windows : [];
+  const allWindows = Array.isArray(detail?.windows) ? detail.windows : [];
   const owner = String(device.owner || detail?.owner || "").trim();
   const machineId = String(device.machine_id || detail?.machine_id || "").trim();
+  const preferredWindowToken =
+    String(device.preferred_window_token || "").trim() ||
+    getDevicePreferredWindowToken(owner, machineId);
+  const windows = preferredWindowToken
+    ? allWindows.filter(
+        (windowItem) => String(windowItem?.window_token || "").trim() === preferredWindowToken
+      )
+    : allWindows;
+  currentDeviceDetailVisibleWindowTokens = windows
+    .map((windowItem) => String(windowItem?.window_token || "").trim())
+    .filter(Boolean);
   if (deviceDetailMeta) {
     const parts = [
       `归属账号：${owner || "-"}`,
       `设备ID：${machineId || "-"}`,
       `配置名称：${device.name || "-"}`,
+      `窗口号：${preferredWindowToken || "全部"}`,
       `在线状态：${device.online ? "在线" : "离线"}`,
       `最后心跳：${device.last_seen ? formatTimestamp(device.last_seen) : "-"}`,
     ];
@@ -1514,12 +1669,26 @@ function renderDeviceDetail(detail) {
     const windowName = String(windowItem.window_name || "").trim() || "-";
     const groups = Array.isArray(windowItem.groups) ? windowItem.groups : [];
     if (!groups.length) {
+      sequence += 1;
+      const collectedAt = windowItem.last_collect_at || 0;
+      const collectedAtText = collectedAt ? formatTimestamp(collectedAt) : "-";
+      rows.push(`
+        <tr>
+          <td class="col-index">${sequence}</td>
+          <td>${escapeHtml(windowToken || "-")}</td>
+          <td>${escapeHtml(windowName)}</td>
+          <td>${escapeHtml(resolveWindowCollectStatus(windowItem))}</td>
+          <td>-</td>
+          <td>${escapeHtml(collectedAtText)}</td>
+          <td>-</td>
+        </tr>
+      `);
       return;
     }
     groups.forEach((group) => {
       sequence += 1;
       const groupId = String(group.group_id || "").trim();
-      const groupName = normalizeCollectedGroupName(group.group_name) || "-";
+      const groupName = resolveCollectedGroupName(group) || "-";
       const groupUrl = String(group.group_url || "").trim();
       const collectedAt = group.collected_at || windowItem.last_collect_at || 0;
       const collectedAtText = collectedAt ? formatTimestamp(collectedAt) : "-";
@@ -1549,7 +1718,11 @@ function renderDeviceDetail(detail) {
     });
   });
   if (!rows.length) {
-    setDeviceDetailEmpty("当前设备暂无窗口采集结果");
+    setDeviceDetailEmpty(
+      preferredWindowToken
+        ? `当前设备在窗口 ${preferredWindowToken} 暂无采集结果`
+        : "当前设备暂无窗口采集结果"
+    );
     return;
   }
   deviceDetailTableBody.innerHTML = rows.join("");
@@ -1578,7 +1751,21 @@ async function loadDeviceDetail(machineId, owner = "") {
 }
 
 function collectDeviceDetailSelections() {
-  const windows = Array.isArray(currentDeviceDetail?.windows) ? currentDeviceDetail.windows : [];
+  const visibleWindowTokens = new Set(
+    (Array.isArray(currentDeviceDetailVisibleWindowTokens)
+      ? currentDeviceDetailVisibleWindowTokens
+      : []
+    )
+      .map((value) => String(value || "").trim())
+      .filter(Boolean)
+  );
+  const windows = (Array.isArray(currentDeviceDetail?.windows) ? currentDeviceDetail.windows : []).filter(
+    (windowItem) => {
+      if (!visibleWindowTokens.size) return true;
+      const token = String(windowItem?.window_token || "").trim();
+      return token && visibleWindowTokens.has(token);
+    }
+  );
   const selectionMap = new Map();
   windows.forEach((windowItem) => {
     const windowToken = String(windowItem.window_token || "").trim();

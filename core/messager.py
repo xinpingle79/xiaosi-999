@@ -1054,116 +1054,36 @@ class Messager:
             )
             clicked_button, _, click_failure, _, _, _, _ = self._extract_member_card_button_result(click_result)
             if not clicked_button:
-                if click_failure:
-                    self._log_restriction_result(click_failure)
-                    self._dismiss_interfering_popups(context=f"成员 {name} 限制对话框收尾")
-                    self._close_visible_chat_windows()
-                    self._dismiss_member_hover_card()
-                    return self._restriction_to_dm_result(click_failure)
-                log.warning(f"发消息按钮点击失败，当前保留成员待下次重试: {name}")
+                click_failure = self._classify_message_button_click_failure(
+                    name=name,
+                    restriction=click_failure,
+                )
+                self._log_restriction_result(click_failure)
+                self._dismiss_interfering_popups(context=f"成员 {name} 限制对话框收尾")
+                self._close_visible_chat_windows()
                 self._dismiss_member_hover_card()
-                return self._build_dm_result("error", "message_button_click_failed")
+                return self._restriction_to_dm_result(click_failure)
             self._wait_if_paused()
 
-            chat_open_result = self._ensure_prechat_chat_open_result(
+            prechat_result = self._prepare_prechat_send_session(
                 button=button,
                 link=link,
                 target=target,
                 name=name,
                 expected_name=name,
-                timeout_ms=self._chat_open_timeout_ms("default"),
+                open_timeout_ms=self._chat_open_timeout_ms("default"),
                 action_timeout_ms=action_timeout,
+                ready_phase="default",
             )
-            (
-                chat_session,
-                restriction,
-                _,
-                chat_shell_seen,
-                popup_blocking,
-            ) = self._extract_chat_open_result(
-                chat_open_result
-            )
-            if restriction:
-                self._log_restriction_result(restriction)
-                self._dismiss_interfering_popups(context=f"成员 {name} 限制对话框收尾")
-                self._close_visible_chat_windows()
-                self._dismiss_member_hover_card()
-                self._log_limit_dialog_page_state(name)
-                return self._restriction_to_dm_result(restriction)
-            if not chat_session:
-                self._dismiss_member_hover_card()
-                return self._build_prechat_failure_dm_result(
-                    name=name,
-                    chat_session=None,
-                    shell_seen=chat_shell_seen,
-                    popup_blocking=popup_blocking,
-                )
+            chat_session, prechat_dm_result = self._extract_prechat_send_session_result(prechat_result)
+            if prechat_dm_result:
+                return prechat_dm_result
 
             delivery_state = "timeout"
             close_delivery_state = "timeout"
             closed_chat = 0
             closed_card = 0
             try:
-                ready_timeout_ms = self._editor_ready_timeout_ms("default")
-                ready_deadline = time.time() + ready_timeout_ms / 1000
-
-                def remaining_ready_ms():
-                    return max(int((ready_deadline - time.time()) * 1000), 0)
-
-                ready_state = self._ensure_ready_chat_session(
-                    name=name,
-                    chat_session=chat_session,
-                    expected_name=name,
-                    stage="聊天输入框恢复复核",
-                    timeout_ms=remaining_ready_ms(),
-                    ready_phase="default",
-                )
-                (
-                    recovered_session,
-                    recovery_restriction,
-                    _,
-                    recovery_shell_seen,
-                    ready_recovered,
-                    cleanup_recovered,
-                ) = self._extract_ready_chat_session_result(ready_state)
-                if recovery_restriction:
-                    self._log_restriction_result(recovery_restriction)
-                    self._dismiss_interfering_popups(context=f"成员 {name} 限制对话框收尾")
-                    self._close_visible_chat_windows()
-                    self._dismiss_member_hover_card()
-                    self._log_limit_dialog_page_state(name)
-                    return self._restriction_to_dm_result(recovery_restriction)
-                if ready_recovered:
-                    chat_session = recovered_session
-                    if cleanup_recovered:
-                        log.info(f"{self._prefix()}聊天输入框清理恢复后重新就绪: {name}")
-                else:
-                    chat_session = recovered_session
-                    return self._build_prechat_failure_dm_result(
-                        name=name,
-                        chat_session=chat_session,
-                        shell_seen=recovery_shell_seen,
-                    )
-
-                if self._check_stranger_limit_global():
-                    result = self._build_stranger_limit_result(
-                        name=name,
-                        stage="chat_open",
-                    )
-                    self._log_restriction_result(result)
-                    return self._restriction_to_dm_result(result)
-                restriction = self._detect_chat_restriction(
-                    expected_name=name,
-                    stage="聊天窗口发送前复核",
-                )
-                if restriction:
-                    self._log_restriction_result(restriction)
-                    self._dismiss_interfering_popups(context=f"成员 {name} 限制对话框收尾")
-                    self._close_visible_chat_windows()
-                    self._dismiss_member_hover_card()
-                    self._log_limit_dialog_page_state(name)
-                    return self._restriction_to_dm_result(restriction)
-
                 primary_text = self._normalize_text(greeting_text) or self._normalize_text(probe_text)
                 if not primary_text:
                     return self._build_dm_result("error", "empty_message")
@@ -2257,7 +2177,6 @@ class Messager:
         before_fingerprint = before_state["window_fingerprint"]
         fast_settle_ms = min(self.delivery_settle_ms, 350)
         commit_settle_ms = min(self.delivery_settle_ms, 220)
-        weak_commit_settle_ms = max(self.delivery_settle_ms, 650)
         deadline = time.time() + timeout_ms / 1000
         success_seen_at = None
         success_mode = None
@@ -2314,19 +2233,8 @@ class Messager:
                     chat_session=current_session,
                 )
             if not state["state_ready"]:
-                if editor_empty:
-                    current_mode = "unknown_state_editor_commit"
-                    if success_seen_at is None or success_mode != current_mode:
-                        success_seen_at = time.time()
-                        success_mode = current_mode
-                    elif (time.time() - success_seen_at) * 1000 >= weak_commit_settle_ms:
-                        return self._build_delivery_session_result(
-                            state="sent",
-                            chat_session=current_session,
-                        )
-                else:
-                    success_seen_at = None
-                    success_mode = None
+                success_seen_at = None
+                success_mode = None
                 remaining_seconds = max(deadline - time.time(), 0.0)
                 if remaining_seconds <= 0:
                     break
@@ -2366,16 +2274,6 @@ class Messager:
                     success_seen_at = time.time()
                     success_mode = current_mode
                 elif (time.time() - success_seen_at) * 1000 >= commit_settle_ms:
-                    return self._build_delivery_session_result(
-                        state="sent",
-                        chat_session=current_session,
-                    )
-            elif editor_empty:
-                current_mode = "weak_editor_commit"
-                if success_seen_at is None or success_mode != current_mode:
-                    success_seen_at = time.time()
-                    success_mode = current_mode
-                elif (time.time() - success_seen_at) * 1000 >= weak_commit_settle_ms:
                     return self._build_delivery_session_result(
                         state="sent",
                         chat_session=current_session,
@@ -3643,6 +3541,7 @@ class Messager:
             "member_hover_timeout": f"{self._prefix()}等待成员资料卡超时，当前轮次跳过当前成员: {normalized_name}",
             "message_button_timeout": f"{self._prefix()}等待“发消息”按钮超时，当前轮次跳过当前成员: {normalized_name}",
             "message_button_not_found": f"{self._prefix()}当前成员资料卡未识别到可用的发消息按钮，当前轮次跳过: {normalized_name}",
+            "message_button_click_failed": f"{self._prefix()}当前成员资料卡中的发消息按钮点击失败，当前轮次跳过: {normalized_name}",
         }
         return self._build_restriction_payload(
             "skip",
@@ -3671,6 +3570,11 @@ class Messager:
             return self._build_message_button_skip_result("message_button_timeout", name=name)
 
         return self._build_message_button_skip_result("message_button_not_found", name=name)
+
+    def _classify_message_button_click_failure(self, name, restriction=None):
+        if restriction:
+            return restriction
+        return self._build_message_button_skip_result("message_button_click_failed", name=name)
 
     def _build_dm_result(self, status, reason, alert_text=None):
         return self._build_restriction_payload(
@@ -3747,6 +3651,25 @@ class Messager:
             bool(payload.get("shell_seen")),
             bool(payload.get("ready")),
             bool(payload.get("recovered")),
+        )
+
+    def _build_prechat_send_session_result(self, chat_session=None, dm_result=None):
+        if chat_session:
+            editor, _ = self._extract_chat_session(chat_session)
+            if not editor:
+                chat_session = None
+        if dm_result:
+            chat_session = None
+        return {
+            "chat_session": chat_session,
+            "dm_result": dm_result,
+        }
+
+    def _extract_prechat_send_session_result(self, prechat_result):
+        payload = prechat_result if isinstance(prechat_result, dict) else {}
+        return (
+            payload.get("chat_session"),
+            payload.get("dm_result"),
         )
 
     def _build_postsend_chat_session_result(self, chat_session=None, state=None):
@@ -4193,15 +4116,26 @@ class Messager:
                 return None
             return session
 
-        ready_session = self._wait_for_ready_chat_session(
+        ready_state = self._wait_for_ready_chat_session(
             chat_session,
             expected_name=expected_name,
             timeout_ms=ready_timeout_ms,
+            stage=stage or "聊天输入框恢复复核",
         )
+        (
+            recovered_ready_session,
+            ready_restriction,
+            _,
+            ready_shell_seen,
+            ready_available,
+            _,
+        ) = self._extract_ready_chat_session_result(ready_state)
         return self._build_ready_chat_session_result(
-            chat_session=resolved_recovery_session(ready_session) or resolved_recovery_session(chat_session),
-            shell_seen=shell_seen,
-            ready=bool(ready_session),
+            chat_session=resolved_recovery_session(recovered_ready_session)
+            or resolved_recovery_session(chat_session),
+            restriction=ready_restriction,
+            shell_seen=shell_seen or ready_shell_seen,
+            ready=ready_available,
         )
 
     def _ensure_ready_chat_session(
@@ -4254,14 +4188,30 @@ class Messager:
         if deadline is not None:
             ready_timeout_ms = min(ready_timeout_ms, remaining_ready_ms())
         if ready_timeout_ms and ready_timeout_ms > 0:
-            ready_session = self._wait_for_ready_chat_session(
+            ready_state = self._wait_for_ready_chat_session(
                 chat_session,
                 expected_name=expected_name,
                 timeout_ms=ready_timeout_ms,
+                stage=stage or "聊天输入框等待中",
             )
-            if ready_session:
+            (
+                ready_session,
+                ready_restriction,
+                _,
+                ready_shell_seen,
+                ready_available,
+                _,
+            ) = self._extract_ready_chat_session_result(ready_state)
+            if ready_restriction:
                 return self._build_ready_chat_session_result(
-                    chat_session=ready_session,
+                    chat_session=resolved_ready_session(ready_session),
+                    restriction=ready_restriction,
+                    shell_seen=ready_shell_seen,
+                )
+            if ready_available:
+                return self._build_ready_chat_session_result(
+                    chat_session=resolved_ready_session(ready_session),
+                    shell_seen=ready_shell_seen,
                     ready=True,
                 )
 
@@ -4306,6 +4256,123 @@ class Messager:
         return self._build_ready_chat_session_result(
             chat_session=resolved_ready_session(recovered_session),
             shell_seen=recovery_shell_seen,
+        )
+
+    def _restriction_to_dm_result_with_cleanup(self, restriction, name="", cleanup_context=""):
+        if not restriction:
+            return None
+        normalized_name = str(name or "").strip()
+        self._log_restriction_result(restriction)
+        self._dismiss_interfering_popups(
+            context=cleanup_context or (
+                f"成员 {normalized_name} 限制对话框收尾"
+                if normalized_name
+                else "限制对话框收尾"
+            )
+        )
+        self._close_visible_chat_windows()
+        self._dismiss_member_hover_card()
+        if normalized_name:
+            self._log_limit_dialog_page_state(normalized_name)
+        return self._restriction_to_dm_result(restriction)
+
+    def _prepare_prechat_send_session(
+        self,
+        button,
+        link=None,
+        target=None,
+        name="",
+        expected_name=None,
+        open_timeout_ms=None,
+        action_timeout_ms=None,
+        ready_phase="default",
+    ):
+        open_result = self._ensure_prechat_chat_open_result(
+            button=button,
+            link=link,
+            target=target,
+            name=name,
+            expected_name=expected_name,
+            timeout_ms=open_timeout_ms,
+            action_timeout_ms=action_timeout_ms,
+        )
+        (
+            chat_session,
+            open_restriction,
+            _,
+            chat_shell_seen,
+            popup_blocking,
+        ) = self._extract_chat_open_result(open_result)
+        if open_restriction:
+            return self._build_prechat_send_session_result(
+                dm_result=self._restriction_to_dm_result_with_cleanup(
+                    open_restriction,
+                    name=name,
+                    cleanup_context=f"成员 {name} 限制对话框收尾",
+                )
+            )
+        if not chat_session:
+            return self._build_prechat_send_session_result(
+                dm_result=self._build_prechat_failure_dm_result(
+                    name=name,
+                    chat_session=chat_session,
+                    shell_seen=chat_shell_seen,
+                    popup_blocking=popup_blocking,
+                )
+            )
+
+        ready_state = self._ensure_ready_chat_session(
+            name=name,
+            chat_session=chat_session,
+            expected_name=expected_name,
+            stage="聊天窗口发送前复核",
+            timeout_ms=action_timeout_ms,
+            ready_phase=ready_phase,
+        )
+        (
+            ready_session,
+            ready_restriction,
+            _,
+            ready_shell_seen,
+            ready_available,
+            cleanup_recovered,
+        ) = self._extract_ready_chat_session_result(ready_state)
+        chat_session = ready_session or chat_session
+        if ready_restriction:
+            return self._build_prechat_send_session_result(
+                dm_result=self._restriction_to_dm_result_with_cleanup(
+                    ready_restriction,
+                    name=name,
+                    cleanup_context=f"成员 {name} 限制对话框收尾",
+                )
+            )
+        if not ready_available:
+            return self._build_prechat_send_session_result(
+                dm_result=self._build_prechat_failure_dm_result(
+                    name=name,
+                    chat_session=chat_session,
+                    shell_seen=chat_shell_seen or ready_shell_seen,
+                    popup_blocking=popup_blocking,
+                )
+            )
+        if cleanup_recovered:
+            log.info(f"{self._prefix()}聊天输入框恢复后重新就绪，继续执行发送: {name}")
+
+        prechat_restriction = self._detect_prechat_restriction_result(
+            name=name,
+            stage="聊天窗口发送前复核",
+        )
+        if prechat_restriction:
+            return self._build_prechat_send_session_result(
+                dm_result=self._restriction_to_dm_result_with_cleanup(
+                    prechat_restriction,
+                    name=name,
+                    cleanup_context=f"成员 {name} 限制对话框收尾",
+                )
+            )
+
+        return self._build_prechat_send_session_result(
+            chat_session=chat_session,
         )
 
     def _build_prechat_failure_dm_result(
@@ -5397,7 +5464,10 @@ class Messager:
         )
         return self._build_member_card_button_result(
             link=current_link,
-            failure=click_failure,
+            failure=self._classify_message_button_click_failure(
+                name=name,
+                restriction=click_failure,
+            ),
         )
 
     def _matches_any_text(self, text, tokens):
@@ -6052,7 +6122,7 @@ class Messager:
             return candidates[0][3]
         return None
 
-    def _wait_for_ready_chat_session(self, chat_session, expected_name=None, timeout_ms=None):
+    def _wait_for_ready_chat_session(self, chat_session, expected_name=None, timeout_ms=None, stage=""):
         if timeout_ms is None:
             timeout_ms = self._scale_ms(self.editor_ready_wait_timeout_ms, min_ms=1500)
         else:
@@ -6062,10 +6132,11 @@ class Messager:
                 timeout_ms = 0
             timeout_ms = max(timeout_ms, 0)
         if timeout_ms <= 0:
-            return None
+            return self._build_ready_chat_session_result(chat_session=chat_session)
         start = time.time()
         deadline = start + timeout_ms / 1000
         current_session = chat_session
+        shell_seen = False
         log.info(f"{self._prefix()}聊天输入框，等待输入框可见且可写...")
         while time.time() < deadline:
             paused_seconds = self._wait_if_paused()
@@ -6078,11 +6149,34 @@ class Messager:
             if editor and self._editor_ready(editor, timeout_ms=current_ready_check_ms):
                 waited = time.time() - start
                 log.info(f"{self._prefix()}聊天输入框等待成功，耗时 {waited:.1f} 秒。")
-                return self._build_chat_session(editor, close_button=close_button)
+                return self._build_ready_chat_session_result(
+                    chat_session=self._build_chat_session(editor, close_button=close_button),
+                    shell_seen=shell_seen,
+                    ready=True,
+                )
+
+            restriction = self._detect_chat_restriction(
+                expected_name=expected_name,
+                stage=stage or "聊天输入框等待中",
+            )
+            if restriction:
+                waited = time.time() - start
+                log.info(f"{self._prefix()}聊天输入框限制识别完成，耗时 {waited:.1f} 秒。")
+                return self._build_ready_chat_session_result(
+                    chat_session=current_session,
+                    restriction=restriction,
+                    shell_seen=shell_seen,
+                )
 
             remaining_ms = max(int((deadline - time.time()) * 1000), 0)
             if remaining_ms <= 0:
                 break
+            shell = self._locate_chat_shell(
+                expected_name=expected_name,
+                timeout_ms=remaining_ms,
+            )
+            if shell:
+                shell_seen = True
             refreshed_session = self._refresh_chat_session(
                 current_session,
                 expected_name=expected_name,
@@ -6096,7 +6190,11 @@ class Messager:
                 if self._editor_ready(refreshed_editor, timeout_ms=refreshed_ready_check_ms):
                     waited = time.time() - start
                     log.info(f"{self._prefix()}聊天输入框等待成功，耗时 {waited:.1f} 秒。")
-                    return current_session
+                    return self._build_ready_chat_session_result(
+                        chat_session=current_session,
+                        shell_seen=shell_seen,
+                        ready=True,
+                    )
 
             remaining_seconds = max(deadline - time.time(), 0.0)
             if remaining_seconds <= 0:
@@ -6104,7 +6202,10 @@ class Messager:
             self._sleep(min(0.12, remaining_seconds), min_seconds=0.0)
         waited = time.time() - start
         log.warning(f"{self._prefix()}聊天输入框等待超时，已等待 {waited:.1f} 秒，等待输入框可见且可写失败")
-        return None
+        return self._build_ready_chat_session_result(
+            chat_session=current_session,
+            shell_seen=shell_seen,
+        )
 
     def _editor_ready(self, editor, timeout_ms=None):
         if timeout_ms is None:
