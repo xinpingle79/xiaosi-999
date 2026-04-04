@@ -2505,6 +2505,30 @@ def ui_log(message):
         pass
 
 
+def _console_print(message):
+    text = str(message or "")
+    try:
+        print(text)
+        return
+    except UnicodeEncodeError:
+        pass
+    except Exception:
+        pass
+    stream = getattr(sys, "stdout", None)
+    if stream is None:
+        return
+    encoding = getattr(stream, "encoding", None) or "utf-8"
+    try:
+        stream.write(text.encode(encoding, errors="replace").decode(encoding, errors="replace") + "\n")
+        stream.flush()
+    except Exception:
+        try:
+            stream.write(text.encode("ascii", errors="replace").decode("ascii") + "\n")
+            stream.flush()
+        except Exception:
+            pass
+
+
 def show_ui_alert(title, message):
     if sys.platform.startswith("win"):
         try:
@@ -2514,7 +2538,7 @@ def show_ui_alert(title, message):
             return
         except Exception:
             pass
-    print(f"{title}: {message}")
+    _console_print(f"{title}: {message}")
 
 
 def start_server(host, port):
@@ -4545,7 +4569,7 @@ def main():
         return
 
     url = f"http://{host}:{port}"
-    print(f"本地管理后台已启动：{url}")
+    _console_print(f"本地管理后台已启动：{url}")
     ui_log(f"管理后台已启动：{url}")
     try:
         webbrowser.open(url)
